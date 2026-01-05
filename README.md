@@ -162,4 +162,5 @@ Only the first two columns are used by the app; additional `.fai` columns are ig
 ## License
 
 MIT License © 2026 Robert J. D. Reid
+
 Contributions welcome.
