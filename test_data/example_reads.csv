@@ -1,0 +1,9 @@
+chrom,pos,read_id,call,is_del
+S288C_chrI,1001,readA,A,0
+S288C_chrI,1005,readA,G,0
+S288C_chrI,1001,readB,A,0
+S288C_chrI,1005,readB,A,0
+S288C_chrI,1010,readB,G,0
+S288C_chrI,1001,readC,G,0
+S288C_chrI,1005,readC,G,0
+S288C_chrI,1010,readC,G,0

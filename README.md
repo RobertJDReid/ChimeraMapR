@@ -1,0 +1,164 @@
+# Chromosome Tracking (Shiny): Chimeric Read Analysis
+
+An interactive R Shiny app for identifying **chimeric long reads** by tracking allele changes across SNP positions, then summarizing where chimeric reads cluster along each chromosome using **LOESS smoothing** and **peak detection**.
+
+The app is designed for workflows where you:
+1) extract per-read base calls at known SNP sites (from aligned sequencing data),
+2) classify calls as REF/ALT per SNP,
+3) detect reads that switch allele state (candidate chimeras),
+4) count chimeric-read support at each SNP position, and
+5) call peaks as candidate recombination hotspots.
+
+---
+
+## Features
+
+- Upload three input files: **read-level SNP calls**, **SNP definition table**, and **chromosome sizes (FAI)**
+- Detect chimeric reads using allele runs and switches
+- Create an **overview per-chromosome plot** (counts + LOESS fit + peak markers)
+- Report a **peak summary table** (positions, boundaries, heights)
+- Generate **per-peak read-level plots** showing all reads intersecting the peak SNP
+- Export:
+  - overview plot (PNG)
+  - peaks table (CSV)
+  - chimeric read IDs (TXT)
+- Two LOESS span modes:
+  - **Fixed**: one span for all chromosomes
+  - **Dynamic**: per-chromosome span computed from SNP density + chromosome length
+
+---
+
+## Installation
+
+### Requirements
+- R (recommended: ≥ 4.1)
+- R packages:
+  - shiny
+  - tidyverse
+  - pracma
+
+Install packages in R:
+
+```r
+install.packages(c("shiny", "tidyverse", "pracma"))
+```
+
+> Note: the app also uses `scale_color_viridis_d()`. If needed:
+```r
+install.packages("viridis")
+```
+
+---
+
+## Running the app locally
+
+```bash
+R -e "shiny::runApp('app.R')"
+```
+
+or from within R:
+
+```r
+shiny::runApp("app.R")
+```
+
+---
+
+## Input files
+
+### 1) Read Data File (CSV / GZ)
+
+Required columns:
+- `chrom`
+- `pos`
+- `read_id`
+- `call`
+- `is_del`
+
+Rows with `is_del == 1` are filtered out.
+
+Typical origin: per-read SNP pileups generated from minimap2 + bcftools or pysam.
+
+### 2) SNP Data File (CSV)
+
+Required columns:
+- `CHROM`
+- `POS`
+- `REF`
+- `ALT`
+
+### 3) Chromosome Size File (FAI)
+
+Uses the first two columns:
+- chromosome name
+- chromosome length
+
+---
+
+## Example input files
+
+The following minimal examples illustrate the expected format of each input file.
+These are intentionally small and suitable for testing that the app runs end-to-end.
+
+### Example 1: Read-level SNP calls (`example_reads.csv`)
+
+```csv
+chrom,pos,read_id,call,is_del
+S288C_chrI,1001,readA,A,0
+S288C_chrI,1005,readA,G,0
+S288C_chrI,1001,readB,A,0
+S288C_chrI,1005,readB,A,0
+S288C_chrI,1010,readB,G,0
+S288C_chrI,1001,readC,G,0
+S288C_chrI,1005,readC,G,0
+S288C_chrI,1010,readC,G,0
+```
+
+In this example:
+- `readA` switches from REF→ALT across SNPs (chimeric)
+- `readB` switches from REF→ALT (chimeric)
+- `readC` is consistently ALT (not chimeric)
+
+### Example 2: SNP definition table (`example_snps.csv`)
+
+```csv
+CHROM,POS,REF,ALT
+S288C_chrI,1001,A,G
+S288C_chrI,1005,A,G
+S288C_chrI,1010,A,G
+```
+
+This table defines which bases are considered REF vs ALT at each SNP position.
+
+### Example 3: Chromosome sizes (`example_genome.fai`)
+
+```tsv
+S288C_chrI	230218
+```
+
+Only the first two columns are used by the app; additional `.fai` columns are ignored.
+
+---
+
+## Analysis overview
+
+- Allele classification per SNP (REF / ALT / OTHER)
+- Chimeric read detection using allele switches across SNP positions
+- SNP-wise chimeric read counts
+- LOESS smoothing per chromosome
+- Peak detection using `pracma::findpeaks`
+- Per-peak read visualization showing all reads spanning the peak SNP
+
+---
+
+## Outputs
+
+- Overview plot (PNG)
+- Peak table (CSV)
+- Chimeric read IDs (TXT)
+
+---
+
+## License
+
+Add a license appropriate for your use (MIT, BSD-3, GPL-3, etc.).
