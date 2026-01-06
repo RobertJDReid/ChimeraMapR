@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.1.0_
+_version 0.1.1_
 
 An interactive __R Shiny app__ for identifying **chimeric long reads** by tracking allele changes across SNP positions, then summarizing where chimeric reads cluster along each chromosome using LOESS smoothing and peak detection.
 

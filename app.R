@@ -56,7 +56,7 @@ ui <- fluidPage(
         condition = "input.span_method == 'dynamic'",
         numericInput("points_per_window", 
                      "Points Per Window:", 
-                     value = 20, 
+                     value = 25, 
                      min = 5, 
                      step = 1),
         helpText("Number of SNP points per LOESS window. Span calculated as: ppw × (1/SNP_density) / chr_length")
@@ -398,7 +398,7 @@ server <- function(input, output, session) {
                   group_by(read_id) %>%
                   ggplot(aes(x = pos/1000, y = 1, colour = IS_REF)) +
                   geom_vline(xintercept = peak_data$snp_pos/1000, 
-                            color = "green", linewidth = 3, alpha = 0.5) +
+                            color = "grey80", linewidth = 3, alpha = 0.5) +
                   geom_point() +
                   facet_grid(read_id ~ .) +
                   scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
