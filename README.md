@@ -43,7 +43,7 @@ install.packages(c("shiny", "tidyverse", "pracma"))
 
 ---
 
-## Running the app locally (reccomended)
+## Running the app locally (recommended)
 
 ```bash
 R -e "shiny::runApp('path/to/app.R',launch.browser = TRUE)"
