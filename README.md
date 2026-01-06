@@ -1,4 +1,9 @@
-# Chromosome Tracking (Shiny): Chimeric Read Analysis
+# ChimeraMapR: a shiny app
+
+_version 0.1.0_
+
+![ChimeraMapR](images/logo.png)
+
 
 An interactive R Shiny app for identifying **chimeric long reads** by tracking allele changes across SNP positions, then summarizing where chimeric reads cluster along each chromosome using **LOESS smoothing** and **peak detection**.
 
