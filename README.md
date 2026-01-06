@@ -1,37 +1,30 @@
-# ChimeraMapR: a shiny app
+![ChimeraMapR](images/logo.png)
 
 _version 0.1.0_
 
-![ChimeraMapR](images/logo.png)
+An interactive __R Shiny app__ for identifying **chimeric long reads** by tracking allele changes across SNP positions, then summarizing where chimeric reads cluster along each chromosome using LOESS smoothing and peak detection.
 
-
-An interactive R Shiny app for identifying **chimeric long reads** by tracking allele changes across SNP positions, then summarizing where chimeric reads cluster along each chromosome using **LOESS smoothing** and **peak detection**.
-
-The app is designed for workflows where you:
-1) extract per-read base calls at known SNP sites (from aligned sequencing data),
-2) classify calls as REF/ALT per SNP,
-3) detect reads that switch allele state (candidate chimeras),
-4) count chimeric-read support at each SNP position, and
-5) call peaks as candidate recombination hotspots.
+The app is designed for plotting per-read base calls at known SNP sites and is the
+plotting function for the [bamCol](https://github.com/RobertJDReid/bamCol) python app.
 
 ---
 
 ## Features
 
 - Upload three input files: **read-level SNP calls**, **SNP definition table**, and **chromosome sizes (FAI)**
-- Detect chimeric reads using allele runs and switches
-- Create an **overview per-chromosome plot** (counts + LOESS fit + peak markers)
-- Report a **peak summary table** (positions, boundaries, heights)
-- Generate **per-peak read-level plots** showing all reads intersecting the peak SNP
-- Export:
+- Detects chimeric reads where allele identify switches
+- Creates an **overview per-chromosome plot** (counts + LOESS fit + peak markers)
+- Reports a **peak summary table** (positions, boundaries, heights)
+- Generates **per-peak read-level plots** showing all reads intersecting the peak SNP
+- Exports:
   - overview plot (PNG)
   - peaks table (CSV)
   - chimeric read IDs (TXT)
-- Two LOESS span modes:
-  - **Fixed**: one span for all chromosomes
-  - **Dynamic**: per-chromosome span computed from SNP density + chromosome length
 
 ---
+
+Exported read IDs can be used to filter the original alignment file giving a bam file
+of just the chimeric reads for use as a genome browser track.
 
 ## Installation
 
@@ -48,17 +41,12 @@ Install packages in R:
 install.packages(c("shiny", "tidyverse", "pracma"))
 ```
 
-> Note: the app also uses `scale_color_viridis_d()`. If needed:
-```r
-install.packages("viridis")
-```
-
 ---
 
-## Running the app locally
+## Running the app locally (reccomended)
 
 ```bash
-R -e "shiny::runApp('app.R')"
+R -e "shiny::runApp('path/to/app.R',launch.browser = TRUE)"
 ```
 
 or from within R:
@@ -72,6 +60,9 @@ shiny::runApp("app.R")
 ## Input files
 
 ### 1) Read Data File (CSV / GZ)
+
+Output from `bamCol.py` is used for read data at SNP positions.
+gzipped files can be read without unzipping.
 
 Required columns:
 - `chrom`
