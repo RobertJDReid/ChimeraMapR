@@ -4,7 +4,7 @@ library(pracma)
 
 # Define UI
 ui <- fluidPage(
-  titlePanel("Chromosome Tracking: Chimeric Read Analysis"),
+  titlePanel("ChimeraMapR: Chimeric SNP Detection in Long-Read Sequencing Data"),
   
   sidebarLayout(
     sidebarPanel(
@@ -14,8 +14,8 @@ ui <- fluidPage(
                 accept = c(".csv", ".gz", ".csv.gz")),
       
       fileInput("snp_data_file", 
-                "SNP Data File (CSV):",
-                accept = c(".csv")),
+                "SNP Data File (CSV or VCF):",
+                accept = c(".csv", ".vcf", ".vcf.gz", ".gz")),
       
       fileInput("chr_size_file", 
                 "Chromosome Size File (FAI):",
@@ -117,7 +117,7 @@ ui <- fluidPage(
                  h5("Input Files:"),
                  tags$ul(
                    tags$li(strong("Read Data:"), "CSV file with SNP position information from BAM file (columns: chrom, pos, read_id, call, is_del, etc.)"),
-                   tags$li(strong("SNP Data:"), "CSV file with SNP positions (columns: CHROM, POS, REF, ALT)"),
+                   tags$li(strong("SNP Data:"), "CSV file with SNP positions (columns: CHROM, POS, REF, ALT), or a VCF file (plain or gzipped). Multi-allelic VCF sites are split into one row per ALT allele."),
                    tags$li(strong("Chromosome Size:"), "FAI index file with chromosome lengths")
                  ),
                  h5("LOESS Span Methods:"),
@@ -166,8 +166,40 @@ server <- function(input, output, session) {
       
       # Load SNP data
       incProgress(0.2, detail = "Loading SNP data")
-      allele_data <- read_csv(input$snp_data_file$datapath, show_col_types = FALSE) %>%
-        select(CHROM, POS, REF, ALT)
+      snp_path <- input$snp_data_file$datapath
+      snp_name <- tolower(input$snp_data_file$name)
+      
+      is_vcf <- grepl("\\.vcf(\\.gz)?$", snp_name)
+      
+      if (is_vcf) {
+        # gzfile() transparently handles both plain and gzipped files
+        con <- gzfile(snp_path, open = "r")
+        vcf_lines <- readLines(con)
+        close(con)
+        
+        # Drop ## meta-information lines, keep #CHROM header and data lines
+        vcf_lines <- vcf_lines[!grepl("^##", vcf_lines)]
+        
+        # Strip the leading # from the header line so read.table parses it correctly
+        vcf_lines[1] <- sub("^#", "", vcf_lines[1])
+        
+        # Parse into a data frame
+        vcf_raw <- read.table(text = paste(vcf_lines, collapse = "\n"),
+                              header = TRUE, sep = "\t",
+                              comment.char = "", check.names = FALSE,
+                              stringsAsFactors = FALSE)
+        
+        # Keep only SNP sites (single-base REF and ALT), split multi-allelic ALT
+        allele_data <- vcf_raw %>%
+          select(CHROM, POS, REF, ALT) %>%
+          filter(nchar(REF) == 1) %>%
+          separate_rows(ALT, sep = ",") %>%
+          filter(nchar(ALT) == 1) %>%
+          mutate(POS = as.integer(POS))
+      } else {
+        allele_data <- read_csv(snp_path, show_col_types = FALSE) %>%
+          select(CHROM, POS, REF, ALT)
+      }
       
       snp_number <- nrow(allele_data)
       
@@ -177,6 +209,9 @@ server <- function(input, output, session) {
                             col_names = c("CHROM", "length", "offset", "col1", "col2"),
                             show_col_types = FALSE) %>%
         select(CHROM, length)
+      
+      # Preserve FASTA order for use as factor levels throughout
+      fasta_chr_order <- chr_size$CHROM
       
       genome_size <- sum(chr_size$length)
       snp_density <- snp_number / genome_size
@@ -239,8 +274,7 @@ server <- function(input, output, session) {
         select(chrom = CHROM, pos = POS) %>%
         left_join(pos_count, by = c("chrom", "pos")) %>%
         replace_na(list(n = 0)) %>%
-        mutate(chrom = str_remove(chrom, "S288C_chr")) %>%
-        mutate(chrom = factor(chrom, levels = as.character(as.roman(1:16))))
+        mutate(chrom = factor(chrom, levels = fasta_chr_order))
       
       results$snp_coverage <- snp_coverage
       
@@ -249,8 +283,7 @@ server <- function(input, output, session) {
         incProgress(0.65, detail = "Calculating chromosome-specific spans")
         chr_span <- chr_size %>%
           filter(CHROM %in% chromosomes) %>%
-          mutate(chrom = str_remove(CHROM, "S288C_chr")) %>%
-          mutate(chrom = factor(chrom, levels = as.character(as.roman(1:16)))) %>%
+          mutate(chrom = factor(CHROM, levels = fasta_chr_order)) %>%
           mutate(lspan = input$points_per_window * (1/snp_density) / length) %>%
           select(chrom, lspan, length)
         
@@ -258,8 +291,7 @@ server <- function(input, output, session) {
       } else {
         chr_span <- chr_size %>%
           filter(CHROM %in% chromosomes) %>%
-          mutate(chrom = str_remove(CHROM, "S288C_chr")) %>%
-          mutate(chrom = factor(chrom, levels = as.character(as.roman(1:16)))) %>%
+          mutate(chrom = factor(CHROM, levels = fasta_chr_order)) %>%
           mutate(lspan = input$loess_span) %>%
           select(chrom, lspan, length)
         
@@ -336,12 +368,13 @@ server <- function(input, output, session) {
         xlab("Position (Kbp)") +
         ylab("Number of Reads") +
         ylim(0, max(30, max(snp_coverage$n))) +
-        facet_grid(chrom ~ .) +
+        facet_grid(chrom ~ ., switch = "y", scales = "free_x") +
         theme_bw() +
         theme(
           panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
           panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
-          strip.background = element_blank()
+          strip.background = element_blank(),
+          strip.placement = "outside"
         )
       
       # Add peak lines if any peaks detected
@@ -358,12 +391,11 @@ server <- function(input, output, session) {
       # NEW: Generate individual peak plots
       incProgress(0.9, detail = "Creating individual peak plots")
       if(nrow(snp_peaks) > 0) {
-        # First, prepare a mapping of clean chromosome names to original names
+        # First, prepare a mapping of chromosome names (now identical since we keep raw names)
         chr_mapping <- snp_coverage %>%
           select(chrom) %>%
           distinct() %>%
-          mutate(original_chrom = chromosomes[match(as.character(chrom), 
-                                                     str_remove(chromosomes, "S288C_chr"))])
+          mutate(original_chrom = as.character(chrom))
         
         # Create plots grouped by chromosome
         peak_plots_list <- snp_peaks %>%
@@ -376,7 +408,6 @@ server <- function(input, output, session) {
             
             # Get the original chromosome name from the mapping
             original_chr <- chr_peaks$original_chrom[1]
-            clean_chr <- str_remove(original_chr, "S288C_chr")
             
             # Create a plot for each peak in this chromosome
             peak_plots <- map(1:nrow(chr_peaks), function(i) {
@@ -450,7 +481,7 @@ server <- function(input, output, session) {
       theme(
         axis.text = element_text(size = 12),
         axis.title = element_text(size = 15),
-        strip.text = element_text(size = 15),
+        strip.text.y = element_text(size = 9, angle = 0, hjust = 0, face = "bold"),
       )
   })
   
