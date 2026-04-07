@@ -196,30 +196,42 @@ server <- function(input, output, session) {
       is_vcf <- grepl("\\.vcf(\\.gz)?$", snp_name)
       
       if (is_vcf) {
-        # gzfile() transparently handles both plain and gzipped files
-        con <- gzfile(snp_path, open = "r")
-        vcf_lines <- readLines(con)
-        close(con)
-        
-        # Drop ## meta-information lines, keep #CHROM header and data lines
-        vcf_lines <- vcf_lines[!grepl("^##", vcf_lines)]
-        
-        # Strip the leading # from the header line so read.table parses it correctly
-        vcf_lines[1] <- sub("^#", "", vcf_lines[1])
-        
-        # Parse into a data frame
-        vcf_raw <- read.table(text = paste(vcf_lines, collapse = "\n"),
-                              header = TRUE, sep = "\t",
-                              comment.char = "", check.names = FALSE,
-                              stringsAsFactors = FALSE)
-        
-        # Keep only SNP sites (single-base REF and ALT), split multi-allelic ALT
-        allele_data <- vcf_raw %>%
-          select(CHROM, POS, REF, ALT) %>%
-          filter(nchar(REF) == 1) %>%
-          separate_rows(ALT, sep = ",") %>%
-          filter(nchar(ALT) == 1) %>%
-          mutate(POS = as.integer(POS))
+
+        allele_data = read_delim(snp_path, 
+          delim = "\t", escape_double = FALSE, 
+          col_names = c("CHROM","POS","ID","REF","ALT","QUAL",
+                        "FILTER","INFO","FORMAT","DET"),
+          comment = "#", trim_ws = TRUE) |>
+        select(CHROM, POS, REF, ALT, QUAL) |>
+        filter(nchar(REF) == 1) |>
+        filter(nchar(ALT) == 1) |>
+        mutate(POS = as.integer(POS))
+
+      #  # gzfile() transparently handles both plain and gzipped files
+      #  con <- gzfile(snp_path, open = "r")
+      #  vcf_lines <- readLines(con)
+      #  close(con)
+      #  
+      #  # Drop ## meta-information lines, keep #CHROM header and data lines
+      #  vcf_lines <- vcf_lines[!grepl("^##", vcf_lines)]
+      #  
+      #  # Strip the leading # from the header line so read.table parses it correctly
+      #  vcf_lines[1] <- sub("^#", "", vcf_lines[1])
+      #  
+      #  # Parse into a data frame
+      #  vcf_raw <- read.table(text = paste(vcf_lines, collapse = "\n"),
+      #                        header = TRUE, sep = "\t",
+      #                        comment.char = "", check.names = FALSE,
+      #                        stringsAsFactors = FALSE)
+      #  
+      #  # Keep only SNP sites (single-base REF and ALT), split multi-allelic ALT
+      #  allele_data <- vcf_raw %>%
+      #    select(CHROM, POS, REF, ALT) %>%
+      #    filter(nchar(REF) == 1) %>%
+      #    separate_rows(ALT, sep = ",") %>%
+      #    filter(nchar(ALT) == 1) %>%
+      #    mutate(POS = as.integer(POS))
+
       } else {
         allele_data <- read_csv(snp_path, show_col_types = FALSE) %>%
           select(CHROM, POS, REF, ALT)
