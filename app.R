@@ -28,6 +28,27 @@ ui <- fluidPage(
                 "Sample Name:", 
                 value = "Sample_01"),
       
+      numericInput("mapq_cutoff",
+                   "MAPQ Cutoff:",
+                   value = 20,
+                   min = 0,
+                   step = 1),
+      helpText("Minimum mapping quality score; reads below this are excluded"),
+      
+      numericInput("baseq_cutoff",
+                   "Base Quality Cutoff:",
+                   value = 10,
+                   min = 0,
+                   step = 1),
+      helpText("Minimum base quality score at SNP position"),
+      
+      numericInput("min_run",
+                   "Minimum Run Length:",
+                   value = 4,
+                   min = 1,
+                   step = 1),
+      helpText("Minimum consecutive same-allele calls to count as a run; increase for noisier data"),
+      
       numericInput("min_peak_height", 
                    "Minimum Peak Height:", 
                    value = 5, 
@@ -138,9 +159,12 @@ server <- function(input, output, session) {
   # Set max upload size to 100 MB
   options(shiny.maxRequestSize = 100*1024^2)
   
+  # These are now set via UI inputs: input$mapq_cutoff, input$min_run, input$baseq_cutoff
+
+
   # Reactive values to store analysis results
   results <- reactiveValues(
-    filt_read = NULL,
+    rt_df = NULL,
     snp_coverage = NULL,
     peaks_genomic = NULL,
     snp_peaks = NULL,  # NEW: Store SNP peaks for individual plots
@@ -219,6 +243,8 @@ server <- function(input, output, session) {
       # Process read data
       incProgress(0.4, detail = "Classifying alleles")
       full_read <- read_data %>%
+        filter(mapq >= input$mapq_cutoff) |>           # --- mapq filter applied here
+        filter(base_qual >= input$baseq_cutoff) |>     # --- baseq filter applied here
         filter(is_del == 0) %>%
         left_join(allele_data, by = join_by(chrom == CHROM, pos == POS)) %>%
         mutate(IS_REF = call == REF,
@@ -226,47 +252,38 @@ server <- function(input, output, session) {
                  call == REF ~ "REF",
                  call == ALT ~ "ALT",
                  .default = "OTHER"
-               ))
+               )) |>
+        filter(ALLELE != "OTHER") |>            # --- filter out "other" alleles
+        arrange(read_id,pos)
       
-      # Split data by read_id
+      # refactor to avoid splitting into list
+
+      rle_helper = function (x) {
+        r  <- rle(x)[[1]]                       # run lengths
+        rn <- rep(r, r)                         # expand to per-position run lengths
+        return(rn)
+      }
+
       incProgress(0.5, detail = "Detecting chimeric reads")
-      read_list <- split(full_read, full_read$read_id)
-      
-      # Apply run-length encoding
-      read_alleles <- map(read_list, `[[`, "ALLELE")
-      read_rle <- map(read_alleles, function(x) {
-        r <- rle(x)[[1]]
-        rep(r, r)
-      })
-      
-      reads_trim <- map2(read_alleles, read_rle, function(l, r) {
-        l[which(r != 1)]
-      })
-      
-      reads_f <- map(reads_trim, function(x) {
-        length(rle(x)[[1]]) > 1
-      })
-      
-      # Filter for reads with changes
-      new_change_list <- map(read_list, function(x) {
-        sum(x$IS_REF) > 1 & sum(!x$IS_REF) > 1
-      })
-      
-      ch_ch_changes <- reads_f[which(reads_f == TRUE)]
-      
-      # Filter read data
-      filt_read <- full_read %>%
-        filter(read_id %in% names(ch_ch_changes)) %>%
-        select(-is_del, -is_refskip) %>%
-        select(chrom, pos, read_id, call, IS_REF, everything()) %>%
-        arrange(read_id, pos)
-      
-      results$filt_read <- filt_read
-      results$chimeric_read_ids <- names(ch_ch_changes)
+
+      rt_df = full_read |>
+        group_by(read_id) |>
+        mutate(
+          runs     = rle_helper(ALLELE),
+        ) |>
+        filter(runs > input$min_run) |> # filter minimum run length
+        mutate(
+          new_runs = rle_helper(ALLELE) # redo RLE after denoising
+        ) |>
+        filter(nrow(pick(everything())) > input$min_run, new_runs[1] != n()) |>
+        ungroup()
+
+      results$rt_df <- rt_df
+      results$chimeric_read_ids <- unique(rt_df$read_id)
       
       # Count SNP positions
       incProgress(0.6, detail = "Counting SNP coverage")
-      pos_count <- filt_read %>%
+      pos_count <- rt_df %>%
         count(chrom, pos)
       
       snp_coverage <- allele_data %>%
@@ -414,14 +431,14 @@ server <- function(input, output, session) {
               peak_data <- chr_peaks[i, ]
               
               # Find all reads touching this peak
-              read_ids <- filt_read %>%
+              read_ids <- rt_df %>%
                 filter(chrom == original_chr,
                        pos == peak_data$snp_pos) %>%
                 pull(read_id)
               
               # Filter for reads touching this peak
               if(length(read_ids) > 0) {
-                pltdf <- filt_read %>%
+                pltdf <- rt_df %>%
                   filter(read_id %in% read_ids,
                          chrom == original_chr)
                 
@@ -578,9 +595,9 @@ server <- function(input, output, session) {
   
   # Output: Summary statistics
   output$summary_stats <- renderText({
-    req(results$filt_read, results$snp_coverage, results$peaks_genomic)
+    req(results$rt_df, results$snp_coverage, results$peaks_genomic)
     
-    n_chimeric_reads <- length(unique(results$filt_read$read_id))
+    n_chimeric_reads <- length(unique(results$rt_df$read_id))
     n_chromosomes <- length(unique(results$snp_coverage$chrom))
     n_peaks <- nrow(results$peaks_genomic)
     total_snps <- nrow(results$snp_coverage)
@@ -601,6 +618,9 @@ server <- function(input, output, session) {
       round(100 * covered_snps/total_snps, 1), "%)\n",
       "Peaks Detected: ", n_peaks, "\n\n",
       "Analysis Parameters:\n",
+      "  MAPQ Cutoff: ", input$mapq_cutoff, "\n",
+      "  Base Quality Cutoff: ", input$baseq_cutoff, "\n",
+      "  Min Run Length: ", input$min_run, "\n",
       "  Min Peak Height: ", input$min_peak_height, "\n",
       "  LOESS Span Method: ", span_method_text
     )
