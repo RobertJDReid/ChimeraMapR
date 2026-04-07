@@ -34,13 +34,14 @@ Exported read IDs can be used to filter the original alignment file, producing a
 - R (recommended: ≥ 4.1)
 - R packages:
   - shiny
-  - tidyverse
+  - data.table
+  - ggplot2
   - pracma
 
 Install packages in R:
 
 ```r
-install.packages(c("shiny", "tidyverse", "pracma"))
+install.packages(c("shiny", "data.table", "ggplot2", "pracma"))
 ```
 
 ---
@@ -73,6 +74,8 @@ Required columns:
 | `pos` | Position on chromosome |
 | `read_id` | Unique read identifier |
 | `call` | Base call at this position |
+| `mapq` | Read mapping quality score |
+| `base_qual` | Base quality score at this position |
 | `is_del` | Deletion flag (rows with `is_del == 1` are filtered out) |
 
 Typical origin: per-read SNP pileups generated from minimap2 + bcftools or pysam.
@@ -96,7 +99,7 @@ A plain CSV with the following required columns:
 
 #### Option B: VCF (plain or gzipped)
 
-Standard VCF format (v4.x) is accepted, including gzipped `.vcf.gz` files. The app automatically detects the format from the file extension. Only biallelic SNP sites are used — indels and multi-allelic sites with non-single-base ALT alleles are silently skipped. Multi-allelic SNP sites (multiple comma-separated ALT alleles) are split into one row per ALT allele.
+Standard VCF format (v4.x) is accepted, including gzipped `.vcf.gz` files. The app automatically detects the format from the file extension. Only biallelic SNP sites are used — indels, multi-allelic sites, and any site where REF or ALT is not a single nucleotide are silently skipped.
 
 VCF files can be generated directly from bcftools:
 
@@ -125,6 +128,33 @@ samtools faidx reference.fasta
 
 ---
 
+## Analysis parameters
+
+All parameters are set in the sidebar panel before running the analysis.
+
+| Parameter | Default | Description |
+|---|---|---|
+| **Sample Name** | `Sample_01` | Label used in exported file names |
+| **MAPQ Cutoff** | `20` | Minimum mapping quality score; reads below this threshold are excluded |
+| **Base Quality Cutoff** | `10` | Minimum base quality score at the SNP position; calls below this are excluded |
+| **Minimum Run Length** | `4` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
+| **Minimum Peak Height** | `5` | Minimum chimeric read count for a LOESS peak to be reported. A value of approximately half the median read depth is recommended |
+| **LOESS Span Method** | `Dynamic` | How the LOESS smoothing bandwidth is determined — either a single fixed value applied to all chromosomes, or calculated per chromosome based on length and SNP density (see below) |
+
+### LOESS span methods
+
+**Fixed span** — a single user-supplied span value (range 0.001–1.0) is used for every chromosome. Lower values give tighter smoothing and are typically appropriate for lower-coverage datasets (a starting value of `0.015` is suggested).
+
+**Dynamic span (default)** — the span for each chromosome is calculated automatically as:
+
+```
+span = points_per_window × (1 / SNP_density) / chromosome_length
+```
+
+where `SNP_density` is the total number of SNPs divided by the total genome size. The **Points Per Window** parameter (default `25`) controls how many SNP positions fall within each LOESS window, allowing the smoothing bandwidth to scale with both chromosome length and SNP density. This method is recommended for most datasets.
+
+---
+
 ## Example input files
 
 The following minimal examples illustrate the expected format of each input file. These are intentionally small and suitable for testing that the app runs end-to-end.
@@ -132,15 +162,15 @@ The following minimal examples illustrate the expected format of each input file
 ### Example 1: Read-level SNP calls (`example_reads.csv`)
 
 ```csv
-chrom,pos,read_id,call,is_del
-S288C_chrI,1001,readA,A,0
-S288C_chrI,1005,readA,G,0
-S288C_chrI,1001,readB,A,0
-S288C_chrI,1005,readB,A,0
-S288C_chrI,1010,readB,G,0
-S288C_chrI,1001,readC,G,0
-S288C_chrI,1005,readC,G,0
-S288C_chrI,1010,readC,G,0
+chrom,pos,read_id,call,mapq,base_qual,is_del
+S288C_chrI,1001,readA,A,60,35,0
+S288C_chrI,1005,readA,G,60,34,0
+S288C_chrI,1001,readB,A,55,30,0
+S288C_chrI,1005,readB,A,55,31,0
+S288C_chrI,1010,readB,G,55,33,0
+S288C_chrI,1001,readC,G,48,29,0
+S288C_chrI,1005,readC,G,48,32,0
+S288C_chrI,1010,readC,G,48,30,0
 ```
 
 In this example:
@@ -181,11 +211,11 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 
 ## Analysis overview
 
-1. **Allele classification** — each base call is classified as REF, ALT, or OTHER by joining to the SNP definition file
+1. **Allele classification** — each base call is classified as REF, ALT, or OTHER by joining to the SNP definition file. Calls are first filtered by MAPQ and base quality cutoffs; deletions are also excluded
 2. **Chimeric read detection** — run-length encoding identifies reads with sustained allele switches across consecutive SNP positions
 3. **SNP-wise coverage** — chimeric reads are counted at each SNP position across all chromosomes
 4. **LOESS smoothing** — a LOESS curve is fit per chromosome, with span calculated either as a fixed value or dynamically based on chromosome length and SNP density
-5. **Peak detection** — `pracma::findpeaks` identifies peaks in the smoothed signal above a user-defined minimum height
+5. **Peak detection** — `pracma::findpeaks` identifies peaks in the smoothed signal above the user-defined minimum height
 6. **Visualization** — per-peak plots show all chimeric reads spanning each peak SNP, coloured by REF (yellow) vs ALT (purple) allele
 
 ---

@@ -1,8 +1,11 @@
 library(shiny)
-library(tidyverse)
+library(data.table)
 library(pracma)
+library(ggplot2)
 
-# Define UI
+# ─────────────────────────────────────────────
+#                   UI
+# ─────────────────────────────────────────────
 ui <- fluidPage(
   titlePanel("ChimeraMapR: Chimeric SNP Detection in Long-Read Sequencing Data"),
   
@@ -152,246 +155,267 @@ ui <- fluidPage(
     )
   )
 )
-
-# Define server logic
+# ─────────────────────────────────────────────
+#               SERVER
+# ─────────────────────────────────────────────
 server <- function(input, output, session) {
 
   # Set max upload size to 100 MB
-  options(shiny.maxRequestSize = 100*1024^2)
-  
-  # These are now set via UI inputs: input$mapq_cutoff, input$min_run, input$baseq_cutoff
-
+  options(shiny.maxRequestSize = 100 * 1024^2)
 
   # Reactive values to store analysis results
   results <- reactiveValues(
-    rt_df = NULL,
-    snp_coverage = NULL,
-    peaks_genomic = NULL,
-    snp_peaks = NULL,  # NEW: Store SNP peaks for individual plots
-    chromosome_fits = NULL,
-    chr_span = NULL,
-    plot = NULL,
+    rt_df            = NULL,
+    snp_coverage     = NULL,
+    peaks_genomic    = NULL,
+    snp_peaks        = NULL,
+    chromosome_fits  = NULL,
+    chr_span         = NULL,
+    plot             = NULL,
     chimeric_read_ids = NULL,
-    peak_plots_by_chr = NULL  # NEW: Store individual peak plots
+    peak_plots_by_chr = NULL
   )
-  
-  # Main analysis function
+
+  # ── RLE helper (unchanged – operates on plain vectors) ──────────────────────
+  rle_helper <- function(x) {
+    r  <- rle(x)[[1]]   # run lengths
+    rn <- rep(r, r)     # expand to per-position run lengths
+    return(rn)
+  }
+
+  # ── Main analysis ────────────────────────────────────────────────────────────
   observeEvent(input$run_analysis, {
-    
-    # Validate inputs
+
     req(input$read_data_file, input$snp_data_file, input$chr_size_file)
-    
-    withProgress(message = 'Processing data...', value = 0, {
-      
-      # Load read data
+
+    withProgress(message = "Processing data...", value = 0, {
+
+      # ── 1. Load read data ───────────────────────────────────────────────────
       incProgress(0.1, detail = "Loading read data")
-      read_data <- read_csv(input$read_data_file$datapath, show_col_types = FALSE)
+      read_data  <- fread(input$read_data_file$datapath)
       chromosomes <- unique(read_data$chrom)
-      
-      # Load SNP data
+
+      # ── 2. Load SNP / allele data ───────────────────────────────────────────
       incProgress(0.2, detail = "Loading SNP data")
       snp_path <- input$snp_data_file$datapath
       snp_name <- tolower(input$snp_data_file$name)
-      
-      is_vcf <- grepl("\\.vcf(\\.gz)?$", snp_name)
-      
+      is_vcf   <- grepl("\\.vcf(\\.gz)?$", snp_name)
+
       if (is_vcf) {
-
-        allele_data = read_delim(snp_path, 
-          delim = "\t", escape_double = FALSE, 
-          col_names = c("CHROM","POS","ID","REF","ALT","QUAL",
-                        "FILTER","INFO","FORMAT","DET"),
-          comment = "#", trim_ws = TRUE) |>
-        select(CHROM, POS, REF, ALT, QUAL) |>
-        filter(nchar(REF) == 1) |>
-        filter(nchar(ALT) == 1) |>
-        mutate(POS = as.integer(POS))
-
-      #  # gzfile() transparently handles both plain and gzipped files
-      #  con <- gzfile(snp_path, open = "r")
-      #  vcf_lines <- readLines(con)
-      #  close(con)
-      #  
-      #  # Drop ## meta-information lines, keep #CHROM header and data lines
-      #  vcf_lines <- vcf_lines[!grepl("^##", vcf_lines)]
-      #  
-      #  # Strip the leading # from the header line so read.table parses it correctly
-      #  vcf_lines[1] <- sub("^#", "", vcf_lines[1])
-      #  
-      #  # Parse into a data frame
-      #  vcf_raw <- read.table(text = paste(vcf_lines, collapse = "\n"),
-      #                        header = TRUE, sep = "\t",
-      #                        comment.char = "", check.names = FALSE,
-      #                        stringsAsFactors = FALSE)
-      #  
-      #  # Keep only SNP sites (single-base REF and ALT), split multi-allelic ALT
-      #  allele_data <- vcf_raw %>%
-      #    select(CHROM, POS, REF, ALT) %>%
-      #    filter(nchar(REF) == 1) %>%
-      #    separate_rows(ALT, sep = ",") %>%
-      #    filter(nchar(ALT) == 1) %>%
-      #    mutate(POS = as.integer(POS))
-
-      } else {
-        allele_data <- read_csv(snp_path, show_col_types = FALSE) %>%
-          select(CHROM, POS, REF, ALT)
-      }
-      
-      snp_number <- nrow(allele_data)
-      
-      # Load chromosome size data
-      incProgress(0.3, detail = "Loading chromosome sizes")
-      chr_size <- read_table(input$chr_size_file$datapath,
-                            col_names = c("CHROM", "length", "offset", "col1", "col2"),
-                            show_col_types = FALSE) %>%
-        select(CHROM, length)
-      
-      # Preserve FASTA order for use as factor levels throughout
-      fasta_chr_order <- chr_size$CHROM
-      
-      genome_size <- sum(chr_size$length)
-      snp_density <- snp_number / genome_size
-      
-      # Process read data
-      incProgress(0.4, detail = "Classifying alleles")
-      full_read <- read_data %>%
-        filter(mapq >= input$mapq_cutoff) |>           # --- mapq filter applied here
-        filter(base_qual >= input$baseq_cutoff) |>     # --- baseq filter applied here
-        filter(is_del == 0) %>%
-        left_join(allele_data, by = join_by(chrom == CHROM, pos == POS)) %>%
-        mutate(IS_REF = call == REF,
-               ALLELE = case_when(
-                 call == REF ~ "REF",
-                 call == ALT ~ "ALT",
-                 .default = "OTHER"
-               )) |>
-        filter(ALLELE != "OTHER") |>            # --- filter out "other" alleles
-        arrange(read_id,pos)
-      
-      # refactor to avoid splitting into list
-
-      rle_helper = function (x) {
-        r  <- rle(x)[[1]]                       # run lengths
-        rn <- rep(r, r)                         # expand to per-position run lengths
-        return(rn)
-      }
-
-      incProgress(0.5, detail = "Detecting chimeric reads")
-
-      rt_df = full_read |>
-        group_by(read_id) |>
-        mutate(
-          runs     = rle_helper(ALLELE),
-        ) |>
-        filter(runs > input$min_run) |> # filter minimum run length
-        mutate(
-          new_runs = rle_helper(ALLELE) # redo RLE after denoising
-        ) |>
-        filter(nrow(pick(everything())) > input$min_run, new_runs[1] != n()) |>
-        ungroup()
-
-      results$rt_df <- rt_df
-      results$chimeric_read_ids <- unique(rt_df$read_id)
-      
-      # Count SNP positions
-      incProgress(0.6, detail = "Counting SNP coverage")
-      pos_count <- rt_df %>%
-        count(chrom, pos)
-      
-      snp_coverage <- allele_data %>%
-        filter(CHROM %in% chromosomes) %>%
-        select(chrom = CHROM, pos = POS) %>%
-        left_join(pos_count, by = c("chrom", "pos")) %>%
-        replace_na(list(n = 0)) %>%
-        mutate(chrom = factor(chrom, levels = fasta_chr_order))
-      
-      results$snp_coverage <- snp_coverage
-      
-      # Calculate chromosome-specific spans
-      if (input$span_method == "dynamic") {
-        incProgress(0.65, detail = "Calculating chromosome-specific spans")
-        chr_span <- chr_size %>%
-          filter(CHROM %in% chromosomes) %>%
-          mutate(chrom = factor(CHROM, levels = fasta_chr_order)) %>%
-          mutate(lspan = input$points_per_window * (1/snp_density) / length) %>%
-          select(chrom, lspan, length)
-        
-        results$chr_span <- chr_span
-      } else {
-        chr_span <- chr_size %>%
-          filter(CHROM %in% chromosomes) %>%
-          mutate(chrom = factor(CHROM, levels = fasta_chr_order)) %>%
-          mutate(lspan = input$loess_span) %>%
-          select(chrom, lspan, length)
-        
-        results$chr_span <- chr_span
-      }
-      
-      # Fit LOESS models by chromosome
-      incProgress(0.7, detail = "Fitting models and finding peaks")
-      snp_by_chromosome <- snp_coverage %>%
-        group_by(chrom) %>%
-        nest(.key = "snps") %>%
-        left_join(chr_span, by = "chrom")
-      
-      model_by_chromosome <- snp_by_chromosome %>%
-        mutate(
-          model = map2(snps, lspan, ~loess(n ~ pos, data = .x, span = .y)),
-          uniform_pos = map(snps, ~seq(min(.x$pos), max(.x$pos), by = 200)),
-          uniform_fit = map2(model, uniform_pos, predict),
-          peaks = map(uniform_fit, pracma::findpeaks, 
-                     minpeakheight = input$min_peak_height, 
-                     threshold = 2),
-          peaks = map(peaks, function(x) {
-            if(is.null(x)) return(tibble())
-            as_tibble(x, .name_repair = "unique")
-          })
+        # fread skips comment lines that start with "#" via skip="#"
+        allele_data <- fread(
+          snp_path,
+          sep       = "\t",
+          skip      = "#",
+          col.names = c("CHROM","POS","ID","REF","ALT","QUAL",
+                        "FILTER","INFO","FORMAT","DET")
         )
-      
-      # Extract peak positions
-      peaks_genomic <- model_by_chromosome %>%
-        select(chrom, uniform_pos, peaks) %>%
-        unnest(peaks) %>%
-        rename("peak_height" = `...1`, "peak_index" = `...2`, 
-               "peak_start" = `...3`, "peak_end" = `...4`) %>%
-        mutate(
-          peak_pos = map2_dbl(uniform_pos, peak_index, ~ .x[.y]),
-          peak_start = map2_dbl(uniform_pos, peak_start, ~ .x[.y]),
-          peak_end = map2_dbl(uniform_pos, peak_end, ~ .x[.y])
-        ) %>%
-        select(-uniform_pos)
-      
-      # Map peaks to actual SNP positions
-      snp_peaks <- peaks_genomic %>%
-        group_by(chrom) %>%
-        nest(.key = "peaks") %>%
-        left_join(select(snp_by_chromosome, chrom, snps), by = "chrom") %>%
-        unnest(peaks) %>%
-        mutate(
-          snp_pos = map2_dbl(peak_pos, snps, ~{
-            i <- which.min(abs(.y$pos - .x))
-            .y$pos[i]
-          })
-        ) %>%
-        select(-snps)
-      
+        # Keep only single-nucleotide variants and required columns
+        allele_data <- allele_data[nchar(REF) == 1 & nchar(ALT) == 1,
+                                   .(CHROM, POS = as.integer(POS), REF, ALT, QUAL)]
+      } else {
+        allele_data <- fread(snp_path)
+        allele_data <- allele_data[, .(CHROM, POS, REF, ALT)]
+      }
+
+      snp_number <- nrow(allele_data)
+
+      # ── 3. Load chromosome size data (FAI) ──────────────────────────────────
+      incProgress(0.3, detail = "Loading chromosome sizes")
+      chr_size <- fread(
+        input$chr_size_file$datapath,
+        col.names = c("CHROM", "length", "offset", "col1", "col2")
+      )
+      chr_size <- chr_size[, .(CHROM, length)]
+
+      # Preserve FASTA chromosome order as factor levels
+      fasta_chr_order <- chr_size$CHROM
+      genome_size     <- sum(chr_size$length)
+      snp_density     <- snp_number / genome_size
+
+      # ── 4. Filter reads and classify alleles ────────────────────────────────
+      incProgress(0.4, detail = "Classifying alleles")
+
+      # Apply quality filters and remove deletions
+      full_read <- read_data[
+        mapq     >= input$mapq_cutoff  &
+        base_qual >= input$baseq_cutoff &
+        is_del   == 0
+      ]
+
+      # Join allele info (left join: keep all read rows, add REF/ALT/QUAL)
+      full_read <- merge(
+        full_read, allele_data,
+        by.x  = c("chrom", "pos"),
+        by.y  = c("CHROM", "POS"),
+        all.x = TRUE
+      )
+
+      # Classify each base call
+      full_read[, IS_REF := call == REF]
+      full_read[, ALLELE := fcase(
+        call == REF, "REF",
+        call == ALT, "ALT",
+        default = "OTHER"
+      )]
+
+      # Drop rows that are neither REF nor ALT
+      full_read <- full_read[ALLELE != "OTHER"]
+
+      # Sort by read then position
+      setorder(full_read, read_id, pos)
+
+      # ── 5. Detect chimeric reads via RLE ────────────────────────────────────
+      incProgress(0.5, detail = "Detecting chimeric reads")
+      min_run <- input$min_run
+
+      # First RLE pass: compute run lengths per read
+      full_read[, runs := rle_helper(ALLELE), by = read_id]
+
+      # Remove short (noisy) runs
+      full_read <- full_read[runs > min_run]
+
+      # Second RLE pass on denoised data
+      full_read[, new_runs := rle_helper(ALLELE), by = read_id]
+
+      # Keep reads that:
+      #   (a) still have more than min_run rows after denoising, AND
+      #   (b) do not consist of a single uninterrupted run
+      #       (new_runs[1] != .N means the first run doesn't span everything)
+      rt_df <- full_read[
+        full_read[, .I[.N > min_run & new_runs[1] != .N], by = read_id]$V1
+      ]
+
+      results$rt_df             <- rt_df
+      results$chimeric_read_ids <- unique(rt_df$read_id)
+
+      # ── 6. Count chimeric reads per SNP position ────────────────────────────
+      incProgress(0.6, detail = "Counting SNP coverage")
+
+      pos_count <- rt_df[, .(n = .N), by = .(chrom, pos)]
+
+      # Start from all SNP positions on chromosomes present in read data
+      snp_coverage <- allele_data[CHROM %in% chromosomes, .(chrom = CHROM, pos = POS)]
+
+      snp_coverage <- merge(
+        snp_coverage, pos_count,
+        by    = c("chrom", "pos"),
+        all.x = TRUE
+      )
+      snp_coverage[is.na(n), n := 0L]
+      snp_coverage[, chrom := factor(chrom, levels = fasta_chr_order)]
+
+      results$snp_coverage <- snp_coverage
+
+      # ── 7. Calculate LOESS spans per chromosome ─────────────────────────────
+      incProgress(0.65, detail = "Calculating chromosome-specific spans")
+
+      chr_span <- chr_size[CHROM %in% chromosomes]
+      chr_span[, chrom := factor(CHROM, levels = fasta_chr_order)]
+
+      if (input$span_method == "dynamic") {
+        chr_span[, lspan := input$points_per_window * (1 / snp_density) / length]
+      } else {
+        chr_span[, lspan := input$loess_span]
+      }
+      chr_span <- chr_span[, .(chrom, lspan, length)]
+
+      results$chr_span <- chr_span
+
+      # ── 8. Fit LOESS models and find peaks ──────────────────────────────────
+      # data.table has no list-column / nest equivalent so we use split + lapply
+      incProgress(0.7, detail = "Fitting models and finding peaks")
+
+      # Split coverage into a list of data.tables, one per chromosome.
+      # Drop unused factor levels first — split() on a factor produces an empty
+      # data.table for every level, including chromosomes not in the data, which
+      # causes loess() to crash with "invalid 'x'" on the empty slices.
+      snp_coverage[, chrom := droplevels(chrom)] # added to squash bug
+      snp_by_chr <- split(snp_coverage, by = "chrom", keep.by = TRUE)
+
+      # Build a named lookup for spans
+      span_lookup <- setNames(chr_span$lspan, as.character(chr_span$chrom))
+
+      model_results <- lapply(snp_by_chr, function(snps_dt) {
+        chr_name <- as.character(snps_dt$chrom[1])
+        lspan    <- span_lookup[chr_name]
+
+        # Fit LOESS
+        mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
+        uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
+        uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
+
+        # Find peaks
+        raw_peaks <- pracma::findpeaks(
+          uniform_fit,
+          minpeakheight = input$min_peak_height,
+          threshold     = 2
+        )
+
+        list(
+          chrom       = chr_name,
+          uniform_pos = uniform_pos,
+          uniform_fit = uniform_fit,
+          peaks       = raw_peaks    # matrix or NULL
+        )
+      })
+
+      # ── 9. Extract peak positions into a flat data.table ───────────────────
+      peaks_list <- lapply(model_results, function(res) {
+        if (is.null(res$peaks) || nrow(res$peaks) == 0) return(NULL)
+
+        pk  <- as.data.table(res$peaks)
+        setnames(pk, c("peak_height", "peak_index", "peak_start", "peak_end"))
+
+        pk[, chrom       := res$chrom]
+        pk[, peak_pos    := res$uniform_pos[peak_index]]
+        pk[, peak_start  := res$uniform_pos[peak_start]]
+        pk[, peak_end    := res$uniform_pos[peak_end]]
+        pk[, peak_index  := NULL]
+        pk
+      })
+
+      peaks_genomic <- rbindlist(peaks_list, fill = TRUE)
+      if (nrow(peaks_genomic) > 0) {
+        peaks_genomic[, chrom := factor(chrom, levels = fasta_chr_order)]
+      }
+
+      # ── 10. Map LOESS peaks to nearest actual SNP position ──────────────────
+      if (nrow(peaks_genomic) > 0) {
+        snp_peaks <- copy(peaks_genomic)
+        snp_peaks[, snp_pos := {
+          chr_snps <- snp_coverage[chrom == .BY$chrom, pos]
+          vapply(peak_pos, function(pp) {
+            chr_snps[which.min(abs(chr_snps - pp))]
+          }, numeric(1))
+        }, by = chrom]
+      } else {
+        snp_peaks <- peaks_genomic[, snp_pos := numeric(0)]
+      }
+
       results$peaks_genomic <- peaks_genomic
-      results$snp_peaks <- snp_peaks  # NEW: Store for individual plots
-      
-      # Prepare data for plotting
+      results$snp_peaks     <- snp_peaks
+
+      # ── 11. Build chromosome_fits for overview plot ─────────────────────────
       incProgress(0.8, detail = "Creating overview plot")
-      chromosome_fits <- model_by_chromosome %>%
-        select(chrom, uniform_pos, uniform_fit) %>%
-        unnest(cols = c(uniform_pos, uniform_fit))
-      
+
+      chromosome_fits <- rbindlist(lapply(model_results, function(res) {
+        data.table(
+          chrom       = factor(res$chrom, levels = fasta_chr_order),
+          uniform_pos = res$uniform_pos,
+          uniform_fit = res$uniform_fit
+        )
+      }))
+
       results$chromosome_fits <- chromosome_fits
-      
-      # Create overview plot
-      chr_plot <- snp_coverage %>%
-        ggplot(aes(x = pos/1000, y = n)) +
-        geom_line(data = chromosome_fits, 
-                 aes(x = uniform_pos/1000, y = uniform_fit),
-                 color = "firebrick", linewidth = 0.6, alpha = 0.5) +
+
+      # ── 12. Overview plot ───────────────────────────────────────────────────
+      chr_plot <- ggplot(snp_coverage, aes(x = pos / 1000, y = n)) +
+        geom_line(
+          data  = chromosome_fits,
+          aes(x = uniform_pos / 1000, y = uniform_fit),
+          color = "firebrick", linewidth = 0.6, alpha = 0.5
+        ) +
         geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
         scale_x_continuous(minor_breaks = seq(0, 1600, 100)) +
         xlab("Position (Kbp)") +
@@ -402,159 +426,141 @@ server <- function(input, output, session) {
         theme(
           panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
           panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
-          strip.background = element_blank(),
-          strip.placement = "outside"
+          strip.background   = element_blank(),
+          strip.placement    = "outside"
         )
-      
-      # Add peak lines if any peaks detected
-      if(nrow(peaks_genomic) > 0) {
-        chr_plot <- chr_plot + 
-          geom_vline(aes(xintercept = peak_pos/1000), 
-                    data = peaks_genomic, 
-                    color = "blue", 
-                    alpha = 0.5)
+
+      if (nrow(peaks_genomic) > 0) {
+        chr_plot <- chr_plot +
+          geom_vline(
+            aes(xintercept = peak_pos / 1000),
+            data  = peaks_genomic,
+            color = "blue", alpha = 0.5
+          )
       }
-      
+
       results$plot <- chr_plot
-      
-      # NEW: Generate individual peak plots
+
+      # ── 13. Individual peak plots ───────────────────────────────────────────
       incProgress(0.9, detail = "Creating individual peak plots")
-      if(nrow(snp_peaks) > 0) {
-        # First, prepare a mapping of chromosome names (now identical since we keep raw names)
-        chr_mapping <- snp_coverage %>%
-          select(chrom) %>%
-          distinct() %>%
-          mutate(original_chrom = as.character(chrom))
-        
-        # Create plots grouped by chromosome
-        peak_plots_list <- snp_peaks %>%
-          mutate(peak_num = row_number()) %>%
-          left_join(chr_mapping, by = "chrom") %>%
-          group_by(chrom) %>%
-          group_map(~ {
-            chr_name <- .y$chrom
-            chr_peaks <- .x
-            
-            # Get the original chromosome name from the mapping
-            original_chr <- chr_peaks$original_chrom[1]
-            
-            # Create a plot for each peak in this chromosome
-            peak_plots <- map(1:nrow(chr_peaks), function(i) {
-              peak_data <- chr_peaks[i, ]
-              
-              # Find all reads touching this peak
-              read_ids <- rt_df %>%
-                filter(chrom == original_chr,
-                       pos == peak_data$snp_pos) %>%
-                pull(read_id)
-              
-              # Filter for reads touching this peak
-              if(length(read_ids) > 0) {
-                pltdf <- rt_df %>%
-                  filter(read_id %in% read_ids,
-                         chrom == original_chr)
-                
-                p <- pltdf %>%
-                  group_by(read_id) %>%
-                  ggplot(aes(x = pos/1000, y = 1, colour = IS_REF)) +
-                  geom_vline(xintercept = peak_data$snp_pos/1000, 
-                            color = "grey80", linewidth = 3, alpha = 0.5) +
-                  geom_point() +
-                  facet_grid(read_id ~ .) +
-                  scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
-                  theme_bw() +
-                  theme(
-                    axis.text.y = element_blank(),
-                    axis.ticks.y = element_blank(),
-                    axis.title.y = element_blank(),
-                    legend.position = "none",
-                    plot.background = element_blank(),
-                    strip.background = element_blank(),
-                    panel.border = element_rect(linewidth = 0.1, linetype = 3),
-                    panel.grid.major = element_blank(),
-                    panel.grid.minor = element_blank(),
-                    strip.text.y = element_blank(),
-                    panel.spacing = unit(0, "mm")
-                  ) +
-                  xlab("Position (Kbp)") +
-                  ggtitle(paste0("Chr ", chr_name, " - Peak ", i, 
-                                " (Position: ", round(peak_data$snp_pos/1000, 2), " Kb)"))
-                
-                return(p)
-              } else {
-                return(NULL)
-              }
-            })
-            
-            # Remove NULL plots
-            peak_plots <- peak_plots[!sapply(peak_plots, is.null)]
-            
-            list(chromosome = chr_name, plots = peak_plots)
-          }, .keep = TRUE)
-        
+
+      if (nrow(snp_peaks) > 0) {
+
+        # Unique chromosomes that have peaks, in factor order
+        peak_chrs <- levels(droplevels(snp_peaks$chrom))
+
+        peak_plots_list <- lapply(peak_chrs, function(chr_name) {
+          chr_peaks  <- snp_peaks[chrom == chr_name]
+          chr_rt     <- rt_df[chrom == chr_name]
+
+          peak_plots <- lapply(seq_len(nrow(chr_peaks)), function(i) {
+            peak_data <- chr_peaks[i]
+
+            # Reads that cover this exact peak SNP position
+            read_ids <- chr_rt[pos == peak_data$snp_pos, unique(read_id)]
+
+            if (length(read_ids) == 0) return(NULL)
+
+            pltdf <- chr_rt[read_id %in% read_ids]
+
+            ggplot(pltdf, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
+              geom_vline(
+                xintercept = peak_data$snp_pos / 1000,
+                color = "grey80", linewidth = 3, alpha = 0.5
+              ) +
+              geom_point() +
+              facet_grid(read_id ~ .) +
+              scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+              theme_bw() +
+              theme(
+                axis.text.y    = element_blank(),
+                axis.ticks.y   = element_blank(),
+                axis.title.y   = element_blank(),
+                legend.position = "none",
+                plot.background = element_blank(),
+                strip.background = element_blank(),
+                panel.border   = element_rect(linewidth = 0.1, linetype = 3),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                strip.text.y   = element_blank(),
+                panel.spacing  = unit(0, "mm")
+              ) +
+              xlab("Position (Kbp)") +
+              ggtitle(paste0(
+                "Chr ", chr_name, " - Peak ", i,
+                " (Position: ", round(peak_data$snp_pos / 1000, 2), " Kb)"
+              ))
+          })
+
+          # Drop NULLs
+          peak_plots <- Filter(Negate(is.null), peak_plots)
+          list(chromosome = chr_name, plots = peak_plots)
+        })
+
         results$peak_plots_by_chr <- peak_plots_list
+
       } else {
         results$peak_plots_by_chr <- NULL
       }
-      
+
       incProgress(1, detail = "Complete")
     })
-    
+
     showNotification("Analysis complete", type = "message", duration = 3)
   })
-  
-  # Output: Main plot
+
+  # ── Outputs ──────────────────────────────────────────────────────────────────
+
+  # Overview plot
   output$chr_plot <- renderPlot({
     req(results$plot)
     results$plot +
       theme(
-        axis.text = element_text(size = 12),
-        axis.title = element_text(size = 15),
-        strip.text.y = element_text(size = 9, angle = 0, hjust = 0, face = "bold"),
+        axis.text    = element_text(size = 12),
+        axis.title   = element_text(size = 15),
+        strip.text.y = element_text(size = 9, angle = 0, hjust = 0, face = "bold")
       )
   })
-  
-  # Output: Peaks table
+
+  # Peaks table
   output$peaks_table <- renderTable({
     req(results$peaks_genomic)
-    results$peaks_genomic %>%
-      mutate(
-        peak_pos_kb = round(peak_pos/1000, 2),
-        peak_start_kb = round(peak_start/1000, 2),
-        peak_end_kb = round(peak_end/1000, 2),
-        peak_height = round(peak_height, 2)
-      ) %>%
-      select(Chromosome = chrom, 
-             `Peak Position (Kb)` = peak_pos_kb,
-             `Peak Start (Kb)` = peak_start_kb,
-             `Peak End (Kb)` = peak_end_kb,
-             `Peak Height` = peak_height) %>%
-      arrange(Chromosome, `Peak Position (Kb)`)
+    out <- copy(results$peaks_genomic)
+    out[, `:=`(
+      peak_pos_kb   = round(peak_pos   / 1000, 2),
+      peak_start_kb = round(peak_start / 1000, 2),
+      peak_end_kb   = round(peak_end   / 1000, 2),
+      peak_height   = round(peak_height, 2)
+    )]
+    out <- out[, .(
+      Chromosome           = chrom,
+      `Peak Position (Kb)` = peak_pos_kb,
+      `Peak Start (Kb)`    = peak_start_kb,
+      `Peak End (Kb)`      = peak_end_kb,
+      `Peak Height`        = peak_height
+    )]
+    setorder(out, Chromosome, `Peak Position (Kb)`)
+    out
   })
-  
-  # NEW: Dynamic UI for peak plots organized by chromosome
+
+  # Dynamic UI: per-chromosome tabs of individual peak plots
   output$peak_plots_tabs <- renderUI({
     req(results$peak_plots_by_chr)
-    
-    if(is.null(results$peak_plots_by_chr) || length(results$peak_plots_by_chr) == 0) {
+
+    if (is.null(results$peak_plots_by_chr) || length(results$peak_plots_by_chr) == 0) {
       return(h4("No peaks detected in the analysis."))
     }
-    
-    # Create tabs for each chromosome
-    chr_tabs <- map(results$peak_plots_by_chr, function(chr_data) {
+
+    chr_tabs <- lapply(results$peak_plots_by_chr, function(chr_data) {
       chr_name <- chr_data$chromosome
-      plots <- chr_data$plots
-      
-      if(length(plots) == 0) {
-        return(NULL)
-      }
-      
-      # Create plot outputs for this chromosome
-      plot_outputs <- map(1:length(plots), function(i) {
-        output_name <- paste0("peak_plot_", chr_name, "_", i)
-        plotOutput(output_name, height = "600px")
+      plots    <- chr_data$plots
+
+      if (length(plots) == 0) return(NULL)
+
+      plot_outputs <- lapply(seq_along(plots), function(i) {
+        plotOutput(paste0("peak_plot_", chr_name, "_", i), height = "600px")
       })
-      
+
       tabPanel(
         paste("Chr", chr_name),
         h5(paste0("Chromosome ", chr_name, " - ", length(plots), " peak(s) detected")),
@@ -562,110 +568,96 @@ server <- function(input, output, session) {
         do.call(tagList, plot_outputs)
       )
     })
-    
-    # Remove NULL tabs
-    chr_tabs <- chr_tabs[!sapply(chr_tabs, is.null)]
-    
-    if(length(chr_tabs) == 0) {
-      return(h4("No peaks detected in the analysis."))
-    }
-    
+
+    chr_tabs <- Filter(Negate(is.null), chr_tabs)
+    if (length(chr_tabs) == 0) return(h4("No peaks detected in the analysis."))
     do.call(tabsetPanel, chr_tabs)
   })
-  
-  # NEW: Render individual peak plots dynamically
+
+  # Render individual peak plots dynamically
   observe({
     req(results$peak_plots_by_chr)
-    
-    walk(results$peak_plots_by_chr, function(chr_data) {
+
+    lapply(results$peak_plots_by_chr, function(chr_data) {
       chr_name <- chr_data$chromosome
-      plots <- chr_data$plots
-      
-      walk(1:length(plots), function(i) {
+      plots    <- chr_data$plots
+
+      lapply(seq_along(plots), function(i) {
         output_name <- paste0("peak_plot_", chr_name, "_", i)
-        
-        output[[output_name]] <- renderPlot({
-          plots[[i]]
+        local({
+          p <- plots[[i]]
+          output[[output_name]] <- renderPlot({ p })
         })
       })
     })
   })
-  
-  # Output: Chromosome span table
+
+  # LOESS span table
   output$span_table <- renderTable({
     req(results$chr_span)
-    results$chr_span %>%
-      mutate(
-        length_kb = round(length/1000, 1),
-        lspan = round(lspan, 5)
-      ) %>%
-      select(Chromosome = chrom,
-             `Length (Kb)` = length_kb,
-             `LOESS Span` = lspan) %>%
-      arrange(Chromosome)
+    out <- copy(results$chr_span)
+    out[, `:=`(
+      length_kb = round(length / 1000, 1),
+      lspan     = round(lspan, 5)
+    )]
+    out <- out[, .(
+      Chromosome    = chrom,
+      `Length (Kb)` = length_kb,
+      `LOESS Span`  = lspan
+    )]
+    setorder(out, Chromosome)
+    out
   })
-  
-  # Output: Summary statistics
+
+  # Summary statistics
   output$summary_stats <- renderText({
     req(results$rt_df, results$snp_coverage, results$peaks_genomic)
-    
-    n_chimeric_reads <- length(unique(results$rt_df$read_id))
-    n_chromosomes <- length(unique(results$snp_coverage$chrom))
-    n_peaks <- nrow(results$peaks_genomic)
-    total_snps <- nrow(results$snp_coverage)
-    covered_snps <- sum(results$snp_coverage$n > 0)
-    
-    span_method_text <- if(input$span_method == "dynamic") {
+
+    n_chimeric_reads <- uniqueN(results$rt_df$read_id)
+    n_chromosomes    <- uniqueN(results$snp_coverage$chrom)
+    n_peaks          <- nrow(results$peaks_genomic)
+    total_snps       <- nrow(results$snp_coverage)
+    covered_snps     <- results$snp_coverage[n > 0, .N]
+
+    span_method_text <- if (input$span_method == "dynamic") {
       paste0("Dynamic (Points Per Window: ", input$points_per_window, ")")
     } else {
       paste0("Fixed (Span: ", input$loess_span, ")")
     }
-    
+
     paste0(
       "Sample: ", input$sample_name, "\n\n",
       "Chimeric Reads Detected: ", n_chimeric_reads, "\n",
       "Chromosomes Analyzed: ", n_chromosomes, "\n",
       "Total SNP Positions: ", total_snps, "\n",
-      "SNP Positions with Chimeric Reads: ", covered_snps, " (", 
-      round(100 * covered_snps/total_snps, 1), "%)\n",
+      "SNP Positions with Chimeric Reads: ", covered_snps,
+      " (", round(100 * covered_snps / total_snps, 1), "%)\n",
       "Peaks Detected: ", n_peaks, "\n\n",
       "Analysis Parameters:\n",
-      "  MAPQ Cutoff: ", input$mapq_cutoff, "\n",
+      "  MAPQ Cutoff: ",        input$mapq_cutoff,  "\n",
       "  Base Quality Cutoff: ", input$baseq_cutoff, "\n",
-      "  Min Run Length: ", input$min_run, "\n",
-      "  Min Peak Height: ", input$min_peak_height, "\n",
-      "  LOESS Span Method: ", span_method_text
+      "  Min Run Length: ",     input$min_run,       "\n",
+      "  Min Peak Height: ",    input$min_peak_height, "\n",
+      "  LOESS Span Method: ",  span_method_text
     )
   })
-  
-  # Download handlers
+
+  # ── Download handlers ────────────────────────────────────────────────────────
+
   output$download_plot <- downloadHandler(
-    filename = function() {
-      paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".png")
-    },
-    content = function(file) {
-      ggsave(file, plot = results$plot, width = 12, height = 16, dpi = 300)
-    }
+    filename = function() paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".png"),
+    content  = function(file) ggsave(file, plot = results$plot, width = 12, height = 16, dpi = 300)
   )
-  
+
   output$download_peaks <- downloadHandler(
-    filename = function() {
-      paste0(input$sample_name, "_peaks_", Sys.Date(), ".csv")
-    },
-    content = function(file) {
-      write_csv(results$peaks_genomic, file)
-    }
+    filename = function() paste0(input$sample_name, "_peaks_", Sys.Date(), ".csv"),
+    content  = function(file) fwrite(results$peaks_genomic, file)
   )
 
   output$download_read_ids <- downloadHandler(
-    filename = function() {
-      paste0(input$sample_name, "_chimeric_read_ids_", Sys.Date(), ".txt")
-    },
-    content = function(file) {
-      write_lines(results$chimeric_read_ids, file)
-    }
+    filename = function() paste0(input$sample_name, "_chimeric_read_ids_", Sys.Date(), ".txt"),
+    content  = function(file) writeLines(results$chimeric_read_ids, file)
   )
-  
 }
 
 # Run the application
