@@ -33,10 +33,12 @@ Exported read IDs can be used to filter the original alignment file, producing a
 ### Requirements
 - R (recommended: ≥ 4.1)
 - R packages:
-  - shiny
-  - data.table
-  - ggplot2
-  - pracma
+  - shiny ≥ 1.12.0
+  - data.table ≥ 1.15.0
+  - ggplot2 ≥ 3.4.0
+  - pracma ≥ 2.4.4
+
+_note: shiny must be ≥ 1.12.0 to avoid a region selection bug for individual chromosome plots_
 
 Install packages in R:
 
