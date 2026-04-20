@@ -347,28 +347,120 @@ server <- function(input, output, session) {
       snp_by_chr <- split(snp_coverage, by = "chrom", keep.by = TRUE)
 
       span_lookup <- setNames(chr_span$lspan, as.character(chr_span$chrom))
-
+      
       model_results <- lapply(snp_by_chr, function(snps_dt) {
         chr_name <- as.character(snps_dt$chrom[1])
         lspan    <- span_lookup[chr_name]
-
+        
         mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
         uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
         uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
-
+        
+        # ── (A) Original findpeaks ──────────────────────────────────────────────
         raw_peaks <- pracma::findpeaks(
           uniform_fit,
           minpeakheight = input$min_peak_height,
           threshold     = 2
         )
-
+        
+        findpeaks_positions <- if (!is.null(raw_peaks) && nrow(raw_peaks) > 0) {
+          uniform_pos[raw_peaks[, 2]]   # column 2 = index of peak apex
+        } else {
+          numeric(0)
+        }
+        
+        # ── (B) Region-based fallback ───────────────────────────────────────────
+        # Parameters — could be exposed as UI inputs later
+        max_region_width_bp <- 50000   # ignore regions wider than 50 Kb (likely baseline noise)
+        min_region_width_bp <- 1000        # optional: skip tiny blips
+        
+        above_thresh <- !is.na(uniform_fit) & uniform_fit >= input$min_peak_height
+        
+        # Run-length encode the threshold-crossing vector
+        rle_above   <- rle(above_thresh)
+        region_ends <- cumsum(rle_above$lengths)
+        region_starts <- c(1L, head(region_ends, -1) + 1L)
+        
+        region_peaks <- lapply(seq_along(rle_above$lengths), function(k) {
+          if (!rle_above$values[k]) return(NULL)   # below threshold, skip
+          
+          idx_range <- region_starts[k]:region_ends[k]
+          pos_range <- uniform_pos[idx_range]
+          region_width <- max(pos_range) - min(pos_range)
+          
+          # Apply width filter
+          if (region_width > max_region_width_bp) return(NULL)
+          if (region_width < min_region_width_bp) return(NULL)
+          
+          # Peak position = argmax within region (or use median(pos_range) for centroid)
+          local_max_idx <- idx_range[which.max(uniform_fit[idx_range])]
+          
+          data.frame(
+            peak_height = uniform_fit[local_max_idx],
+            peak_index  = local_max_idx,
+            peak_start  = region_starts[k],
+            peak_end    = region_ends[k]
+          )
+        })
+        
+        region_peaks_df <- do.call(rbind, Filter(Negate(is.null), region_peaks))
+        
+        # ── (C) Deduplicate: keep region peaks not already covered by findpeaks ─
+        # A region peak is "already found" if findpeaks placed a peak within its bounds
+        if (!is.null(region_peaks_df) && nrow(region_peaks_df) > 0) {
+          region_peaks_df$is_new <- vapply(seq_len(nrow(region_peaks_df)), function(i) {
+            rstart <- uniform_pos[region_peaks_df$peak_start[i]]
+            rend   <- uniform_pos[region_peaks_df$peak_end[i]]
+            !any(findpeaks_positions >= rstart & findpeaks_positions <= rend)
+          }, logical(1))
+          
+          novel_region_peaks <- region_peaks_df[region_peaks_df$is_new, , drop = FALSE]
+        } else {
+          novel_region_peaks <- NULL
+        }
+        
+        # ── (D) Combine findpeaks + novel region peaks ──────────────────────────
+        combined_peaks <- raw_peaks   # may be NULL
+        
+        if (!is.null(novel_region_peaks) && nrow(novel_region_peaks) > 0) {
+          novel_mat <- as.matrix(novel_region_peaks[, c("peak_height","peak_index",
+                                                        "peak_start","peak_end")])
+          combined_peaks <- if (is.null(combined_peaks)) {
+            novel_mat
+          } else {
+            rbind(combined_peaks, novel_mat)
+          }
+        }
+        
         list(
           chrom       = chr_name,
           uniform_pos = uniform_pos,
           uniform_fit = uniform_fit,
-          peaks       = raw_peaks
+          peaks       = combined_peaks
         )
       })
+
+#      model_results <- lapply(snp_by_chr, function(snps_dt) {
+#        chr_name <- as.character(snps_dt$chrom[1])
+#        lspan    <- span_lookup[chr_name]
+#
+#        mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
+#        uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
+#        uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
+#
+#        raw_peaks <- pracma::findpeaks(
+#          uniform_fit,
+#          minpeakheight = input$min_peak_height,
+#          threshold     = 2
+#        )
+#
+#        list(
+#          chrom       = chr_name,
+#          uniform_pos = uniform_pos,
+#          uniform_fit = uniform_fit,
+#          peaks       = raw_peaks
+#        )
+#      })
 
       # ── 9. Extract peak positions into a flat data.table ───────────────────
       peaks_list <- lapply(model_results, function(res) {
