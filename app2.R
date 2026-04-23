@@ -129,7 +129,6 @@ ui <- fluidPage(
                  uiOutput("chr_plots_tabs")
         ),
 
-        # NEW: dynamic/closeable Selected Region tab placeholder
         tabPanel("Read Statistics",
                  h4("Analysis Summary"),
                  verbatimTextOutput("summary_stats"),
@@ -183,14 +182,10 @@ ui <- fluidPage(
 # ─────────────────────────────────────────────
 server <- function(input, output, session) {
 
-  # Set max upload size to 100 MB
   options(shiny.maxRequestSize = 100 * 1024^2)
 
-  # Shared trigger for region plot building — incremented by both the overview
-  # button and the per-chromosome buttons
   rv_trigger_region <- reactiveVal(0L)
 
-  # Reactive values to store analysis results
   results <- reactiveValues(
     rt_df                 = NULL,
     snp_coverage          = NULL,
@@ -207,34 +202,28 @@ server <- function(input, output, session) {
     selected_region_data  = NULL
   )
 
-  # ── RLE helper (operates on plain vectors) ──────────────────────
   rle_helper <- function(x) {
-    r  <- rle(x)[[1]]   # run lengths
-    rn <- rep(r, r)     # expand to per-position run lengths
+    r  <- rle(x)[[1]]
+    rn <- rep(r, r)
     return(rn)
   }
 
-  # ── Main analysis ────────────────────────────────────────────────────────────
   observeEvent(input$run_analysis, {
 
     req(input$read_data_file, input$snp_data_file, input$chr_size_file)
 
-    # Reset region-selection outputs on re-run
     results$selected_region      <- NULL
     results$selected_region_plot <- NULL
     results$selected_region_data <- NULL
 
-    # Remove Selected Region tab if present
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
 
     withProgress(message = "Processing data...", value = 0, {
 
-      # ── 1. Load read data ───────────────────────────────────────────────────
       incProgress(0.1, detail = "Loading read data")
       read_data  <- fread(input$read_data_file$datapath)
       chromosomes <- unique(read_data$chrom)
 
-      # ── 2. Load SNP / allele data ───────────────────────────────────────────
       incProgress(0.2, detail = "Loading SNP data")
       snp_path <- input$snp_data_file$datapath
       snp_name <- tolower(input$snp_data_file$name)
@@ -257,7 +246,6 @@ server <- function(input, output, session) {
 
       snp_number <- nrow(allele_data)
 
-      # ── 3. Load chromosome size data (FAI) ──────────────────────────────────
       incProgress(0.3, detail = "Loading chromosome sizes")
       chr_size <- fread(
         input$chr_size_file$datapath,
@@ -265,12 +253,10 @@ server <- function(input, output, session) {
       )
       chr_size <- chr_size[, .(CHROM, length)]
 
-      # Preserve FASTA chromosome order as factor levels
       fasta_chr_order <- chr_size$CHROM
       genome_size     <- sum(chr_size$length)
       snp_density     <- snp_number / genome_size
 
-      # ── 4. Filter reads and classify alleles ────────────────────────────────
       incProgress(0.4, detail = "Classifying alleles")
 
       full_read <- read_data[
@@ -296,7 +282,6 @@ server <- function(input, output, session) {
       full_read <- full_read[ALLELE != "OTHER"]
       setorder(full_read, read_id, pos)
 
-      # ── 5. Detect chimeric reads via RLE ────────────────────────────────────
       incProgress(0.5, detail = "Detecting chimeric reads")
       min_run <- input$min_run
 
@@ -311,7 +296,6 @@ server <- function(input, output, session) {
       results$rt_df             <- rt_df
       results$chimeric_read_ids <- unique(rt_df$read_id)
 
-      # ── 6. Count chimeric reads per SNP position ────────────────────────────
       incProgress(0.6, detail = "Counting SNP coverage")
 
       pos_count <- rt_df[, .(n = .N), by = .(chrom, pos)]
@@ -329,7 +313,6 @@ server <- function(input, output, session) {
 
       results$snp_coverage <- snp_coverage
 
-      # ── 7. Calculate LOESS spans per chromosome ─────────────────────────────
       incProgress(0.65, detail = "Calculating chromosome-specific spans")
 
       chr_span <- chr_size[CHROM %in% chromosomes]
@@ -344,61 +327,54 @@ server <- function(input, output, session) {
 
       results$chr_span <- chr_span
 
-      # ── 8. Fit LOESS models and find peaks ──────────────────────────────────
       incProgress(0.7, detail = "Fitting models and finding peaks")
 
       snp_coverage[, chrom := droplevels(chrom)]
       snp_by_chr <- split(snp_coverage, by = "chrom", keep.by = TRUE)
 
       span_lookup <- setNames(chr_span$lspan, as.character(chr_span$chrom))
-      
+
       model_results <- lapply(snp_by_chr, function(snps_dt) {
         chr_name <- as.character(snps_dt$chrom[1])
         lspan    <- span_lookup[chr_name]
-        
+
         mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
         uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
         uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
-        
-        # ── (A) Original findpeaks ──────────────────────────────────────────────
+
         raw_peaks <- pracma::findpeaks(
           uniform_fit,
           minpeakheight = input$min_peak_height,
           threshold     = 2
         )
-        
+
         findpeaks_positions <- if (!is.null(raw_peaks) && nrow(raw_peaks) > 0) {
-          uniform_pos[raw_peaks[, 2]]   # column 2 = index of peak apex
+          uniform_pos[raw_peaks[, 2]]
         } else {
           numeric(0)
         }
-        
-        # ── (B) Region-based fallback ───────────────────────────────────────────
-        # Parameters — could be exposed as UI inputs later
-        max_region_width_bp <- 50000   # ignore regions wider than 50 Kb (likely baseline noise)
-        min_region_width_bp <- 1000        # optional: skip tiny blips
-        
+
+        max_region_width_bp <- 50000
+        min_region_width_bp <- 1000
+
         above_thresh <- !is.na(uniform_fit) & uniform_fit >= input$min_peak_height
-        
-        # Run-length encode the threshold-crossing vector
+
         rle_above   <- rle(above_thresh)
         region_ends <- cumsum(rle_above$lengths)
         region_starts <- c(1L, head(region_ends, -1) + 1L)
-        
+
         region_peaks <- lapply(seq_along(rle_above$lengths), function(k) {
-          if (!rle_above$values[k]) return(NULL)   # below threshold, skip
-          
+          if (!rle_above$values[k]) return(NULL)
+
           idx_range <- region_starts[k]:region_ends[k]
           pos_range <- uniform_pos[idx_range]
           region_width <- max(pos_range) - min(pos_range)
-          
-          # Apply width filter
+
           if (region_width > max_region_width_bp) return(NULL)
           if (region_width < min_region_width_bp) return(NULL)
-          
-          # Peak position = argmax within region (or use median(pos_range) for centroid)
+
           local_max_idx <- idx_range[which.max(uniform_fit[idx_range])]
-          
+
           data.frame(
             peak_height = uniform_fit[local_max_idx],
             peak_index  = local_max_idx,
@@ -406,26 +382,23 @@ server <- function(input, output, session) {
             peak_end    = region_ends[k]
           )
         })
-        
+
         region_peaks_df <- do.call(rbind, Filter(Negate(is.null), region_peaks))
-        
-        # ── (C) Deduplicate: keep region peaks not already covered by findpeaks ─
-        # A region peak is "already found" if findpeaks placed a peak within its bounds
+
         if (!is.null(region_peaks_df) && nrow(region_peaks_df) > 0) {
           region_peaks_df$is_new <- vapply(seq_len(nrow(region_peaks_df)), function(i) {
             rstart <- uniform_pos[region_peaks_df$peak_start[i]]
             rend   <- uniform_pos[region_peaks_df$peak_end[i]]
             !any(findpeaks_positions >= rstart & findpeaks_positions <= rend)
           }, logical(1))
-          
+
           novel_region_peaks <- region_peaks_df[region_peaks_df$is_new, , drop = FALSE]
         } else {
           novel_region_peaks <- NULL
         }
-        
-        # ── (D) Combine findpeaks + novel region peaks ──────────────────────────
-        combined_peaks <- raw_peaks   # may be NULL
-        
+
+        combined_peaks <- raw_peaks
+
         if (!is.null(novel_region_peaks) && nrow(novel_region_peaks) > 0) {
           novel_mat <- as.matrix(novel_region_peaks[, c("peak_height","peak_index",
                                                         "peak_start","peak_end")])
@@ -435,7 +408,7 @@ server <- function(input, output, session) {
             rbind(combined_peaks, novel_mat)
           }
         }
-        
+
         list(
           chrom       = chr_name,
           lspan       = lspan,
@@ -445,7 +418,6 @@ server <- function(input, output, session) {
         )
       })
 
-      # ── 9. Extract peak positions into a flat data.table ───────────────────
       peaks_list <- lapply(model_results, function(res) {
         if (is.null(res$peaks) || nrow(res$peaks) == 0) return(NULL)
 
@@ -465,7 +437,6 @@ server <- function(input, output, session) {
         peaks_genomic[, chrom := factor(chrom, levels = fasta_chr_order)]
       }
 
-      # ── 10. Map LOESS peaks to nearest actual SNP position ──────────────────
       if (nrow(peaks_genomic) > 0) {
         snp_peaks <- copy(peaks_genomic)
         snp_peaks[, snp_pos := {
@@ -481,7 +452,6 @@ server <- function(input, output, session) {
       results$peaks_genomic <- peaks_genomic
       results$snp_peaks     <- snp_peaks
 
-      # ── 11. Build chromosome_fits for overview plot ─────────────────────────
       incProgress(0.8, detail = "Creating overview plot")
 
       chromosome_fits <- rbindlist(lapply(model_results, function(res) {
@@ -505,7 +475,6 @@ server <- function(input, output, session) {
 
       results$chromosome_fits <- chromosome_fits
 
-      # ── 12. Overview plot ───────────────────────────────────────────────────
       chr_plot <- ggplot(snp_coverage, aes(x = pos_kb, y = n)) +
         geom_line(
           data  = chromosome_fits,
@@ -537,7 +506,6 @@ server <- function(input, output, session) {
 
       results$plot <- chr_plot
 
-      # ── 13. Individual peak plots ───────────────────────────────────────────
       incProgress(0.9, detail = "Creating individual peak plots")
 
       if (nrow(snp_peaks) > 0) {
@@ -602,12 +570,6 @@ server <- function(input, output, session) {
     showNotification("Analysis complete", type = "message", duration = 3)
   })
 
-
-  # ── Debug outputs ────────────────────────────────────────────────────────────
-  # removed
-
-  # ── Outputs ──────────────────────────────────────────────────────────────────
-
   output$selected_region_text <- renderText({
     reg <- results$selected_region
     if (is.null(reg) || is.null(reg$chrom)) {
@@ -624,8 +586,6 @@ server <- function(input, output, session) {
     )
   })
 
-  # Overview plot — built fresh inside renderPlot so Shiny correctly registers
-  # the coordinate domain and panel mappings needed for brush to work
   output$chr_plot <- renderPlot({
     req(results$snp_coverage, results$chromosome_fits)
 
@@ -633,7 +593,6 @@ server <- function(input, output, session) {
     chromosome_fits <- copy(results$chromosome_fits)
     peaks_genomic   <- results$peaks_genomic
 
-    # Convert chrom to character — Shiny's brush panel detection fails with factors
     snp_coverage[,    chrom := as.character(chrom)]
     chromosome_fits[, chrom := as.character(chrom)]
     if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0)
@@ -674,7 +633,6 @@ server <- function(input, output, session) {
     p
   })
 
-  # Peaks table
   output$peaks_table <- renderTable({
     req(results$peaks_genomic)
     out <- copy(results$peaks_genomic)
@@ -695,7 +653,6 @@ server <- function(input, output, session) {
     out
   })
 
-  # Dynamic UI: per-chromosome tabs of individual peak plots
   output$peak_plots_tabs <- renderUI({
     req(results$peak_plots_by_chr)
 
@@ -726,7 +683,6 @@ server <- function(input, output, session) {
     do.call(tabsetPanel, chr_tabs)
   })
 
-  # Render individual peak plots dynamically
   observe({
     req(results$peak_plots_by_chr)
 
@@ -744,7 +700,6 @@ server <- function(input, output, session) {
     })
   })
 
-  # ── Chromosome plots tab: dynamic subtabs ────────────────────────────────────
   output$chr_plots_tabs <- renderUI({
     req(results$snp_coverage, results$chromosome_fits)
 
@@ -768,10 +723,10 @@ server <- function(input, output, session) {
         br(),
         fluidRow(
           column(3,
-            actionButton(btn_id, "Plot Selected Region", class = "btn-primary")
+                 actionButton(btn_id, "Plot Selected Region", class = "btn-primary")
           ),
           column(9,
-            verbatimTextOutput(txt_id)
+                 verbatimTextOutput(txt_id)
           )
         ),
         br()
@@ -781,7 +736,6 @@ server <- function(input, output, session) {
     do.call(tabsetPanel, c(list(id = "chr_plots_subtabs"), tabs))
   })
 
-  # Render per-chromosome coverage plots and wire up brush observers
   observe({
     req(results$snp_coverage, results$chromosome_fits)
 
@@ -809,9 +763,8 @@ server <- function(input, output, session) {
         .snp      <- snp_cov_all[chrom == .chr]
         .fits     <- fits_all[chrom == .chr]
         .peaks    <- if (!is.null(peaks_all) && nrow(peaks_all) > 0)
-                       peaks_all[chrom == .chr] else NULL
-      
-        # Render the coverage plot for this chromosome
+          peaks_all[chrom == .chr] else NULL
+
         output[[.plot_id]] <- renderPlot({
           p <- ggplot(.snp, aes(x = pos_kb, y = n)) +
             geom_line(
@@ -835,30 +788,26 @@ server <- function(input, output, session) {
                                 data = .peaks, color = "blue", alpha = 0.6)
           p
         })
-      
-        # Capture brush coordinates for this chromosome
+
         observeEvent(input[[.brush_id]], {
           brush <- input[[.brush_id]]
           if (is.null(brush)) return(NULL)
-      
-          # Guard against pixel-space coords returned before plot fully registers
+
           chr_max_kb <- max(.snp$pos_kb, na.rm = TRUE)
           if (brush$xmin > chr_max_kb * 2 || brush$xmax > chr_max_kb * 10) return(NULL)
-      
+
           xmin_kb <- min(brush$xmin, brush$xmax)
           xmax_kb <- max(brush$xmin, brush$xmax)
           xmin_bp <- as.integer(round(xmin_kb * 1000))
           xmax_bp <- as.integer(round(xmax_kb * 1000))
-      
-          # Store per-chromosome so brushes don't overwrite each other
+
           results$selected_regions[[.chr]] <- list(
             chrom = .chr,
             start = xmin_bp,
             end   = xmax_bp
           )
         }, ignoreNULL = TRUE)
-      
-        # Region label for this chromosome
+
         output[[.txt_id]] <- renderText({
           reg <- results$selected_regions[[.chr]]
           if (is.null(reg)) return("No region selected.")
@@ -868,20 +817,17 @@ server <- function(input, output, session) {
             round((reg$end - reg$start) / 1000, 2), " kb)"
           )
         })
-      
-        # Button: push this chromosome's brush region to the shared active region,
-        # then increment the trigger to fire build_region_plot()
+
         observeEvent(input[[.btn_id]], {
           reg <- results$selected_regions[[.chr]]
           req(!is.null(reg))
           results$selected_region <- reg
           rv_trigger_region(isolate(rv_trigger_region()) + 1L)
         }, ignoreNULL = TRUE)
-      })        # closes local()
-    })          # closes lapply()
-  })            # closes observe()
+      })
+    })
+  })
 
-  # LOESS span table
   output$span_table <- renderTable({
     req(results$chr_span)
     out <- copy(results$chr_span)
@@ -898,7 +844,6 @@ server <- function(input, output, session) {
     out
   })
 
-  # Summary statistics
   output$summary_stats <- renderText({
     req(results$rt_df, results$snp_coverage, results$peaks_genomic)
 
@@ -931,7 +876,6 @@ server <- function(input, output, session) {
     )
   })
 
-  # ── Shared helper: build and display the selected-region read plot ───────────
   build_region_plot <- function() {
     req(results$selected_region, results$rt_df)
 
@@ -1026,9 +970,6 @@ server <- function(input, output, session) {
     }
   }
 
-  # ── Selected-region plot generation ─────────────────────────────────────────
-
-  # Triggered by any per-chromosome "Plot Selected Region" button
   observeEvent(rv_trigger_region(), {
     if (rv_trigger_region() > 0L) build_region_plot()
   }, ignoreInit = TRUE)
@@ -1043,8 +984,6 @@ server <- function(input, output, session) {
     results$selected_region_plot <- NULL
     results$selected_region_data <- NULL
   })
-
-  # ── Download handlers ────────────────────────────────────────────────────────
 
   output$download_plot <- downloadHandler(
     filename = function() paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".png"),
@@ -1099,7 +1038,7 @@ server <- function(input, output, session) {
       ggsave(file, plot = results$selected_region_plot, width = 10, height = 12, dpi = 300)
     }
   )
-  
+
   output$download_loess_fits <- downloadHandler(
     filename = function() {
       paste0(input$sample_name, "_loess_fits_", Sys.Date(), ".csv")
@@ -1111,5 +1050,4 @@ server <- function(input, output, session) {
   )
 }
 
-# Run the application
 shinyApp(ui = ui, server)
