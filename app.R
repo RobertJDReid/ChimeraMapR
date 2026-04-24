@@ -7,6 +7,12 @@ library(ggplot2)
 #                   UI
 # ─────────────────────────────────────────────
 ui <- fluidPage(
+  tags$head(tags$style(HTML("
+    .well .form-group              { margin-top: 2px; margin-bottom: 2px; }
+    .well .shiny-input-container   { margin-top: 2px; margin-bottom: 2px; }
+    .well hr                       { margin-top: 2px; margin-bottom: 2px; }
+    .well h3                       { margin-top: 2px; margin-bottom: 2px; }
+  "))),
   titlePanel("ChimeraMapR: Detect Chimeric Haplotypes in Long Sequence Reads"),
 
   sidebarLayout(
@@ -24,7 +30,7 @@ ui <- fluidPage(
                 "Chromosome Size File (FAI):",
                 accept = c(".fai", ".txt")),
 
-      hr(),
+#      hr(),
 
       h3("Analysis Parameters"),
       textInput("sample_name",
@@ -32,18 +38,18 @@ ui <- fluidPage(
                 value = "Sample_01"),
 
       numericInput("mapq_cutoff",
-                   "MAPQ Cutoff:",
+                   "Minimum MAPQ Value:",
                    value = 20,
                    min = 0,
                    step = 1),
-      helpText("Reads below this score are excluded"),
+#      helpText("Reads below this score are excluded"),
 
       numericInput("baseq_cutoff",
-                   "Base Quality Cutoff:",
+                   "Base Quality Minimum:",
                    value = 10,
                    min = 0,
                    step = 1),
-      helpText("Minimum base quality score at SNP"),
+#      helpText("Minimum base quality score at SNP"),
 
       numericInput("min_run",
                    "Minimum Run Length:",
@@ -57,36 +63,16 @@ ui <- fluidPage(
                    value = 5,
                    min = 1,
                    step = 1),
-      helpText("Set to ~1/2 of median read depth"),
+#      helpText("Set to ~1/2 of median read depth"),
 
-      radioButtons("span_method",
-                   "LOESS Span Method:",
-                   choices = c("Fixed Span" = "fixed",
-                               "Dynamic (Per Chromosome)" = "dynamic"),
-                   selected = "dynamic"),
+      numericInput("points_per_window",
+                   "Points Per Window:",
+                   value = 25,
+                   min = 5,
+                   step = 1),
+      helpText("Number of SNP points per LOESS window"),
 
-      conditionalPanel(
-        condition = "input.span_method == 'fixed'",
-        numericInput("loess_span",
-                     "LOESS Span:",
-                     value = 0.015,
-                     min = 0.001,
-                     max = 1,
-                     step = 0.005),
-        helpText("Lower values for low coverage datasets (typically 0.015)")
-      ),
-
-      conditionalPanel(
-        condition = "input.span_method == 'dynamic'",
-        numericInput("points_per_window",
-                     "Points Per Window:",
-                     value = 25,
-                     min = 5,
-                     step = 1),
-        helpText("Number of SNP points per LOESS window. Span calculated as: ppw × (1/SNP_density) / chr_length")
-      ),
-
-      hr(),
+#      hr(),
 
       actionButton("run_analysis",
                    "Run Analysis",
@@ -108,6 +94,13 @@ ui <- fluidPage(
                  downloadButton("download_plot", "Download Plot")
         ),
 
+        tabPanel("Chromosome Plots",
+                 h4("Per-Chromosome Coverage Plots"),
+                 helpText("Select a chromosome tab, brush an x region, then click 'Plot Selected Region' to view chimeric reads in that interval."),
+                 br(),
+                 uiOutput("chr_plots_tabs")
+        ),
+        
         tabPanel("Peak Summary",
                  h4("Detected Peaks"),
                  tableOutput("peaks_table"),
@@ -122,21 +115,6 @@ ui <- fluidPage(
                  uiOutput("peak_plots_tabs")
         ),
 
-        tabPanel("Chromosome Plots",
-                 h4("Per-Chromosome Coverage Plots"),
-                 helpText("Select a chromosome tab, brush an x region, then click 'Plot Selected Region' to view chimeric reads in that interval."),
-                 br(),
-                 uiOutput("chr_plots_tabs")
-        ),
-
-        # NEW: dynamic/closeable Selected Region tab placeholder
-        tabPanel("Read Statistics",
-                 h4("Analysis Summary"),
-                 verbatimTextOutput("summary_stats"),
-                 br(),
-                 downloadButton("download_read_ids", "Download Chimeric Read IDs")
-        ),
-
         tabPanel("LOESS Spans",
                  h4("Chromosome-Specific LOESS Spans"),
                  tableOutput("span_table"),
@@ -146,12 +124,25 @@ ui <- fluidPage(
                  helpText("Downloads the fitted LOESS curves for all chromosomes from this run, including run parameters for later comparison across runs."),
                  downloadButton("download_loess_fits", "Download LOESS Fits")
         ),
+        
+        # NEW: dynamic/closeable Selected Region tab placeholder
+        tabPanel("Read Statistics",
+                 h4("Analysis Summary"),
+                 verbatimTextOutput("summary_stats"),
+                 br(),
+                 downloadButton("download_read_ids", "Download Chimeric Read IDs")
+        ),
 
         tabPanel("About",
                  h4("About This Analysis"),
                  p("This application identifies chimeric reads in sequencing data by tracking
                    allele changes across chromosomes. Chimeric reads contain sequence from
                    multiple parental chromosomes and can indicate recombination events."),
+                 p(
+                   "View the source code and README on",
+                   tags$a("GitHub", href = "https://github.com/RobertJDReid/ChimeraMapR", target = "_blank"),
+                   "."
+                 ),
                  h5("Method:"),
                  tags$ul(
                    tags$li("Classifies base calls at SNP positions as REF or ALT alleles"),
@@ -908,11 +899,7 @@ server <- function(input, output, session) {
     total_snps       <- nrow(results$snp_coverage)
     covered_snps     <- results$snp_coverage[n > 0, .N]
 
-    span_method_text <- if (input$span_method == "dynamic") {
-      paste0("Dynamic (Points Per Window: ", input$points_per_window, ")")
-    } else {
-      paste0("Fixed (Span: ", input$loess_span, ")")
-    }
+    span_method_text <- paste0("Dynamic (Points Per Window: ", input$points_per_window, ")")
 
     paste0(
       "Sample: ", input$sample_name, "\n\n",
