@@ -292,7 +292,7 @@ server <- function(input, output, session) {
       min_run <- input$min_run
 
       full_read[, runs := rle_helper(ALLELE), by = read_id]
-      full_read <- full_read[runs > min_run]
+      full_read <- full_read[runs >= min_run]
       full_read[, new_runs := rle_helper(ALLELE), by = read_id]
 
       rt_df <- full_read[
