@@ -319,22 +319,19 @@ server <- function(input, output, session) {
       snp_coverage[, pos_kb := pos / 1000]
 
       results$snp_coverage <- snp_coverage
-
+      
       # ── 7. Calculate LOESS spans per chromosome ─────────────────────────────
       incProgress(0.65, detail = "Calculating chromosome-specific spans")
-
+      
       chr_span <- chr_size[CHROM %in% chromosomes]
       chr_span[, chrom := factor(CHROM, levels = fasta_chr_order)]
-
-      if (input$span_method == "dynamic") {
-        chr_span[, lspan := input$points_per_window * (1 / snp_density) / length]
-      } else {
-        chr_span[, lspan := input$loess_span]
-      }
+      
+      chr_span[, lspan := input$points_per_window * (1 / snp_density) / length]
+      
       chr_span <- chr_span[, .(chrom, lspan, length)]
-
+      
       results$chr_span <- chr_span
-
+      
       # ── 8. Fit LOESS models and find peaks ──────────────────────────────────
       incProgress(0.7, detail = "Fitting models and finding peaks")
 
@@ -482,14 +479,14 @@ server <- function(input, output, session) {
           uniform_pos       = res$uniform_pos,
           uniform_fit       = res$uniform_fit,
           pos_kb            = res$uniform_pos / 1000,
-          span_method       = input$span_method,
+          span_method       = "dynamic",
           lspan             = res$lspan,
           mapq_cutoff       = input$mapq_cutoff,
           baseq_cutoff      = input$baseq_cutoff,
           min_run           = input$min_run,
           min_peak_height   = input$min_peak_height,
-          loess_span        = if (input$span_method == "fixed") input$loess_span else NA_real_,
-          points_per_window = if (input$span_method == "dynamic") input$points_per_window else NA_real_,
+          loess_span        = NA_real_,
+          points_per_window = input$points_per_window,
           run_date          = as.character(Sys.Date())
         )
       }))
