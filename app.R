@@ -175,7 +175,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
 
   # Set max upload size to 100 MB
-  options(shiny.maxRequestSize = 100 * 1024^2)
+  options(shiny.maxRequestSize = 200 * 1024^2)
 
   # Shared trigger for region plot building — incremented by both the overview
   # button and the per-chromosome buttons
