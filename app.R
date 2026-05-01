@@ -262,6 +262,7 @@ server <- function(input, output, session) {
       snp_density     <- snp_number / genome_size
 
       # ── 4. Filter reads and classify alleles ────────────────────────────────
+
       incProgress(0.4, detail = "Classifying alleles")
 
       full_read <- read_data[
@@ -288,6 +289,8 @@ server <- function(input, output, session) {
       setorder(full_read, read_id, pos)
 
       # ── 5. Detect chimeric reads via RLE ────────────────────────────────────
+      #
+      #. Alter this so only swaps show up in data
       incProgress(0.5, detail = "Detecting chimeric reads")
       min_run <- input$min_run
 
@@ -303,6 +306,7 @@ server <- function(input, output, session) {
       results$chimeric_read_ids <- unique(rt_df$read_id)
 
       # ── 6. Count chimeric reads per SNP position ────────────────────────────
+#      browser() # debug
       incProgress(0.6, detail = "Counting SNP coverage")
 
       pos_count <- rt_df[, .(n = .N), by = .(chrom, pos)]
@@ -321,6 +325,7 @@ server <- function(input, output, session) {
       results$snp_coverage <- snp_coverage
       
       # ── 7. Calculate LOESS spans per chromosome ─────────────────────────────
+#      browser() # debug
       incProgress(0.65, detail = "Calculating chromosome-specific spans")
       
       chr_span <- chr_size[CHROM %in% chromosomes]
@@ -333,6 +338,7 @@ server <- function(input, output, session) {
       results$chr_span <- chr_span
       
       # ── 8. Fit LOESS models and find peaks ──────────────────────────────────
+#      browser() # debug
       incProgress(0.7, detail = "Fitting models and finding peaks")
 
       snp_coverage[, chrom := droplevels(chrom)]
@@ -340,16 +346,34 @@ server <- function(input, output, session) {
 
       span_lookup <- setNames(chr_span$lspan, as.character(chr_span$chrom))
       
+#      browser() # debug
+#      model_results <- lapply(snp_by_chr[-14], function(snps_dt) {
       model_results <- lapply(snp_by_chr, function(snps_dt) {
         chr_name <- as.character(snps_dt$chrom[1])
         lspan    <- span_lookup[chr_name]
-        
-        mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
+
         uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
-        uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
+        
+#        mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
+
+#        uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
+
+        # wrap loess fits into try block
+        
+        uniform_fit <- tryCatch({
+          mdl <- loess(n ~ pos, data = snps_dt, span = lspan)
+          predict(mdl, newdata = data.frame(pos = uniform_pos))
+        }, error = function(e) {
+          showNotification(
+            paste0("LOESS failed for ", chr_name, " (too few SNPs) — raw data shown, no curve."),
+            type = "warning", duration = 10
+          )
+          rep(NA_real_, length(uniform_pos))
+        })
         
         # ── (A) Original findpeaks ──────────────────────────────────────────────
-        raw_peaks <- pracma::findpeaks(
+        #raw_peaks <- pracma::findpeaks(
+        raw_peaks <- if (all(is.na(uniform_fit))) NULL else pracma::findpeaks(
           uniform_fit,
           minpeakheight = input$min_peak_height,
           threshold     = 2
@@ -434,6 +458,7 @@ server <- function(input, output, session) {
       })
 
       # ── 9. Extract peak positions into a flat data.table ───────────────────
+#      browser() # debug
       peaks_list <- lapply(model_results, function(res) {
         if (is.null(res$peaks) || nrow(res$peaks) == 0) return(NULL)
 
@@ -454,6 +479,7 @@ server <- function(input, output, session) {
       }
 
       # ── 10. Map LOESS peaks to nearest actual SNP position ──────────────────
+#      browser() # debug
       if (nrow(peaks_genomic) > 0) {
         snp_peaks <- copy(peaks_genomic)
         snp_peaks[, snp_pos := {
@@ -470,6 +496,7 @@ server <- function(input, output, session) {
       results$snp_peaks     <- snp_peaks
 
       # ── 11. Build chromosome_fits for overview plot ─────────────────────────
+#      browser() # debug
       incProgress(0.8, detail = "Creating overview plot")
 
       chromosome_fits <- rbindlist(lapply(model_results, function(res) {
@@ -494,6 +521,7 @@ server <- function(input, output, session) {
       results$chromosome_fits <- chromosome_fits
 
       # ── 12. Overview plot ───────────────────────────────────────────────────
+#      browser() # debug
       chr_plot <- ggplot(snp_coverage, aes(x = pos_kb, y = n)) +
         geom_line(
           data  = chromosome_fits,
@@ -526,6 +554,7 @@ server <- function(input, output, session) {
       results$plot <- chr_plot
 
       # ── 13. Individual peak plots ───────────────────────────────────────────
+#      browser() # debug
       incProgress(0.9, detail = "Creating individual peak plots")
 
       if (nrow(snp_peaks) > 0) {
