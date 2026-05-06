@@ -254,7 +254,7 @@ server <- function(input, output, session) {
         allele_data <- allele_data[, .(CHROM, POS, REF, ALT)]
       }
 
-      snp_number <- nrow(allele_data)
+      #snp_number <- nrow(allele_data)
 
       # ── 3. Load chromosome size data (FAI) ──────────────────────────────────
       incProgress(0.3, detail = "Loading chromosome sizes")
@@ -266,7 +266,12 @@ server <- function(input, output, session) {
 
       # Preserve FASTA chromosome order as factor levels
       fasta_chr_order <- chr_size$CHROM
-      genome_size     <- sum(chr_size$length)
+      # Restrict to chromosomes present in read data
+      allele_data_used = allele_data[CHROM %in% chromosomes]
+      chr_size_used    = chr_size[CHROM %in% chromosomes]
+      
+      snp_number <- nrow(allele_data_used)
+      genome_size     <- sum(chr_size_used$length)
       snp_density     <- snp_number / genome_size
 
       # ── 4. Filter reads and classify alleles ────────────────────────────────
