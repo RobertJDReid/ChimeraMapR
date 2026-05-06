@@ -3,7 +3,7 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
-APP_VERSION <- "0.4.1"
+APP_VERSION <- "0.4.2"
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -728,6 +728,14 @@ server <- function(input, output, session) {
     }
 
     p
+  }, height = function() {
+    
+    req(results$snp_coverage)
+    
+    n_chr <- length(unique(results$snp_coverage$chrom))
+    
+    min(1600, max(400, n_chr * 120))
+    
   })
 
   # Peaks table
