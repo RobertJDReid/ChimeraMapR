@@ -351,14 +351,20 @@ server <- function(input, output, session) {
 #      browser() # debug
       incProgress(0.65, detail = "Calculating chromosome-specific spans")
       
-      chr_span <- chr_size[CHROM %in% chromosomes]
+      chr_span = chr_size[CHROM %in% chromosomes]
       chr_span[, chrom := factor(CHROM, levels = fasta_chr_order)]
       
-      chr_span[, lspan := input$points_per_window * (1 / snp_density) / length]
+      snp_counts_by_chr <- allele_data[CHROM %in% chromosomes, .N, by = CHROM]
+      chr_span = merge(chr_span, snp_counts_by_chr, by = "CHROM", all.x = TRUE)
+      chr_span[is.na(N), N := 0L]
+      chr_span[, snp_density_chr := N / length]
+      chr_span[, lspan := input$points_per_window / N]
+      chr_span = chr_span[, .(chrom, lspan, length, snp_count = N, snp_density_chr)]
       
-      chr_span <- chr_span[, .(chrom, lspan, length)]
+      #chr_span[, lspan := input$points_per_window * (1 / snp_density) / length]
+      #chr_span <- chr_span[, .(chrom, lspan, length)]
       
-      results$chr_span <- chr_span
+      results$chr_span = chr_span
       
       # ── 8. Fit LOESS models and find peaks ──────────────────────────────────
 #      browser() # debug
