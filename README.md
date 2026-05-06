@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.4.0_
+_version 0.4.1_
 
 An interactive **R Shiny app** for identifying **chimeric long reads** in DNA sequencing data by tracking allele changes across known SNP positions, then summarizing where chimeric reads cluster along each chromosome using LOESS smoothing and peak detection.
 
@@ -138,22 +138,20 @@ All parameters are set in the sidebar panel before running the analysis.
 |---|---|---|
 | **Sample Name** | `Sample_01` | Label used in exported file names |
 | **MAPQ Cutoff** | `20` | Minimum mapping quality score; reads below this threshold are excluded |
-| **Base Quality Cutoff** | `10` | Minimum base quality score at the SNP position; calls below this are excluded |
-| **Minimum Run Length** | `4` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
-| **Minimum Peak Height** | `5` | Minimum chimeric read count for a LOESS peak to be reported. A value of approximately half the median read depth is recommended |
-| **LOESS Span Method** | `Dynamic` | How the LOESS smoothing bandwidth is determined — either a single fixed value applied to all chromosomes, or calculated per chromosome based on length and SNP density (see below) |
+| **Base Quality Minimum** | `10` | Minimum base quality score at the SNP position; calls below this are excluded |
+| **Minimum Run Length** | `2` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
+| **Minimum Peak Height** | `10` | Minimum chimeric read count for a LOESS peak to be reported. A value of approximately half the median read depth is recommended |
+| **Points Per Window** | `6` | LOESS smoothing bandwidth is calculated per chromosome based on length and SNP density (see below) |
 
 ### LOESS span methods
 
-**Fixed span** — a single user-supplied span value (range 0.001–1.0) is used for every chromosome. Lower values give tighter smoothing and are typically appropriate for lower-coverage datasets (a starting value of `0.015` is suggested).
-
-**Dynamic span (default)** — the span for each chromosome is calculated automatically as:
+**Dynamic span** — the span for each chromosome is calculated automatically as:
 
 ```
 span = points_per_window × (1 / SNP_density) / chromosome_length
 ```
 
-where `SNP_density` is the total number of SNPs divided by the total genome size. The **Points Per Window** parameter (default `25`) controls how many SNP positions fall within each LOESS window, allowing the smoothing bandwidth to scale with both chromosome length and SNP density. This method is recommended for most datasets.
+where `SNP_density` is the total number of SNPs divided by the total genome size. The **Points Per Window** parameter (default `6`) controls how many SNP positions fall within each LOESS window, allowing the smoothing bandwidth to scale with both chromosome length and SNP density. Increase for sharper, higher peaks, decrease for broader, lower peaks.
 
 ---
 
@@ -218,8 +216,7 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 3. **SNP-wise coverage** — chimeric reads are counted at each SNP position across all chromosomes
 4. **LOESS smoothing** — a LOESS curve is fit per chromosome, with span calculated either as a fixed value or dynamically based on chromosome length and SNP density
 5. **Peak detection** — `pracma::findpeaks` identifies peaks in the smoothed signal above the user-defined minimum height
-6. **Visualization** — per-peak plots show all chimeric reads spanning each peak SNP, coloured by REF (yellow) vs ALT (purple) allele
-
+6. **Visualization** — per-peak plots show all chimeric reads spanning each peak SNP, coloured by REF (blue) vs ALT (purplered
 ---
 
 ## Outputs

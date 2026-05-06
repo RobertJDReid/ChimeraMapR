@@ -3,7 +3,7 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
-APP_VERSION <- "0.4.0"
+APP_VERSION <- "0.4.1"
 
 # ─────────────────────────────────────────────
 #                   UI
