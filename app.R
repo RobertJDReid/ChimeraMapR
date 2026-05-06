@@ -3,6 +3,8 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
+APP_VERSION <- "0.4.0"
+
 # ─────────────────────────────────────────────
 #                   UI
 # ─────────────────────────────────────────────
@@ -53,22 +55,22 @@ ui <- fluidPage(
 
       numericInput("min_run",
                    "Minimum Run Length:",
-                   value = 4,
+                   value = 2,
                    min = 1,
                    step = 1),
       helpText("Minimum consecutive same-allele calls to count as a run; increase for noisier data"),
 
       numericInput("min_peak_height",
                    "Minimum Peak Height:",
-                   value = 5,
+                   value = 10,
                    min = 1,
                    step = 1),
 #      helpText("Set to ~1/2 of median read depth"),
 
       numericInput("points_per_window",
                    "Points Per Window:",
-                   value = 25,
-                   min = 5,
+                   value = 6,
+                   min = 2,
                    step = 1),
       helpText("Number of SNP points per LOESS window"),
 
@@ -77,7 +79,11 @@ ui <- fluidPage(
       actionButton("run_analysis",
                    "Run Analysis",
                    class = "btn-primary btn-lg"),
-
+      br(),
+      tags$small(
+        style = "color: gray;",
+        paste("ChimeraMapR version", APP_VERSION)
+      ),
       width = 3
     ),
 
@@ -138,6 +144,7 @@ ui <- fluidPage(
                  p("This application identifies chimeric reads in sequencing data by tracking
                    allele changes across chromosomes. Chimeric reads contain sequence from
                    multiple parental chromosomes and can indicate recombination events."),
+                 p(strong("Version:"), APP_VERSION),
                  p(
                    "View the source code and README on",
                    tags$a("GitHub", href = "https://github.com/RobertJDReid/ChimeraMapR", target = "_blank"),
@@ -149,11 +156,11 @@ ui <- fluidPage(
                    tags$li("Uses run-length encoding to detect consecutive allele switches"),
                    tags$li("Identifies reads with multiple sustained allele changes"),
                    tags$li("Counts chimeric reads at each SNP position"),
-                   tags$li("Applies LOESS smoothing to identify peaks (recombination hotspots)")
+                   tags$li("Applies LOESS smoothing to identify peaks of per-read haplotype switches")
                  ),
                  h5("Input Files:"),
                  tags$ul(
-                   tags$li(strong("Read Data:"), "CSV file with SNP position information from BAM file (columns: chrom, pos, read_id, call, is_del, etc.)"),
+                   tags$li(strong("Read Data:"), "CSV file with SNP position information from BAM file (columns: chrom, pos, read_id, call, is_del, etc.). For csv files > 200 Mb, compress with ",em("gzip")," or ",em("pigz")," prior to upload."),
                    tags$li(strong("SNP Data:"), "CSV file with SNP positions (columns: CHROM, POS, REF, ALT), or a VCF file (plain or gzipped). Multi-allelic VCF sites are split into one row per ALT allele."),
                    tags$li(strong("Chromosome Size:"), "FAI index file with chromosome lengths")
                  ),
@@ -174,7 +181,7 @@ ui <- fluidPage(
 # ─────────────────────────────────────────────
 server <- function(input, output, session) {
 
-  # Set max upload size to 100 MB
+  # Set max upload size to 200 MB
   options(shiny.maxRequestSize = 200 * 1024^2)
 
   # Shared trigger for region plot building — incremented by both the overview
@@ -565,7 +572,7 @@ server <- function(input, output, session) {
           geom_vline(
             aes(xintercept = peak_pos / 1000),
             data  = peaks_genomic,
-            color = "blue", alpha = 0.5
+            color = "lightgreen", alpha = 0.5
           )
       }
 
@@ -705,7 +712,7 @@ server <- function(input, output, session) {
         geom_vline(
           aes(xintercept = peak_pos / 1000),
           data  = peaks_genomic,
-          color = "blue", alpha = 0.5
+          color = "lightgreen", alpha = 0.5
         )
     }
 
@@ -870,7 +877,7 @@ server <- function(input, output, session) {
             )
           if (!is.null(.peaks) && nrow(.peaks) > 0)
             p <- p + geom_vline(aes(xintercept = peak_pos / 1000),
-                                data = .peaks, color = "blue", alpha = 0.6)
+                                data = .peaks, color = "lightgreen", alpha = 0.5)
           p
         })
       
@@ -1107,7 +1114,7 @@ server <- function(input, output, session) {
               strip.text.y = element_text(size = 9, angle = 0, hjust = 0, face = "bold"))
       if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0)
         p <- p + geom_vline(aes(xintercept = peak_pos / 1000),
-                            data = peaks_genomic, color = "blue", alpha = 0.5)
+                            data = peaks_genomic, color = "lightgreen", alpha = 0.5)
       ggsave(file, plot = p, width = 12, height = 16, dpi = 300)
     }
   )
