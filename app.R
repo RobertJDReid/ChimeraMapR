@@ -184,6 +184,7 @@ server <- function(input, output, session) {
   # Reactive values to store analysis results
   results <- reactiveValues(
     rt_df                 = NULL,
+    transition_pos        = NULL,   # boundary positions only (new method)
     snp_coverage          = NULL,
     peaks_genomic         = NULL,
     snp_peaks             = NULL,
@@ -305,11 +306,21 @@ server <- function(input, output, session) {
       results$rt_df             <- rt_df
       results$chimeric_read_ids <- unique(rt_df$read_id)
 
-      # ── 6. Count chimeric reads per SNP position ────────────────────────────
-#      browser() # debug
-      incProgress(0.6, detail = "Counting SNP coverage")
+      # ── 6. Extract transition boundaries and count per SNP position ─────────
+      # For each chimeric read, keep only the last position of a departing run
+      # and the first position of the arriving run.  These boundary positions
+      # are the signal used for pileup — not the full read span.
+      incProgress(0.6, detail = "Extracting transition boundaries")
 
-      pos_count <- rt_df[, .(n = .N), by = .(chrom, pos)]
+      transition_pos <- rt_df[, {
+        is_last_of_run  <- c(ALLELE[-1] != ALLELE[-.N], FALSE)
+        is_first_of_run <- c(FALSE, ALLELE[-1] != ALLELE[-.N])
+        .SD[is_last_of_run | is_first_of_run, .(chrom, pos)]
+      }, by = read_id]
+
+      results$transition_pos <- transition_pos
+
+      pos_count <- transition_pos[, .(n = .N), by = .(chrom, pos)]
 
       snp_coverage <- allele_data[CHROM %in% chromosomes, .(chrom = CHROM, pos = POS)]
 
@@ -478,14 +489,21 @@ server <- function(input, output, session) {
         peaks_genomic[, chrom := factor(chrom, levels = fasta_chr_order)]
       }
 
-      # ── 10. Map LOESS peaks to nearest actual SNP position ──────────────────
+      # ── 10. Map LOESS peaks to nearest SNP position with signal ────────────
 #      browser() # debug
       if (nrow(peaks_genomic) > 0) {
         snp_peaks <- copy(peaks_genomic)
         snp_peaks[, snp_pos := {
-          chr_snps <- snp_coverage[chrom == .BY$chrom, pos]
+          # Use only SNP positions that have transition-boundary signal above the
+          # peak-height threshold; fall back to all positions if none qualify.
+          chr_signal <- snp_coverage[as.character(chrom) == as.character(.BY$chrom) & n > input$min_peak_height, pos]
+          chr_all    <- snp_coverage[as.character(chrom) == as.character(.BY$chrom), pos]
           vapply(peak_pos, function(pp) {
-            chr_snps[which.min(abs(chr_snps - pp))]
+            if (length(chr_signal) > 0) {
+              chr_signal[which.min(abs(chr_signal - pp))]
+            } else {
+              chr_all[which.min(abs(chr_all - pp))]
+            }
           }, numeric(1))
         }, by = chrom]
       } else {
@@ -562,13 +580,16 @@ server <- function(input, output, session) {
         peak_chrs <- levels(droplevels(snp_peaks$chrom))
 
         peak_plots_list <- lapply(peak_chrs, function(chr_name) {
-          chr_peaks  <- snp_peaks[chrom == chr_name]
-          chr_rt     <- rt_df[chrom == chr_name]
+          chr_peaks <- snp_peaks[chrom == chr_name]
+          chr_rt    <- rt_df[chrom == chr_name]
+          # Use transition_pos to identify reads that contributed a boundary at
+          # the peak SNP position; then plot the full read span from rt_df.
+          chr_trans <- transition_pos[chrom == chr_name]
 
           peak_plots <- lapply(seq_len(nrow(chr_peaks)), function(i) {
             peak_data <- chr_peaks[i]
 
-            read_ids <- chr_rt[pos == peak_data$snp_pos, unique(read_id)]
+            read_ids <- chr_trans[pos == peak_data$snp_pos, unique(read_id)]
 
             if (length(read_ids) == 0) return(NULL)
 
@@ -919,11 +940,12 @@ server <- function(input, output, session) {
   output$summary_stats <- renderText({
     req(results$rt_df, results$snp_coverage, results$peaks_genomic)
 
-    n_chimeric_reads <- uniqueN(results$rt_df$read_id)
-    n_chromosomes    <- uniqueN(results$snp_coverage$chrom)
-    n_peaks          <- nrow(results$peaks_genomic)
-    total_snps       <- nrow(results$snp_coverage)
-    covered_snps     <- results$snp_coverage[n > 0, .N]
+    n_chimeric_reads   <- uniqueN(results$rt_df$read_id)
+    n_chromosomes      <- uniqueN(results$snp_coverage$chrom)
+    n_peaks            <- nrow(results$peaks_genomic)
+    total_snps         <- nrow(results$snp_coverage)
+    boundary_snps      <- results$snp_coverage[n > 0, .N]
+    total_boundaries   <- sum(results$snp_coverage$n)
 
     span_method_text <- paste0("Dynamic (Points Per Window: ", input$points_per_window, ")")
 
@@ -932,8 +954,9 @@ server <- function(input, output, session) {
       "Chimeric Reads Detected: ", n_chimeric_reads, "\n",
       "Chromosomes Analyzed: ", n_chromosomes, "\n",
       "Total SNP Positions: ", total_snps, "\n",
-      "SNP Positions with Chimeric Reads: ", covered_snps,
-      " (", round(100 * covered_snps / total_snps, 1), "%)\n",
+      "SNP Positions with Transition Boundaries: ", boundary_snps,
+      " (", round(100 * boundary_snps / total_snps, 1), "%)\n",
+      "Total Transition Boundary Events: ", total_boundaries, "\n",
       "Peaks Detected: ", n_peaks, "\n\n",
       "Analysis Parameters:\n",
       "  MAPQ Cutoff: ",         input$mapq_cutoff,     "\n",
@@ -946,11 +969,13 @@ server <- function(input, output, session) {
 
   # ── Shared helper: build and display the selected-region read plot ───────────
   build_region_plot <- function() {
-    req(results$selected_region, results$rt_df)
+    req(results$selected_region, results$rt_df, results$transition_pos)
 
     reg <- results$selected_region
 
-    touching_ids <- results$rt_df[
+    # Select reads that contributed a transition boundary inside the region;
+    # then plot their full span from rt_df for context.
+    touching_ids <- results$transition_pos[
       as.character(chrom) == reg$chrom & pos >= reg$start & pos <= reg$end,
       unique(read_id)
     ]
