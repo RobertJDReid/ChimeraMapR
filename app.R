@@ -390,7 +390,8 @@ server <- function(input, output, session) {
         # wrap loess fits into try block
         
         uniform_fit <- tryCatch({
-          mdl <- loess(n ~ pos, data = snps_dt, span = lspan)
+#          mdl <- loess(n ~ pos, data = snps_dt, span = lspan)
+          mdl <- loess(n ~ pos, data = snps_dt, span = lspan, degree = 1)
           predict(mdl, newdata = data.frame(pos = uniform_pos))
         }, error = function(e) {
           showNotification(
