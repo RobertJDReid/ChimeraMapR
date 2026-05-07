@@ -613,12 +613,27 @@ server <- function(input, output, session) {
             if (length(read_ids) == 0) return(NULL)
 
             pltdf <- chr_rt[read_id %in% read_ids]
-
+            
+            peak_pts <- pltdf[pos == peak_data$snp_pos]
+            
             ggplot(pltdf, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-              geom_vline(
-                xintercept = peak_data$snp_pos / 1000,
-                color = "grey80", linewidth = 3, alpha = 0.5
+              geom_point(size = 1) +
+              geom_point(
+                data        = peak_pts,
+                aes(x = pos / 1000, y = 1),
+                shape       = 21,
+                size        = 3,
+                color       = "black",
+                fill        = NA,
+                stroke      = 1.5,
+                inherit.aes = FALSE
               ) +
+
+#            ggplot(pltdf, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
+#              geom_vline(
+#                xintercept = peak_data$snp_pos / 1000,
+#                color = "grey80", linewidth = 3, alpha = 0.5
+#              ) +
               geom_point() +
               facet_grid(read_id ~ .) +
               scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
@@ -718,15 +733,39 @@ server <- function(input, output, session) {
         axis.title         = element_text(size = 15),
         strip.text.y       = element_text(size = 9, angle = 0, hjust = 0, face = "bold")
       )
-
+    
     if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0) {
-      p <- p +
-        geom_vline(
-          aes(xintercept = peak_pos / 1000),
-          data  = peaks_genomic,
-          color = "lightgreen", alpha = 0.5
+      snp_peaks_local <- copy(results$snp_peaks)
+      if (!is.null(snp_peaks_local) && nrow(snp_peaks_local) > 0) {
+        snp_peaks_local[, chrom := as.character(chrom)]
+        peak_highlight <- merge(
+          snp_peaks_local[, .(chrom, pos = snp_pos)],
+          snp_coverage[, .(chrom, pos, pos_kb, n)],
+          by = c("chrom", "pos")
         )
+        if (nrow(peak_highlight) > 0) {
+          p <- p + geom_point(
+            data        = peak_highlight,
+            aes(x = pos_kb, y = n),
+            color       = "black",
+            fill        = "dodgerblue",
+            size        = 2.5,
+            shape       = 21,
+            alpha       = 0.9,
+            inherit.aes = FALSE
+          )
+        }
+      }
     }
+
+#    if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0) {
+#      p <- p +
+#        geom_vline(
+#          aes(xintercept = peak_pos / 1000),
+#          data  = peaks_genomic,
+#          color = "lightgreen", alpha = 0.5
+#        )
+#    }
 
     p
   }, height = function() {
@@ -854,11 +893,14 @@ server <- function(input, output, session) {
     snp_cov_all   <- copy(results$snp_coverage)
     fits_all      <- copy(results$chromosome_fits)
     peaks_all     <- results$peaks_genomic
+    snp_peaks_all <- if (!is.null(results$snp_peaks) && nrow(results$snp_peaks) > 0)
+      copy(results$snp_peaks)[, chrom := as.character(chrom)]
+    else NULL
     snp_cov_all[,  chrom := as.character(chrom)]
     fits_all[,     chrom := as.character(chrom)]
     if (!is.null(peaks_all) && nrow(peaks_all) > 0)
       peaks_all <- copy(peaks_all)[, chrom := as.character(chrom)]
-
+    
     lapply(chr_levels, function(chr_name) {
       chr_c    <- as.character(chr_name)
       plot_id  <- paste0("chr_cov_plot_", chr_c)
@@ -875,6 +917,9 @@ server <- function(input, output, session) {
         .fits     <- fits_all[chrom == .chr]
         .peaks    <- if (!is.null(peaks_all) && nrow(peaks_all) > 0)
                        peaks_all[chrom == .chr] else NULL
+        .snp_peaks_chr <- if (!is.null(snp_peaks_all) && nrow(snp_peaks_all) > 0)
+          snp_peaks_all[chrom == .chr]
+        else NULL
       
         # Render the coverage plot for this chromosome
         output[[.plot_id]] <- renderPlot({
@@ -895,9 +940,29 @@ server <- function(input, output, session) {
               panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
               panel.grid.major.x = element_line(linewidth = 0.05, color = "red")
             )
-          if (!is.null(.peaks) && nrow(.peaks) > 0)
-            p <- p + geom_vline(aes(xintercept = peak_pos / 1000),
-                                data = .peaks, color = "lightgreen", alpha = 0.5)
+          
+          if (!is.null(.snp_peaks_chr) && nrow(.snp_peaks_chr) > 0) {
+            peak_highlight <- merge(
+              .snp_peaks_chr[, .(pos = snp_pos)],
+              .snp[, .(pos, pos_kb, n)],
+              by = "pos"
+            )
+            if (nrow(peak_highlight) > 0)
+              p <- p + geom_point(
+                data        = peak_highlight,
+                aes(x = pos_kb, y = n),
+                color       = "black",
+                fill        = "dodgerblue",
+                size        = 3,
+                shape       = 21,
+                alpha       = 0.9,
+                inherit.aes = FALSE
+              )
+          }
+
+#          if (!is.null(.peaks) && nrow(.peaks) > 0)
+#            p <- p + geom_vline(aes(xintercept = peak_pos / 1000),
+#                                data = .peaks, color = "lightgreen", alpha = 0.5)
           p
         })
       
