@@ -1220,8 +1220,30 @@ server <- function(input, output, session) {
           helpText("Shows all chimeric reads touching the selected interval, plotted in a padded display window."),
           plotOutput("selected_region_plot", height = "800px"),
           br(),
-          downloadButton("download_selected_region_plot", "Download Plot"),
-          actionButton("close_selected_region_tab", "Close Tab", class = "btn-secondary")
+          fluidRow(
+            column(
+              3,
+              downloadButton(
+                "download_selected_region_plot",
+                "Download Plot Image (.png)"
+              )
+            ),
+            column(
+              4,
+              downloadButton(
+                "download_selected_region_rds",
+                "Download Plot Data (.rds)"
+              )
+            ),
+            column(
+              3,
+              actionButton(
+                "close_selected_region_tab",
+                "Close Tab",
+                class = "btn-secondary"
+              )
+            )
+          )
         )
       )
     } else {
@@ -1287,6 +1309,7 @@ server <- function(input, output, session) {
     content  = function(file) writeLines(results$chimeric_read_ids, file)
   )
 
+  # selected region plot image
   output$download_selected_region_plot <- downloadHandler(
     filename = function() {
       req(results$selected_region)
@@ -1300,6 +1323,45 @@ server <- function(input, output, session) {
     content = function(file) {
       req(results$selected_region_plot)
       ggsave(file, plot = results$selected_region_plot, width = 10, height = 12, dpi = 300)
+    }
+  )
+  # selected region data
+  output$download_selected_region_rds <- downloadHandler(
+    filename = function() {
+      req(results$selected_region)
+      reg <- results$selected_region
+      
+      paste0(
+        input$sample_name,
+        "_selected_region_chr", reg$chrom, "_",
+        reg$start, "_", reg$end, "_",
+        Sys.Date(), ".rds"
+      )
+    },
+    content = function(file) {
+      req(results$selected_region_data, results$selected_region)
+      
+      reg <- results$selected_region
+      
+      plot_data <- as.data.table(results$selected_region_data)
+      
+      plot_data <- plot_data[, .(
+        chrom,
+        pos,
+        read_id,
+        IS_REF,
+        ALLELE
+      )]
+      
+      saveRDS(
+        list(
+          plot_data = plot_data,
+          selected_region = reg,
+          sample_name = input$sample_name,
+          app_version = APP_VERSION
+        ),
+        file
+      )
     }
   )
   
