@@ -640,11 +640,7 @@ server <- function(input, output, session) {
                 inherit.aes = FALSE
               ) +
 
-#            ggplot(pltdf, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-#              geom_vline(
-#                xintercept = peak_data$snp_pos / 1000,
-#                color = "grey80", linewidth = 3, alpha = 0.5
-#              ) +
+#             Add peak SNP highlighting
               geom_point() +
               facet_grid(read_id ~ .) +
               scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
@@ -831,14 +827,14 @@ server <- function(input, output, session) {
             column(3,
               downloadButton(
                 paste0("dl_peak_png_", chr_name, "_", i),
-                "Download PNG",
+                "Download Plot Image (.png)",
                 class = "btn-sm btn-default"
               )
             ),
             column(4,
               downloadButton(
                 paste0("dl_peak_rds_", chr_name, "_", i),
-                "Download R Object (.rds)",
+                "Download Plot Data (.rds)",
                 class = "btn-sm btn-default"
               )
             )
@@ -897,7 +893,27 @@ server <- function(input, output, session) {
                      "_", Sys.Date(), ".rds")
             },
             content = function(file) {
-              saveRDS(p, file)
+              
+              plot_data <- as.data.table(p$data)
+              
+              plot_data <- plot_data[, .(
+                chrom,
+                pos,
+                read_id,
+                IS_REF
+              )]
+
+              saveRDS(
+                list(
+                  plot_data = plot_data,
+                  peak_points = as.data.table(p$layers[[2]]$data),
+                  chromosome = .chr,
+                  peak_number = .i,
+                  sample_name = input$sample_name,
+                  app_version = APP_VERSION
+                ),
+                file
+              )
             }
           )
         })
