@@ -3,7 +3,7 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
-APP_VERSION <- "0.4.3"
+APP_VERSION <- "0.4.4"
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -401,55 +401,57 @@ server <- function(input, output, session) {
           rep(NA_real_, length(uniform_pos))
         })
         
-        # ── (A) Original findpeaks ──────────────────────────────────────────────
-        #raw_peaks <- pracma::findpeaks(
+        # ── (A) findpeaks on LOESS fit ─────────────────────────────────────────
+        # threshold=0: don't demand neighbours be lower by a fixed amount —
+        # LOESS humps on sparse boundary data are gentle and this rejection
+        # criterion was causing false negatives.
         raw_peaks <- if (all(is.na(uniform_fit))) NULL else pracma::findpeaks(
           uniform_fit,
           minpeakheight = input$min_peak_height,
-          threshold     = 2
+          threshold     = 0
         )
-        
+
         findpeaks_positions <- if (!is.null(raw_peaks) && nrow(raw_peaks) > 0) {
           uniform_pos[raw_peaks[, 2]]   # column 2 = index of peak apex
         } else {
           numeric(0)
         }
-        
-        # ── (B) Region-based fallback ───────────────────────────────────────────
-        # Parameters — could be exposed as UI inputs later
-        max_region_width_bp <- 50000   # ignore regions wider than 50 Kb (likely baseline noise)
-        min_region_width_bp <- 1000        # optional: skip tiny blips
-        
-        above_thresh <- !is.na(uniform_fit) & uniform_fit >= input$min_peak_height
-        
-        # Run-length encode the threshold-crossing vector
-        rle_above   <- rle(above_thresh)
-        region_ends <- cumsum(rle_above$lengths)
-        region_starts <- c(1L, head(region_ends, -1) + 1L)
-        
-        region_peaks <- lapply(seq_along(rle_above$lengths), function(k) {
-          if (!rle_above$values[k]) return(NULL)   # below threshold, skip
-          
-          idx_range <- region_starts[k]:region_ends[k]
-          pos_range <- uniform_pos[idx_range]
-          region_width <- max(pos_range) - min(pos_range)
-          
-          # Apply width filter
-          if (region_width > max_region_width_bp) return(NULL)
-          if (region_width < min_region_width_bp) return(NULL)
-          
-          # Peak position = argmax within region (or use median(pos_range) for centroid)
-          local_max_idx <- idx_range[which.max(uniform_fit[idx_range])]
-          
-          data.frame(
-            peak_height = uniform_fit[local_max_idx],
-            peak_index  = local_max_idx,
-            peak_start  = region_starts[k],
-            peak_end    = region_ends[k]
-          )
-        })
-        
-        region_peaks_df <- do.call(rbind, Filter(Negate(is.null), region_peaks))
+
+        # ── (B) Raw-signal fallback ─────────────────────────────────────────────
+        # The old fallback scanned uniform_fit (LOESS output) for above-threshold
+        # runs.  Because the new boundary-only signal is sparse and impulsive,
+        # LOESS attenuates sharp spikes heavily — a spike of 30 reads spanning 1-2
+        # SNP positions can produce a LOESS peak of only ~5, below min_peak_height.
+        # The fallback therefore also missed the peak, defeating its purpose.
+        #
+        # Fix: bypass LOESS entirely and scan the raw per-SNP transition counts
+        # (snps_dt$n).  Nearby high-count positions (within cluster_gap_bp) are
+        # merged into a single candidate peak; the argmax of each cluster is kept.
+        # A ±5-grid-point window around the argmax is stored only for the
+        # deduplication check in (C) — it is NOT used to filter peaks by width.
+
+        cluster_gap_bp <- 10000L   # merge boundary spikes within 10 Kb
+
+        raw_hi <- snps_dt[n >= input$min_peak_height]
+
+        if (nrow(raw_hi) > 0) {
+          raw_hi <- raw_hi[order(raw_hi$pos), ]
+          gaps      <- c(cluster_gap_bp + 1L, diff(raw_hi$pos))
+          raw_hi$cl <- cumsum(gaps > cluster_gap_bp)
+
+          region_peaks_df <- do.call(rbind, lapply(split(raw_hi, raw_hi$cl), function(cl_rows) {
+            best <- cl_rows[which.max(cl_rows$n), ]
+            ui   <- which.min(abs(uniform_pos - best$pos))
+            data.frame(
+              peak_height = best$n,                           # raw count, not LOESS
+              peak_index  = ui,
+              peak_start  = max(1L, ui - 5L),                # ±5 grid pts (~1 Kb)
+              peak_end    = min(length(uniform_pos), ui + 5L) # for dedup only
+            )
+          }))
+        } else {
+          region_peaks_df <- NULL
+        }
         
         # ── (C) Deduplicate: keep region peaks not already covered by findpeaks ─
         # A region peak is "already found" if findpeaks placed a peak within its bounds
