@@ -816,26 +816,7 @@ server <- function(input, output, session) {
       if (length(plots) == 0) return(NULL)
 
       plot_outputs <- lapply(seq_along(plots), function(i) {
-        tagList(
-          plotOutput(paste0("peak_plot_", chr_name, "_", i), height = "600px"),
-          fluidRow(
-            column(3,
-              downloadButton(
-                paste0("dl_peak_png_", chr_name, "_", i),
-                "Download PNG",
-                class = "btn-sm btn-default"
-              )
-            ),
-            column(4,
-              downloadButton(
-                paste0("dl_peak_rds_", chr_name, "_", i),
-                "Download R Object (.rds)",
-                class = "btn-sm btn-default"
-              )
-            )
-          ),
-          hr()
-        )
+        plotOutput(paste0("peak_plot_", chr_name, "_", i), height = "600px")
       })
 
       tabPanel(
@@ -851,7 +832,7 @@ server <- function(input, output, session) {
     do.call(tabsetPanel, chr_tabs)
   })
 
-  # Render individual peak plots dynamically, with PNG and RDS download handlers
+  # Render individual peak plots dynamically
   observe({
     req(results$peak_plots_by_chr)
 
@@ -861,36 +842,9 @@ server <- function(input, output, session) {
 
       lapply(seq_along(plots), function(i) {
         output_name <- paste0("peak_plot_", chr_name, "_", i)
-        png_dl_id   <- paste0("dl_peak_png_", chr_name, "_", i)
-        rds_dl_id   <- paste0("dl_peak_rds_", chr_name, "_", i)
         local({
-          p    <- plots[[i]]
-          .chr <- chr_name
-          .i   <- i
-
+          p <- plots[[i]]
           output[[output_name]] <- renderPlot({ p })
-
-          output[[png_dl_id]] <- downloadHandler(
-            filename = function() {
-              paste0(input$sample_name, "_peak_chr", .chr, "_peak", .i,
-                     "_", Sys.Date(), ".png")
-            },
-            content = function(file) {
-              n_reads <- length(unique(ggplot_build(p)$data[[1]]$group))
-              plot_h  <- max(4, min(20, n_reads * 0.4 + 2))
-              ggsave(file, plot = p, width = 10, height = plot_h, dpi = 300)
-            }
-          )
-
-          output[[rds_dl_id]] <- downloadHandler(
-            filename = function() {
-              paste0(input$sample_name, "_peak_chr", .chr, "_peak", .i,
-                     "_", Sys.Date(), ".rds")
-            },
-            content = function(file) {
-              saveRDS(p, file)
-            }
-          )
         })
       })
     })
