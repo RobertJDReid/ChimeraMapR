@@ -3,7 +3,7 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
-APP_VERSION <- "0.4.4"
+APP_VERSION <- "0.4.5"
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -299,6 +299,13 @@ server <- function(input, output, session) {
       )]
 
       full_read <- full_read[ALLELE != "OTHER"]
+      full_read <- full_read[, .(
+        chrom,
+        pos,
+        read_id,
+        IS_REF,
+        ALLELE
+      )]
       setorder(full_read, read_id, pos)
 
       # ── 5. Detect chimeric reads via RLE ────────────────────────────────────
@@ -329,6 +336,8 @@ server <- function(input, output, session) {
         is_first_of_run <- c(FALSE, ALLELE[-1] != ALLELE[-.N])
         .SD[is_last_of_run | is_first_of_run, .(chrom, pos)]
       }, by = read_id]
+
+      rt_df[, c("runs", "new_runs") := NULL]
 
       results$transition_pos <- transition_pos
 
