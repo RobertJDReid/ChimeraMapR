@@ -3,7 +3,7 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
-APP_VERSION <- "0.4.5"
+APP_VERSION <- "0.4.8"
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -411,12 +411,14 @@ server <- function(input, output, session) {
         })
         
         # ── (A) findpeaks on LOESS fit ─────────────────────────────────────────
-        # threshold=0: don't demand neighbours be lower by a fixed amount —
-        # LOESS humps on sparse boundary data are gentle and this rejection
-        # criterion was causing false negatives.
+        # minpeakheight=1: detect any LOESS bump regardless of attenuated height.
+        # LOESS is used solely to define peak *intervals* (left/right valleys,
+        # cols 3 & 4 from pracma); the raw per-SNP count (>= min_peak_height) is
+        # the actual height gate applied in step 10.  This means sharp spikes
+        # that LOESS attenuates below min_peak_height are no longer missed.
         raw_peaks <- if (all(is.na(uniform_fit))) NULL else pracma::findpeaks(
           uniform_fit,
-          minpeakheight = input$min_peak_height,
+          minpeakheight = 1,
           threshold     = 0
         )
 
@@ -519,27 +521,79 @@ server <- function(input, output, session) {
         peaks_genomic[, chrom := factor(chrom, levels = fasta_chr_order)]
       }
 
-      # ── 10. Map LOESS peaks to nearest SNP position with signal ────────────
+      # ── 10. Map peaks to all SNPs above cutoff within each peak interval ───────
 #      browser() # debug
+      #
+      # Redesigned logic (v0.4.8):
+      #   LOESS defines *where to look* (left/right valley interval from findpeaks).
+      #   Raw SNP count (n >= min_peak_height) determines *what qualifies*.
+      #   Multiple qualifying SNPs per interval are each reported as a separate row.
+      #   If no SNP clears the bar, one row is kept with snp_pos = NA.
       if (nrow(peaks_genomic) > 0) {
-        snp_peaks <- copy(peaks_genomic)
-        snp_peaks[, snp_pos := {
-          # Use only SNP positions that have transition-boundary signal above the
-          # peak-height threshold; fall back to all positions if none qualify.
-          chr_signal <- snp_coverage[as.character(chrom) == as.character(.BY$chrom) & n > input$min_peak_height, pos]
-          chr_all    <- snp_coverage[as.character(chrom) == as.character(.BY$chrom), pos]
-          vapply(peak_pos, function(pp) {
-            if (length(chr_signal) > 0) {
-              chr_signal[which.min(abs(chr_signal - pp))]
-            } else {
-              chr_all[which.min(abs(chr_all - pp))]
-            }
-          }, numeric(1))
-        }, by = chrom]
-      } else {
-        snp_peaks <- peaks_genomic[, snp_pos := numeric(0)]
-      }
 
+        snp_peaks_list <- lapply(seq_len(nrow(peaks_genomic)), function(i) {
+          row      <- peaks_genomic[i]
+          chr_name <- as.character(row$chrom)
+          chr_cov  <- snp_coverage[as.character(chrom) == chr_name]
+
+          in_interval <- chr_cov[
+            pos >= row$peak_start &
+            pos <= row$peak_end   &
+            n   >= input$min_peak_height
+          ]
+
+          if (nrow(in_interval) > 0) {
+            data.table(
+              chrom       = row$chrom,
+              peak_pos    = row$peak_pos,
+              peak_height = row$peak_height,
+              peak_start  = row$peak_start,
+              peak_end    = row$peak_end,
+              snp_pos     = in_interval$pos,
+              snp_n       = in_interval$n
+            )
+          } else {
+            data.table(
+              chrom       = row$chrom,
+              peak_pos    = row$peak_pos,
+              peak_height = row$peak_height,
+              peak_start  = row$peak_start,
+              peak_end    = row$peak_end,
+              snp_pos     = NA_real_,
+              snp_n       = NA_integer_
+            )
+          }
+        })
+
+        snp_peaks <- rbindlist(snp_peaks_list, fill = TRUE)
+        snp_peaks[, chrom := factor(as.character(chrom),
+                                    levels = levels(peaks_genomic$chrom))]
+
+        snp_peaks[, chimeric_reads_at_snp := {
+          chr_name <- as.character(.BY$chrom)
+          vapply(snp_pos, function(sp) {
+            if (is.na(sp)) return(NA_integer_)
+            uniqueN(rt_df[
+              as.character(chrom) == chr_name &
+                pos == sp,
+              read_id
+            ])
+          }, integer(1))
+        }, by = chrom]
+
+      } else {
+        snp_peaks <- data.table(
+          chrom                 = factor(character(0), levels = fasta_chr_order),
+          peak_pos              = numeric(0),
+          peak_height           = numeric(0),
+          peak_start            = numeric(0),
+          peak_end              = numeric(0),
+          snp_pos               = numeric(0),
+          snp_n                 = integer(0),
+          chimeric_reads_at_snp = integer(0)
+        )
+      }
+      
       results$peaks_genomic <- peaks_genomic
       results$snp_peaks     <- snp_peaks
 
@@ -788,21 +842,40 @@ server <- function(input, output, session) {
   # Peaks table
   output$peaks_table <- renderTable({
     req(results$peaks_genomic)
-    out <- copy(results$peaks_genomic)
+    out <- copy(results$snp_peaks)
     out[, `:=`(
       peak_pos_kb   = round(peak_pos   / 1000, 2),
       peak_start_kb = round(peak_start / 1000, 2),
       peak_end_kb   = round(peak_end   / 1000, 2),
       peak_height   = round(peak_height, 2)
     )]
-    out <- out[, .(
-      Chromosome           = chrom,
-      `Peak Position (Kb)` = peak_pos_kb,
-      `Peak Start (Kb)`    = peak_start_kb,
-      `Peak End (Kb)`      = peak_end_kb,
-      `Peak Height`        = peak_height
+    # Format SNP position and read count as character so NA can display a label
+    out[, snp_pos_kb_str := ifelse(
+      is.na(snp_pos),
+      "None above cutoff",
+      as.character(round(snp_pos / 1000, 2))
     )]
-    setorder(out, Chromosome, `Peak Position (Kb)`)
+    out[, snp_n_str := ifelse(
+      is.na(snp_n),
+      "",
+      as.character(snp_n)
+    )]
+    out[, chimeric_reads_str := ifelse(
+      is.na(chimeric_reads_at_snp),
+      "",
+      as.character(chimeric_reads_at_snp)
+    )]
+    out <- out[, .(
+      Chromosome                  = chrom,
+      `LOESS Peak Position (Kb)`  = peak_pos_kb,
+      `Qualifying SNP (Kb)`       = snp_pos_kb_str,
+      `Raw Count at SNP`          = snp_n_str,
+      `Peak Start (Kb)`           = peak_start_kb,
+      `Peak End (Kb)`             = peak_end_kb,
+      `LOESS Peak Height`         = peak_height,
+      `Chimeric Reads at SNP`     = chimeric_reads_str
+    )]
+    setorder(out, Chromosome, `LOESS Peak Position (Kb)`)
     out
   })
 
@@ -1301,7 +1374,8 @@ server <- function(input, output, session) {
 
   output$download_peaks <- downloadHandler(
     filename = function() paste0(input$sample_name, "_peaks_", Sys.Date(), ".csv"),
-    content  = function(file) fwrite(results$peaks_genomic, file)
+    #content  = function(file) fwrite(results$peaks_genomic, file)
+    content  = function(file) fwrite(results$snp_peaks, file)
   )
 
   output$download_read_ids <- downloadHandler(
