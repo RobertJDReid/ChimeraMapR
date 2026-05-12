@@ -3,7 +3,7 @@ library(data.table)
 library(pracma)
 library(ggplot2)
 
-APP_VERSION <- "0.4.8"
+APP_VERSION <- "0.4.9"
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -521,13 +521,14 @@ server <- function(input, output, session) {
         peaks_genomic[, chrom := factor(chrom, levels = fasta_chr_order)]
       }
 
-      # ── 10. Map peaks to all SNPs above cutoff within each peak interval ───────
+      # ── 10. Map each peak interval to a single best SNP ────────────────────────
 #      browser() # debug
       #
-      # Redesigned logic (v0.4.8):
-      #   LOESS defines *where to look* (left/right valley interval from findpeaks).
-      #   Raw SNP count (n >= min_peak_height) determines *what qualifies*.
-      #   Multiple qualifying SNPs per interval are each reported as a separate row.
+      # Selection logic:
+      #   1. Candidate pool: SNPs within [peak_start, peak_end] with n >= min_peak_height.
+      #   2. Pick the candidate with the highest count (n).
+      #   3. Ties on count: keep the candidate(s) closest to the LOESS peak position.
+      #   4. Ties on distance (rare): choose one at random.
       #   If no SNP clears the bar, one row is kept with snp_pos = NA.
       if (nrow(peaks_genomic) > 0) {
 
@@ -543,14 +544,29 @@ server <- function(input, output, session) {
           ]
 
           if (nrow(in_interval) > 0) {
+            # Step 1: restrict to maximum count
+            max_n      <- max(in_interval$n)
+            candidates <- in_interval[n == max_n]
+
+            # Step 2: if still tied, keep the one(s) closest to the LOESS peak
+            if (nrow(candidates) > 1L) {
+              candidates[, dist_to_peak := abs(pos - row$peak_pos)]
+              min_dist   <- min(candidates$dist_to_peak)
+              candidates <- candidates[dist_to_peak == min_dist]
+              candidates[, dist_to_peak := NULL]
+            }
+
+            # Step 3: if still tied (equidistant), choose randomly
+            best <- if (nrow(candidates) == 1L) candidates else candidates[sample(.N, 1L)]
+
             data.table(
               chrom       = row$chrom,
               peak_pos    = row$peak_pos,
               peak_height = row$peak_height,
               peak_start  = row$peak_start,
               peak_end    = row$peak_end,
-              snp_pos     = in_interval$pos,
-              snp_n       = in_interval$n
+              snp_pos     = best$pos,
+              snp_n       = best$n
             )
           } else {
             data.table(
