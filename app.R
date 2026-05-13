@@ -1331,9 +1331,14 @@ server <- function(input, output, session) {
     filename = function() paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".png"),
     content  = function(file) {
       req(results$snp_coverage, results$chromosome_fits)
-      snp_coverage    <- results$snp_coverage
-      chromosome_fits <- results$chromosome_fits
+      snp_coverage    <- copy(results$snp_coverage)
+      chromosome_fits <- copy(results$chromosome_fits)
       peaks_genomic   <- results$peaks_genomic
+
+      # Convert chrom to character to match display plot behaviour
+      snp_coverage[,    chrom := as.character(chrom)]
+      chromosome_fits[, chrom := as.character(chrom)]
+
       p <- ggplot(snp_coverage, aes(x = pos_kb, y = n)) +
         geom_line(data = chromosome_fits, aes(x = uniform_pos / 1000, y = uniform_fit),
                   color = "firebrick", linewidth = 0.6, alpha = 0.5) +
@@ -1348,9 +1353,32 @@ server <- function(input, output, session) {
               strip.background = element_blank(), strip.placement = "outside",
               axis.text = element_text(size = 12), axis.title = element_text(size = 15),
               strip.text.y = element_text(size = 9, angle = 0, hjust = 0, face = "bold"))
-      if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0)
-        p <- p + geom_vline(aes(xintercept = peak_pos / 1000),
-                            data = peaks_genomic, color = "lightgreen", alpha = 0.5)
+
+      # Mirror the display plot: highlight peak SNP points instead of vlines
+      if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0) {
+        snp_peaks_local <- copy(results$snp_peaks)
+        if (!is.null(snp_peaks_local) && nrow(snp_peaks_local) > 0) {
+          snp_peaks_local[, chrom := as.character(chrom)]
+          peak_highlight <- merge(
+            snp_peaks_local[, .(chrom, pos = snp_pos)],
+            snp_coverage[,    .(chrom, pos, pos_kb, n)],
+            by = c("chrom", "pos")
+          )
+          if (nrow(peak_highlight) > 0) {
+            p <- p + geom_point(
+              data        = peak_highlight,
+              aes(x = pos_kb, y = n),
+              color       = "black",
+              fill        = "dodgerblue",
+              size        = 2.5,
+              shape       = 21,
+              alpha       = 0.9,
+              inherit.aes = FALSE
+            )
+          }
+        }
+      }
+
       ggsave(file, plot = p, width = 12, height = 16, dpi = 300)
     }
   )
