@@ -638,39 +638,6 @@ server <- function(input, output, session) {
 
       results$chromosome_fits <- chromosome_fits
 
-      # ── 12. Overview plot ───────────────────────────────────────────────────
-#      browser() # debug
-      chr_plot <- ggplot(snp_coverage, aes(x = pos_kb, y = n)) +
-        geom_line(
-          data  = chromosome_fits,
-          aes(x = uniform_pos / 1000, y = uniform_fit),
-          color = "firebrick", linewidth = 0.6, alpha = 0.5
-        ) +
-        geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
-        scale_x_continuous(minor_breaks = seq(0, 1600, 100)) +
-        xlab("Position (Kbp)") +
-        ylab("Number of Reads") +
-        ylim(0, max(30, max(snp_coverage$n))) +
-        facet_grid(chrom ~ ., switch = "y") +
-        theme_bw() +
-        theme(
-          panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
-          panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
-          strip.background   = element_blank(),
-          strip.placement    = "outside"
-        )
-
-      if (nrow(peaks_genomic) > 0) {
-        chr_plot <- chr_plot +
-          geom_vline(
-            aes(xintercept = peak_pos / 1000),
-            data  = peaks_genomic,
-            color = "lightgreen", alpha = 0.5
-          )
-      }
-
-      results$plot <- chr_plot
-
       # ── 13. Individual peak plots ───────────────────────────────────────────
 #      browser() # debug
       incProgress(0.9, detail = "Creating individual peak plots")
