@@ -2,8 +2,23 @@ library(shiny)
 library(data.table)
 library(pracma)
 library(ggplot2)
+library(Matrix)
 
-APP_VERSION <- "0.4.9"
+# ─────────────────────────────────────────────
+#   Self-contained Whittaker smoother
+#   y      : numeric vector (the signal to smooth)
+#   lambda : smoothness penalty — smaller = tighter fit, larger = smoother
+#   d      : penalty derivative order (2 = standard, penalises curvature)
+# ─────────────────────────────────────────────
+whittaker <- function(y, lambda = 1, d = 2) {
+  n <- length(y)
+  if (n < d + 2L) return(y)                          # too short to smooth
+  E <- Matrix::Diagonal(n)
+  D <- Matrix::diff(E, differences = d)
+  as.numeric(Matrix::solve(E + lambda * Matrix::t(D) %*% D, y))
+}
+
+APP_VERSION <- "0.5.0"
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -67,12 +82,12 @@ ui <- fluidPage(
                    step = 1),
 #      helpText("Set to ~1/2 of median read depth"),
 
-      numericInput("points_per_window",
-                   "Points Per Window:",
-                   value = 6,
-                   min = 2,
-                   step = 1),
-      helpText("Number of SNP points per LOESS window"),
+      numericInput("lambda",
+                   "Whittaker Lambda (λ):",
+                   value = 1,
+                   min   = 0.01,
+                   step  = 0.5),
+      helpText("Smoothness penalty for Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve. Try 0.1–2 for sharp peaks."),
 
 #      hr(),
 
@@ -92,7 +107,7 @@ ui <- fluidPage(
         id = "main_tabs",
 
         tabPanel("Overview Plot",
-                 helpText("Genome-wide overview of chimeric read coverage and LOESS-smoothed signal across chromosomes."),
+                 helpText("Genome-wide overview of chimeric read coverage and Whittaker-smoothed signal across chromosomes."),
                  plotOutput(
                    "chr_plot",
                    height = "1200px"
@@ -124,14 +139,14 @@ ui <- fluidPage(
                  uiOutput("peak_plots_tabs")
         ),
 
-        tabPanel("LOESS Spans",
-                 h4("Chromosome-Specific LOESS Spans"),
+        tabPanel("Whittaker Fits",
+                 h4("Whittaker Smoother Parameters"),
                  tableOutput("span_table"),
-                 helpText("Shows the span value used for each chromosome in the analysis"),
+                 helpText("Shows the lambda (λ) value used for each chromosome in the analysis"),
                  br(),
-                 h5("Export LOESS fitted curves"),
-                 helpText("Downloads the fitted LOESS curves for all chromosomes from this run, including run parameters for later comparison across runs."),
-                 downloadButton("download_loess_fits", "Download LOESS Fits")
+                 h5("Export Whittaker fitted curves"),
+                 helpText("Downloads the fitted Whittaker curves for all chromosomes from this run, including run parameters for later comparison across runs."),
+                 downloadButton("download_loess_fits", "Download Whittaker Fits")
         ),
         
         # NEW: dynamic/closeable Selected Region tab placeholder
@@ -159,7 +174,7 @@ ui <- fluidPage(
                    tags$li("Uses run-length encoding to detect consecutive allele switches"),
                    tags$li("Identifies reads with multiple sustained allele changes"),
                    tags$li("Counts chimeric reads at each SNP position"),
-                   tags$li("Applies LOESS smoothing to identify peaks of per-read haplotype switches")
+                   tags$li("Applies Whittaker smoothing to identify peaks of per-read haplotype switches")
                  ),
                  h5("Input Files:"),
                  tags$ul(
@@ -167,10 +182,10 @@ ui <- fluidPage(
                    tags$li(strong("SNP Data:"), "CSV file with SNP positions (columns: CHROM, POS, REF, ALT), or a VCF file (plain or gzipped). Multi-allelic VCF sites are split into one row per ALT allele."),
                    tags$li(strong("Chromosome Size:"), "FAI index file with chromosome lengths")
                  ),
-                 h5("LOESS Span Methods:"),
+                 h5("Whittaker Lambda (λ):"),
                  tags$ul(
-                   tags$li(strong("Fixed Span:"), "Uses the same span value for all chromosomes"),
-                   tags$li(strong("Dynamic:"), "Calculates chromosome-specific spans based on chromosome length and SNP density. Formula: span = points_per_window × (1/SNP_density) / chromosome_length")
+                   tags$li(strong("Low λ (0.01–1):"), "Tight fit — preserves sharp, narrow peaks well. Recommended for impulsive boundary-count signals."),
+                   tags$li(strong("High λ (10–1000):"), "Heavy smoothing — useful for broad signal or very noisy data, but will attenuate sharp peaks.")
                  )
         )
       ),
@@ -359,66 +374,56 @@ server <- function(input, output, session) {
 
       results$snp_coverage <- snp_coverage
       
-      # ── 7. Calculate LOESS spans per chromosome ─────────────────────────────
-#      browser() # debug
-      incProgress(0.65, detail = "Calculating chromosome-specific spans")
-      
-      chr_span = chr_size[CHROM %in% chromosomes]
-      chr_span[, chrom := factor(CHROM, levels = fasta_chr_order)]
-      
+      # ── 7. Record lambda for Whittaker smoother ─────────────────────────────
+      incProgress(0.65, detail = "Setting Whittaker lambda")
+
+      # A single lambda is applied to every chromosome; no per-chromosome
+      # span calculation needed (unlike LOESS).
+      whit_lambda <- input$lambda
+
+      chr_span <- chr_size[CHROM %in% chromosomes]
+      chr_span[, chrom  := factor(CHROM, levels = fasta_chr_order)]
       snp_counts_by_chr <- allele_data[CHROM %in% chromosomes, .N, by = CHROM]
-      chr_span = merge(chr_span, snp_counts_by_chr, by = "CHROM", all.x = TRUE)
+      chr_span <- merge(chr_span, snp_counts_by_chr, by = "CHROM", all.x = TRUE)
       chr_span[is.na(N), N := 0L]
-      chr_span[, snp_density_chr := N / length]
-      chr_span[, lspan := input$points_per_window / N]
-      chr_span = chr_span[, .(chrom, lspan, length, snp_count = N, snp_density_chr)]
+      chr_span[, lambda := whit_lambda]
+      chr_span <- chr_span[, .(chrom, lambda, length, snp_count = N)]
+
+      results$chr_span <- chr_span
       
-      #chr_span[, lspan := input$points_per_window * (1 / snp_density) / length]
-      #chr_span <- chr_span[, .(chrom, lspan, length)]
-      
-      results$chr_span = chr_span
-      
-      # ── 8. Fit LOESS models and find peaks ──────────────────────────────────
-#      browser() # debug
-      incProgress(0.7, detail = "Fitting models and finding peaks")
+      # ── 8. Fit Whittaker smoother and find peaks ────────────────────────────
+      incProgress(0.7, detail = "Fitting Whittaker smoother and finding peaks")
 
       snp_coverage[, chrom := droplevels(chrom)]
       snp_by_chr <- split(snp_coverage, by = "chrom", keep.by = TRUE)
 
-      span_lookup <- setNames(chr_span$lspan, as.character(chr_span$chrom))
-      
-#      browser() # debug
 #      model_results <- lapply(snp_by_chr[-14], function(snps_dt) {
       model_results <- lapply(snp_by_chr, function(snps_dt) {
         chr_name <- as.character(snps_dt$chrom[1])
-        lspan    <- span_lookup[chr_name]
 
         uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
-        
-#        mdl         <- loess(n ~ pos, data = snps_dt, span = lspan)
 
-#        uniform_fit <- predict(mdl, newdata = data.frame(pos = uniform_pos))
-
-        # wrap loess fits into try block
-        
+        # ── Whittaker smooth in SNP-index space, then interpolate to uniform grid
+        # Whittaker requires equally-spaced input; we treat each SNP as one unit
+        # (index space) and interpolate the smoothed values back to genomic coords.
         uniform_fit <- tryCatch({
-#          mdl <- loess(n ~ pos, data = snps_dt, span = lspan)
-          mdl <- loess(n ~ pos, data = snps_dt, span = lspan, degree = 1)
-          predict(mdl, newdata = data.frame(pos = uniform_pos))
+          smoothed <- whittaker(snps_dt$n, lambda = whit_lambda, d = 2)
+          approx(snps_dt$pos, smoothed, xout = uniform_pos, rule = 2)$y
         }, error = function(e) {
           showNotification(
-            paste0("LOESS failed for ", chr_name, " (too few SNPs) — raw data shown, no curve."),
+            paste0("Whittaker smoother failed for ", chr_name,
+                   " (too few SNPs) — raw data shown, no curve."),
             type = "warning", duration = 10
           )
           rep(NA_real_, length(uniform_pos))
         })
         
-        # ── (A) findpeaks on LOESS fit ─────────────────────────────────────────
-        # minpeakheight=1: detect any LOESS bump regardless of attenuated height.
-        # LOESS is used solely to define peak *intervals* (left/right valleys,
-        # cols 3 & 4 from pracma); the raw per-SNP count (>= min_peak_height) is
-        # the actual height gate applied in step 10.  This means sharp spikes
-        # that LOESS attenuates below min_peak_height are no longer missed.
+        # ── (A) findpeaks on Whittaker fit ─────────────────────────────────────
+        # minpeakheight=1: detect any bump in the smoothed signal regardless of
+        # attenuated height. The Whittaker curve is used solely to define peak
+        # *intervals* (left/right valleys, cols 3 & 4 from pracma); the raw
+        # per-SNP count (>= min_peak_height) is the actual height gate applied
+        # in step 10. Sharp spikes are preserved far better than with LOESS.
         raw_peaks <- if (all(is.na(uniform_fit))) NULL else pracma::findpeaks(
           uniform_fit,
           minpeakheight = 1,
@@ -496,7 +501,7 @@ server <- function(input, output, session) {
         
         list(
           chrom       = chr_name,
-          lspan       = lspan,
+          lambda      = whit_lambda,
           uniform_pos = uniform_pos,
           uniform_fit = uniform_fit,
           peaks       = combined_peaks
@@ -551,7 +556,7 @@ server <- function(input, output, session) {
             max_n      <- max(in_interval$n)
             candidates <- in_interval[n == max_n]
 
-            # Step 2: if still tied, keep the one(s) closest to the LOESS peak
+            # Step 2: if still tied, keep the one(s) closest to the Whittaker peak
             if (nrow(candidates) > 1L) {
               candidates[, dist_to_peak := abs(pos - row$peak_pos)]
               min_dist   <- min(candidates$dist_to_peak)
@@ -622,20 +627,18 @@ server <- function(input, output, session) {
 
       chromosome_fits <- rbindlist(lapply(model_results, function(res) {
         data.table(
-          sample_name       = input$sample_name,
-          chrom             = factor(res$chrom, levels = fasta_chr_order),
-          uniform_pos       = res$uniform_pos,
-          uniform_fit       = res$uniform_fit,
-          pos_kb            = res$uniform_pos / 1000,
-          span_method       = "dynamic",
-          lspan             = res$lspan,
-          mapq_cutoff       = input$mapq_cutoff,
-          baseq_cutoff      = input$baseq_cutoff,
-          min_run           = input$min_run,
-          min_peak_height   = input$min_peak_height,
-          loess_span        = NA_real_,
-          points_per_window = input$points_per_window,
-          run_date          = as.character(Sys.Date())
+          sample_name     = input$sample_name,
+          chrom           = factor(res$chrom, levels = fasta_chr_order),
+          uniform_pos     = res$uniform_pos,
+          uniform_fit     = res$uniform_fit,
+          pos_kb          = res$uniform_pos / 1000,
+          smoother        = "whittaker",
+          lambda          = res$lambda,
+          mapq_cutoff     = input$mapq_cutoff,
+          baseq_cutoff    = input$baseq_cutoff,
+          min_run         = input$min_run,
+          min_peak_height = input$min_peak_height,
+          run_date        = as.character(Sys.Date())
         )
       }))
 
@@ -852,16 +855,16 @@ server <- function(input, output, session) {
       as.character(chimeric_reads_at_snp)
     )]
     out <- out[, .(
-      Chromosome                  = chrom,
-      `LOESS Peak Position (Kb)`  = peak_pos_kb,
-      `Qualifying SNP (Kb)`       = snp_pos_kb_str,
-      `Raw Count at SNP`          = snp_n_str,
-      `Peak Start (Kb)`           = peak_start_kb,
-      `Peak End (Kb)`             = peak_end_kb,
-      `LOESS Peak Height`         = peak_height,
-      `Chimeric Reads at SNP`     = chimeric_reads_str
+      Chromosome                     = chrom,
+      `Whittaker Peak Position (Kb)` = peak_pos_kb,
+      `Qualifying SNP (Kb)`          = snp_pos_kb_str,
+      `Raw Count at SNP`             = snp_n_str,
+      `Peak Start (Kb)`              = peak_start_kb,
+      `Peak End (Kb)`                = peak_end_kb,
+      `Whittaker Peak Height`        = peak_height,
+      `Chimeric Reads at SNP`        = chimeric_reads_str
     )]
-    setorder(out, Chromosome, `LOESS Peak Position (Kb)`)
+    setorder(out, Chromosome, `Whittaker Peak Position (Kb)`)
     out
   })
 
@@ -1143,18 +1146,16 @@ server <- function(input, output, session) {
     })          # closes lapply()
   })            # closes observe()
 
-  # LOESS span table
+  # Whittaker lambda table
   output$span_table <- renderTable({
     req(results$chr_span)
     out <- copy(results$chr_span)
-    out[, `:=`(
-      length_kb = round(length / 1000, 1),
-      lspan     = round(lspan, 5)
-    )]
+    out[, length_kb := round(length / 1000, 1)]
     out <- out[, .(
       Chromosome    = chrom,
       `Length (Kb)` = length_kb,
-      `LOESS Span`  = lspan
+      `SNP Count`   = snp_count,
+      `Lambda (λ)`  = lambda
     )]
     setorder(out, Chromosome)
     out
@@ -1171,8 +1172,6 @@ server <- function(input, output, session) {
     boundary_snps      <- results$snp_coverage[n > 0, .N]
     total_boundaries   <- sum(results$snp_coverage$n)
 
-    span_method_text <- paste0("Dynamic (Points Per Window: ", input$points_per_window, ")")
-
     paste0(
       "Sample: ", input$sample_name, "\n\n",
       "Chimeric Reads Detected: ", n_chimeric_reads, "\n",
@@ -1183,11 +1182,11 @@ server <- function(input, output, session) {
       "Total Transition Boundary Events: ", total_boundaries, "\n",
       "Peaks Detected: ", n_peaks, "\n\n",
       "Analysis Parameters:\n",
-      "  MAPQ Cutoff: ",         input$mapq_cutoff,     "\n",
-      "  Base Quality Cutoff: ", input$baseq_cutoff,    "\n",
-      "  Min Run Length: ",      input$min_run,         "\n",
-      "  Min Peak Height: ",     input$min_peak_height, "\n",
-      "  LOESS Span Method: ",   span_method_text
+      "  MAPQ Cutoff: ",              input$mapq_cutoff,     "\n",
+      "  Base Quality Cutoff: ",      input$baseq_cutoff,    "\n",
+      "  Min Run Length: ",           input$min_run,         "\n",
+      "  Min Peak Height: ",          input$min_peak_height, "\n",
+      "  Whittaker Lambda (λ): ",     input$lambda
     )
   })
 
@@ -1476,7 +1475,7 @@ server <- function(input, output, session) {
   
   output$download_loess_fits <- downloadHandler(
     filename = function() {
-      paste0(input$sample_name, "_loess_fits_", Sys.Date(), ".csv")
+      paste0(input$sample_name, "_whittaker_fits_", Sys.Date(), ".csv")
     },
     content = function(file) {
       req(results$chromosome_fits)
