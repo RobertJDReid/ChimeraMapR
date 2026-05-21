@@ -97,7 +97,10 @@ ui <- fluidPage(
                    "chr_plot",
                    height = "1200px"
                  ),
-                 downloadButton("download_plot", "Download Plot")
+                 fluidRow(
+                   column(3, downloadButton("download_plot",     "Download Plot (.png)")),
+                   column(4, downloadButton("download_plot_rds", "Download R Object (.rds)"))
+                 )
         ),
 
         tabPanel("Chromosome Plots",
@@ -1379,7 +1382,28 @@ server <- function(input, output, session) {
         }
       }
 
-      ggsave(file, plot = p, width = 12, height = 16, dpi = 300)
+      n_chr      <- length(unique(snp_coverage$chrom))
+      png_height <- max(3, min(16, n_chr * 1.2))
+      ggsave(file, plot = p, width = 12, height = png_height, dpi = 300)
+    }
+  )
+
+  # ── Overview plot: download as R object for replotting ───────────────────────
+  output$download_plot_rds <- downloadHandler(
+    filename = function() paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".rds"),
+    content  = function(file) {
+      req(results$snp_coverage, results$chromosome_fits)
+      saveRDS(
+        list(
+          snp_coverage    = copy(results$snp_coverage),
+          chromosome_fits = copy(results$chromosome_fits),
+          peaks_genomic   = results$peaks_genomic,
+          snp_peaks       = results$snp_peaks,
+          sample_name     = input$sample_name,
+          app_version     = APP_VERSION
+        ),
+        file
+      )
     }
   )
 
