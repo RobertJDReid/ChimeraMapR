@@ -1,0 +1,1 @@
+Eilers P, Bloemberg T, Wehrens R (2026). _ptw: Parametric Time Warping_. doi:10.32614/CRAN.package.ptw

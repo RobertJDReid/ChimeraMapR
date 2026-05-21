@@ -9,6 +9,10 @@ library(Matrix)
 #   y      : numeric vector (the signal to smooth)
 #   lambda : smoothness penalty — smaller = tighter fit, larger = smoother
 #   d      : penalty derivative order (2 = standard, penalises curvature)
+#
+#  based on Eilers P, Bloemberg T, Wehrens R (2026).
+#  _ptw: Parametric Time Warping_.
+#  doi:10.32614/CRAN.package.ptw
 # ─────────────────────────────────────────────
 whittaker <- function(y, lambda = 1, d = 2) {
   n <- length(y)
@@ -139,14 +143,14 @@ ui <- fluidPage(
                  uiOutput("peak_plots_tabs")
         ),
 
-        tabPanel("Whittaker Fits",
+        tabPanel("Curve Fits",
                  h4("Whittaker Smoother Parameters"),
                  tableOutput("span_table"),
                  helpText("Shows the lambda (λ) value used for each chromosome in the analysis"),
                  br(),
                  h5("Export Whittaker fitted curves"),
                  helpText("Downloads the fitted Whittaker curves for all chromosomes from this run, including run parameters for later comparison across runs."),
-                 downloadButton("download_loess_fits", "Download Whittaker Fits")
+                 downloadButton("download_curve_fits", "Download Curve Fits")
         ),
         
         # NEW: dynamic/closeable Selected Region tab placeholder
@@ -856,15 +860,15 @@ server <- function(input, output, session) {
     )]
     out <- out[, .(
       Chromosome                     = chrom,
-      `Whittaker Peak Position (Kb)` = peak_pos_kb,
+      `Peak Position (Kb)` = peak_pos_kb,
       `Qualifying SNP (Kb)`          = snp_pos_kb_str,
       `Raw Count at SNP`             = snp_n_str,
       `Peak Start (Kb)`              = peak_start_kb,
       `Peak End (Kb)`                = peak_end_kb,
-      `Whittaker Peak Height`        = peak_height,
+      `Peak Height`        = peak_height,
       `Chimeric Reads at SNP`        = chimeric_reads_str
     )]
-    setorder(out, Chromosome, `Whittaker Peak Position (Kb)`)
+    setorder(out, Chromosome, `Peak Position (Kb)`)
     out
   })
 
@@ -1473,9 +1477,9 @@ server <- function(input, output, session) {
     }
   )
   
-  output$download_loess_fits <- downloadHandler(
+  output$download_curve_fits <- downloadHandler(
     filename = function() {
-      paste0(input$sample_name, "_whittaker_fits_", Sys.Date(), ".csv")
+      paste0(input$sample_name, "_curve_fits_", Sys.Date(), ".csv")
     },
     content = function(file) {
       req(results$chromosome_fits)
