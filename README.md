@@ -1,8 +1,8 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.4.9_
+_version 0.5.0_
 
-An interactive **R Shiny app** for identifying **chimeric long reads** in DNA sequencing data by tracking allele changes across known SNP positions, then summarizing where chimeric reads cluster along each chromosome using LOESS smoothing and peak detection.
+An interactive **R Shiny app** for identifying **chimeric long reads** in DNA sequencing data by tracking allele changes across known SNP positions, then summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection.
 
 Chimeric reads contain sequence derived from more than one parental chromosome — for example, reads spanning a recombination breakpoint in a hybrid or cross. The app classifies each base call at known biallelic SNP positions as REF or ALT, then uses run-length encoding to detect reads where the allele identity switches and is sustained across multiple consecutive SNPs. These switches indicate a transition between parental haplotypes within a single read.
 
@@ -15,7 +15,7 @@ The app is designed for plotting per-read base calls at known SNP sites and is t
 - Upload three input files: **read-level SNP calls**, **SNP definition file (CSV or VCF)**, and **chromosome sizes (FAI)**
 - Accepts SNP definitions as a simple CSV, a plain VCF, or a gzipped VCF (`.vcf.gz`)
 - Detects chimeric reads where allele identity switches and is sustained across consecutive SNPs
-- Creates an **overview per-chromosome plot** (counts + LOESS fit + peak markers)
+- Creates an **overview per-chromosome plot** (counts + curve fit + peak markers)
 - Reports a **peak summary table** (positions, boundaries, heights)
 - Generates **per-peak read-level plots** showing all reads intersecting the peak SNP
 - Chromosome order follows the input FAI file, preserving the original FASTA sequence order
@@ -140,18 +140,9 @@ All parameters are set in the sidebar panel before running the analysis.
 | **MAPQ Cutoff** | `20` | Minimum mapping quality score; reads below this threshold are excluded |
 | **Base Quality Minimum** | `10` | Minimum base quality score at the SNP position; calls below this are excluded |
 | **Minimum Run Length** | `2` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
-| **Minimum Peak Height** | `10` | Minimum chimeric read count for a LOESS peak to be reported. A value of approximately half the median read depth is recommended |
-| **Points Per Window** | `6` | LOESS smoothing bandwidth is calculated per chromosome based on length and SNP density (see below) |
+| **Minimum Peak Height** | `10` | Minimum chimeric read count for a peak to be reported. A value of approximately half the median read depth is recommended |
+| **Points Per Window** | `6` | Whittaker smoothing bandwidth is calculated per chromosome based on length and SNP density (see below) |
 
-### LOESS span methods
-
-**Dynamic span** — the span for each chromosome is calculated automatically as:
-
-```
-span = points_per_window × (1 / SNP_density) / chromosome_length
-```
-
-where `SNP_density` is the total number of SNPs divided by the total genome size. The **Points Per Window** parameter (default `6`) controls how many SNP positions fall within each LOESS window, allowing the smoothing bandwidth to scale with both chromosome length and SNP density. Increase for sharper, higher peaks, decrease for broader, lower peaks.
 
 ---
 
@@ -214,7 +205,7 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 1. **Allele classification** — each base call is classified as REF, ALT, or OTHER by joining to the SNP definition file. Calls are first filtered by MAPQ and base quality cutoffs; deletions are also excluded
 2. **Chimeric read detection** — run-length encoding identifies reads with sustained allele switches across consecutive SNP positions
 3. **SNP-wise coverage** — chimeric reads are counted at each SNP position across all chromosomes
-4. **LOESS smoothing** — a LOESS curve is fit per chromosome, with span calculated either as a fixed value or dynamically based on chromosome length and SNP density
+4. **Whittaker smoothing** — a smoothed curve is fit per chromosome
 5. **Peak detection** — `pracma::findpeaks` identifies peaks in the smoothed signal above the user-defined minimum height
 6. **Visualization** — per-peak plots show all chimeric reads spanning each peak SNP, coloured by REF (blue) vs ALT (purplered
 ---
@@ -223,7 +214,7 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 
 | File | Format | Description |
 |---|---|---|
-| Overview plot | PNG | Per-chromosome read counts with LOESS curve and peak markers |
+| Overview plot | PNG | Per-chromosome read counts with fitted curve and peak markers |
 | Peak table | CSV | Peak positions, boundaries, and heights for all chromosomes |
 | Chimeric read IDs | TXT | One read ID per line, for use with `samtools view -N` |
 
