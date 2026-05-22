@@ -34,10 +34,30 @@
 suppressPackageStartupMessages(library(optparse))
 
 # ── Source shared analysis functions ─────────────────────────────────────────
-# Looks for chimera_functions.R in R/ relative to this script's location,
-# then falls back to the current working directory.
-script_dir   <- tryCatch(dirname(normalizePath(sys.frame(1)$ofile)),
-                          error = function(e) ".")
+# Resolve symlinks manually — normalizePath() does NOT follow symlinks on macOS
+resolve_symlink <- function(path) {
+  path <- normalizePath(path, mustWork = FALSE)
+  for (i in seq_len(20)) {          # guard against circular links
+    target <- Sys.readlink(path)
+    if (target == "") break         # not a symlink (or fully resolved)
+    if (!startsWith(target, "/"))   # relative symlink → make absolute
+      target <- file.path(dirname(path), target)
+    path <- normalizePath(target, mustWork = FALSE)
+  }
+  path
+}
+
+script_dir <- tryCatch({
+  argv     <- commandArgs(trailingOnly = FALSE)
+  file_arg <- grep("^--file=", argv, value = TRUE)
+  if (length(file_arg)) {
+    real_path <- resolve_symlink(sub("^--file=", "", file_arg))
+    dirname(real_path)
+  } else {
+    "."
+  }
+}, error = function(e) ".")
+
 func_paths   <- c(
   file.path(script_dir, "R", "chimera_functions.R"),
   file.path(script_dir, "chimera_functions.R"),
