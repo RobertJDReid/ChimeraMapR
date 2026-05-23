@@ -1,28 +1,6 @@
 library(shiny)
-library(data.table)
-library(pracma)
-library(ggplot2)
-library(Matrix)
-
-# ─────────────────────────────────────────────
-#   Self-contained Whittaker smoother
-#   y      : numeric vector (the signal to smooth)
-#   lambda : smoothness penalty — smaller = tighter fit, larger = smoother
-#   d      : penalty derivative order (2 = standard, penalises curvature)
-#
-#  based on Eilers P, Bloemberg T, Wehrens R (2026).
-#  _ptw: Parametric Time Warping_.
-#  doi:10.32614/CRAN.package.ptw
-# ─────────────────────────────────────────────
-whittaker <- function(y, lambda = 1, d = 2) {
-  n <- length(y)
-  if (n < d + 2L) return(y)                          # too short to smooth
-  E <- Matrix::Diagonal(n)
-  D <- Matrix::diff(E, differences = d)
-  as.numeric(Matrix::solve(E + lambda * Matrix::t(D) %*% D, y))
-}
-
-APP_VERSION <- "0.5.0"
+source("chimera_functions.R")   # loads all packages + whittaker + run_chimera_analysis etc.
+# APP_VERSION is now defined inside chimera_functions.R
 
 # ─────────────────────────────────────────────
 #                   UI
@@ -249,479 +227,151 @@ server <- function(input, output, session) {
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
 
     withProgress(message = "Processing data...", value = 0, {
+      
+      incProgress(0.1, detail = "Running analysis")
 
-      # ── 1. Load read data ───────────────────────────────────────────────────
-      incProgress(0.1, detail = "Loading read data")
-      read_data  <- fread(input$read_data_file$datapath)
-      chromosomes <- unique(read_data$chrom)
-
-      # ── 2. Load SNP / allele data ───────────────────────────────────────────
-      incProgress(0.2, detail = "Loading SNP data")
-      snp_path <- input$snp_data_file$datapath
-      snp_name <- tolower(input$snp_data_file$name)
-      is_vcf   <- grepl("\\.vcf(\\.gz)?$", snp_name)
-
-      if (is_vcf) {
-        allele_data <- fread(
-          snp_path,
-          sep       = "\t",
-          skip      = "#",
-          col.names = c("CHROM","POS","ID","REF","ALT","QUAL",
-                        "FILTER","INFO","FORMAT","DET")
-        )
-        allele_data <- allele_data[nchar(REF) == 1 & nchar(ALT) == 1,
-                                   .(CHROM, POS = as.integer(POS), REF, ALT, QUAL)]
-      } else {
-        allele_data <- fread(snp_path)
-        allele_data <- allele_data[, .(CHROM, POS, REF, ALT)]
+      # Shiny strips extensions from uploaded file temp paths, which breaks
+      # format detection in load_snp_data (VCF vs CSV) and other loaders.
+      # Restore the original suffix (handles double extensions like .vcf.gz).
+      restore_ext <- function(datapath, original_name) {
+        suffix <- sub("^[^.]+", "", original_name)   # e.g. ".vcf.gz", ".csv", ".fai"
+        if (nchar(suffix) == 0) return(datapath)
+        new_path <- paste0(datapath, suffix)
+        file.copy(datapath, new_path, overwrite = TRUE)
+        new_path
       }
 
-      #snp_number <- nrow(allele_data)
+      read_path <- restore_ext(input$read_data_file$datapath, input$read_data_file$name)
+      snp_path  <- restore_ext(input$snp_data_file$datapath,  input$snp_data_file$name)
+      chr_path  <- restore_ext(input$chr_size_file$datapath,  input$chr_size_file$name)
 
-      # ── 3. Load chromosome size data (FAI) ──────────────────────────────────
-      incProgress(0.3, detail = "Loading chromosome sizes")
-      chr_size <- fread(
-        input$chr_size_file$datapath,
-        col.names = c("CHROM", "length", "offset", "col1", "col2")
+      res <- run_chimera_analysis(
+        read_data_path  = read_path,
+        snp_data_path   = snp_path,
+        chr_size_path   = chr_path,
+        sample_name     = input$sample_name,
+        mapq_cutoff     = input$mapq_cutoff,
+        baseq_cutoff    = input$baseq_cutoff,
+        min_run         = input$min_run,
+        min_peak_height = input$min_peak_height,
+        lambda          = input$lambda,
+        # Redirect warnings to Shiny notifications instead of console messages
+        warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)
       )
-      chr_size <- chr_size[, .(CHROM, length)]
-
-      # Preserve FASTA chromosome order as factor levels
-      fasta_chr_order <- chr_size$CHROM
-      # Restrict to chromosomes present in read data
-      allele_data_used = allele_data[CHROM %in% chromosomes]
-      chr_size_used    = chr_size[CHROM %in% chromosomes]
       
-      snp_number <- nrow(allele_data_used)
-      genome_size     <- sum(chr_size_used$length)
-      snp_density     <- snp_number / genome_size
-
-      # ── 4. Filter reads and classify alleles ────────────────────────────────
-
-      incProgress(0.4, detail = "Classifying alleles")
-
-      full_read <- read_data[
-        mapq      >= input$mapq_cutoff &
-        base_qual >= input$baseq_cutoff &
-        is_del    == 0
-      ]
-
-      full_read <- merge(
-        full_read, allele_data,
-        by.x  = c("chrom", "pos"),
-        by.y  = c("CHROM", "POS"),
-        all.x = TRUE
-      )
-
-      full_read[, IS_REF := call == REF]
-      full_read[, ALLELE := fcase(
-        call == REF, "REF",
-        call == ALT, "ALT",
-        default = "OTHER"
-      )]
-
-      full_read <- full_read[ALLELE != "OTHER"]
-      full_read <- full_read[, .(
-        chrom,
-        pos,
-        read_id,
-        IS_REF,
-        ALLELE
-      )]
-      setorder(full_read, read_id, pos)
-
-      # ── 5. Detect chimeric reads via RLE ────────────────────────────────────
-      #
-      #. Alter this so only swaps show up in data
-      incProgress(0.5, detail = "Detecting chimeric reads")
-      min_run <- input$min_run
-
-      full_read[, runs := rle_helper(ALLELE), by = read_id]
-      full_read <- full_read[runs >= min_run]
-      full_read[, new_runs := rle_helper(ALLELE), by = read_id]
-
-      rt_df <- full_read[
-        full_read[, .I[.N > min_run & new_runs[1] != .N], by = read_id]$V1
-      ]
-
-      results$rt_df             <- rt_df
-      results$chimeric_read_ids <- unique(rt_df$read_id)
-
-      # ── 6. Extract transition boundaries and count per SNP position ─────────
-      # For each chimeric read, keep only the last position of a departing run
-      # and the first position of the arriving run.  These boundary positions
-      # are the signal used for pileup — not the full read span.
-      incProgress(0.6, detail = "Extracting transition boundaries")
-
-      transition_pos <- rt_df[, {
-        is_last_of_run  <- c(ALLELE[-1] != ALLELE[-.N], FALSE)
-        is_first_of_run <- c(FALSE, ALLELE[-1] != ALLELE[-.N])
-        .SD[is_last_of_run | is_first_of_run, .(chrom, pos)]
-      }, by = read_id]
-
-      rt_df[, c("runs", "new_runs") := NULL]
-
-      results$transition_pos <- transition_pos
-
-      pos_count <- transition_pos[, .(n = .N), by = .(chrom, pos)]
-
-      snp_coverage <- allele_data[CHROM %in% chromosomes, .(chrom = CHROM, pos = POS)]
-
-      snp_coverage <- merge(
-        snp_coverage, pos_count,
-        by    = c("chrom", "pos"),
-        all.x = TRUE
-      )
-      snp_coverage[is.na(n), n := 0L]
-      snp_coverage[, chrom := factor(chrom, levels = fasta_chr_order)]
-      snp_coverage[, pos_kb := pos / 1000]
-
-      results$snp_coverage <- snp_coverage
+      incProgress(0.85, detail = "Storing results")
       
-      # ── 7. Record lambda for Whittaker smoother ─────────────────────────────
-      incProgress(0.65, detail = "Setting Whittaker lambda")
-
-      # A single lambda is applied to every chromosome; no per-chromosome
-      # span calculation needed (unlike LOESS).
-      whit_lambda <- input$lambda
-
-      chr_span <- chr_size[CHROM %in% chromosomes]
-      chr_span[, chrom  := factor(CHROM, levels = fasta_chr_order)]
-      snp_counts_by_chr <- allele_data[CHROM %in% chromosomes, .N, by = CHROM]
-      chr_span <- merge(chr_span, snp_counts_by_chr, by = "CHROM", all.x = TRUE)
-      chr_span[is.na(N), N := 0L]
-      chr_span[, lambda := whit_lambda]
-      chr_span <- chr_span[, .(chrom, lambda, length, snp_count = N)]
-
-      results$chr_span <- chr_span
+      results$rt_df             <- res$rt_df
+      results$chimeric_read_ids <- res$chimeric_read_ids
+      results$transition_pos    <- res$transition_pos
+      results$snp_coverage      <- res$snp_coverage
+      results$peaks_genomic     <- res$peaks_genomic
+      results$snp_peaks         <- res$snp_peaks
+      results$chromosome_fits   <- res$chromosome_fits
+      results$chr_span          <- res$chr_span
       
-      # ── 8. Fit Whittaker smoother and find peaks ────────────────────────────
-      incProgress(0.7, detail = "Fitting Whittaker smoother and finding peaks")
-
-      snp_coverage[, chrom := droplevels(chrom)]
-      snp_by_chr <- split(snp_coverage, by = "chrom", keep.by = TRUE)
-
-#      model_results <- lapply(snp_by_chr[-14], function(snps_dt) {
-      model_results <- lapply(snp_by_chr, function(snps_dt) {
-        chr_name <- as.character(snps_dt$chrom[1])
-
-        uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
-
-        # ── Whittaker smooth in SNP-index space, then interpolate to uniform grid
-        # Whittaker requires equally-spaced input; we treat each SNP as one unit
-        # (index space) and interpolate the smoothed values back to genomic coords.
-        uniform_fit <- tryCatch({
-          smoothed <- whittaker(snps_dt$n, lambda = whit_lambda, d = 2)
-          approx(snps_dt$pos, smoothed, xout = uniform_pos, rule = 2)$y
-        }, error = function(e) {
-          showNotification(
-            paste0("Whittaker smoother failed for ", chr_name,
-                   " (too few SNPs) — raw data shown, no curve."),
-            type = "warning", duration = 10
-          )
-          rep(NA_real_, length(uniform_pos))
-        })
-        
-        # ── (A) findpeaks on Whittaker fit ─────────────────────────────────────
-        # minpeakheight=1: detect any bump in the smoothed signal regardless of
-        # attenuated height. The Whittaker curve is used solely to define peak
-        # *intervals* (left/right valleys, cols 3 & 4 from pracma); the raw
-        # per-SNP count (>= min_peak_height) is the actual height gate applied
-        # in step 10. Sharp spikes are preserved far better than with LOESS.
-        raw_peaks <- if (all(is.na(uniform_fit))) NULL else pracma::findpeaks(
-          uniform_fit,
-          minpeakheight = 1,
-          threshold     = 0
-        )
-
-        findpeaks_positions <- if (!is.null(raw_peaks) && nrow(raw_peaks) > 0) {
-          uniform_pos[raw_peaks[, 2]]   # column 2 = index of peak apex
-        } else {
-          numeric(0)
-        }
-
-        # ── (B) Raw-signal fallback ─────────────────────────────────────────────
-        # The old fallback scanned uniform_fit (LOESS output) for above-threshold
-        # runs.  Because the new boundary-only signal is sparse and impulsive,
-        # LOESS attenuates sharp spikes heavily — a spike of 30 reads spanning 1-2
-        # SNP positions can produce a LOESS peak of only ~5, below min_peak_height.
-        # The fallback therefore also missed the peak, defeating its purpose.
-        #
-        # Fix: bypass LOESS entirely and scan the raw per-SNP transition counts
-        # (snps_dt$n).  Nearby high-count positions (within cluster_gap_bp) are
-        # merged into a single candidate peak; the argmax of each cluster is kept.
-        # A ±5-grid-point window around the argmax is stored only for the
-        # deduplication check in (C) — it is NOT used to filter peaks by width.
-
-        cluster_gap_bp <- 10000L   # merge boundary spikes within 10 Kb
-
-        raw_hi <- snps_dt[n >= input$min_peak_height]
-
-        if (nrow(raw_hi) > 0) {
-          raw_hi <- raw_hi[order(raw_hi$pos), ]
-          gaps      <- c(cluster_gap_bp + 1L, diff(raw_hi$pos))
-          raw_hi$cl <- cumsum(gaps > cluster_gap_bp)
-
-          region_peaks_df <- do.call(rbind, lapply(split(raw_hi, raw_hi$cl), function(cl_rows) {
-            best <- cl_rows[which.max(cl_rows$n), ]
-            ui   <- which.min(abs(uniform_pos - best$pos))
-            data.frame(
-              peak_height = best$n,                           # raw count, not LOESS
-              peak_index  = ui,
-              peak_start  = max(1L, ui - 5L),                # ±5 grid pts (~1 Kb)
-              peak_end    = min(length(uniform_pos), ui + 5L) # for dedup only
-            )
-          }))
-        } else {
-          region_peaks_df <- NULL
-        }
-        
-        # ── (C) Deduplicate: keep region peaks not already covered by findpeaks ─
-        # A region peak is "already found" if findpeaks placed a peak within its bounds
-        if (!is.null(region_peaks_df) && nrow(region_peaks_df) > 0) {
-          region_peaks_df$is_new <- vapply(seq_len(nrow(region_peaks_df)), function(i) {
-            rstart <- uniform_pos[region_peaks_df$peak_start[i]]
-            rend   <- uniform_pos[region_peaks_df$peak_end[i]]
-            !any(findpeaks_positions >= rstart & findpeaks_positions <= rend)
-          }, logical(1))
-          
-          novel_region_peaks <- region_peaks_df[region_peaks_df$is_new, , drop = FALSE]
-        } else {
-          novel_region_peaks <- NULL
-        }
-        
-        # ── (D) Combine findpeaks + novel region peaks ──────────────────────────
-        combined_peaks <- raw_peaks   # may be NULL
-        
-        if (!is.null(novel_region_peaks) && nrow(novel_region_peaks) > 0) {
-          novel_mat <- as.matrix(novel_region_peaks[, c("peak_height","peak_index",
-                                                        "peak_start","peak_end")])
-          combined_peaks <- if (is.null(combined_peaks)) {
-            novel_mat
-          } else {
-            rbind(combined_peaks, novel_mat)
-          }
-        }
-        
-        list(
-          chrom       = chr_name,
-          lambda      = whit_lambda,
-          uniform_pos = uniform_pos,
-          uniform_fit = uniform_fit,
-          peaks       = combined_peaks
-        )
-      })
-
-      # ── 9. Extract peak positions into a flat data.table ───────────────────
-#      browser() # debug
-      peaks_list <- lapply(model_results, function(res) {
-        if (is.null(res$peaks) || nrow(res$peaks) == 0) return(NULL)
-
-        pk  <- as.data.table(res$peaks)
-        setnames(pk, c("peak_height", "peak_index", "peak_start", "peak_end"))
-
-        pk[, chrom      := res$chrom]
-        pk[, peak_pos   := res$uniform_pos[peak_index]]
-        pk[, peak_start := res$uniform_pos[peak_start]]
-        pk[, peak_end   := res$uniform_pos[peak_end]]
-        pk[, peak_index := NULL]
-        pk
-      })
-
-      peaks_genomic <- rbindlist(peaks_list, fill = TRUE)
-      if (nrow(peaks_genomic) > 0) {
-        peaks_genomic[, chrom := factor(chrom, levels = fasta_chr_order)]
-      }
-
-      # ── 10. Map each peak interval to a single best SNP ────────────────────────
-#      browser() # debug
-      #
-      # Selection logic:
-      #   1. Candidate pool: SNPs within [peak_start, peak_end] with n >= min_peak_height.
-      #   2. Pick the candidate with the highest count (n).
-      #   3. Ties on count: keep the candidate(s) closest to the LOESS peak position.
-      #   4. Ties on distance (rare): choose one at random.
-      #   If no SNP clears the bar, one row is kept with snp_pos = NA.
-      if (nrow(peaks_genomic) > 0) {
-
-        snp_peaks_list <- lapply(seq_len(nrow(peaks_genomic)), function(i) {
-          row      <- peaks_genomic[i]
-          chr_name <- as.character(row$chrom)
-          chr_cov  <- snp_coverage[as.character(chrom) == chr_name]
-
-          in_interval <- chr_cov[
-            pos >= row$peak_start &
-            pos <= row$peak_end   &
-            n   >= input$min_peak_height
-          ]
-
-          if (nrow(in_interval) > 0) {
-            # Step 1: restrict to maximum count
-            max_n      <- max(in_interval$n)
-            candidates <- in_interval[n == max_n]
-
-            # Step 2: if still tied, keep the one(s) closest to the Whittaker peak
-            if (nrow(candidates) > 1L) {
-              candidates[, dist_to_peak := abs(pos - row$peak_pos)]
-              min_dist   <- min(candidates$dist_to_peak)
-              candidates <- candidates[dist_to_peak == min_dist]
-              candidates[, dist_to_peak := NULL]
-            }
-
-            # Step 3: if still tied (equidistant), choose randomly
-            best <- if (nrow(candidates) == 1L) candidates else candidates[sample(.N, 1L)]
-
-            data.table(
-              chrom       = row$chrom,
-              peak_pos    = row$peak_pos,
-              peak_height = row$peak_height,
-              peak_start  = row$peak_start,
-              peak_end    = row$peak_end,
-              snp_pos     = best$pos,
-              snp_n       = best$n
-            )
-          } else {
-            data.table(
-              chrom       = row$chrom,
-              peak_pos    = row$peak_pos,
-              peak_height = row$peak_height,
-              peak_start  = row$peak_start,
-              peak_end    = row$peak_end,
-              snp_pos     = NA_real_,
-              snp_n       = NA_integer_
-            )
-          }
-        })
-
-        snp_peaks <- rbindlist(snp_peaks_list, fill = TRUE)
-        snp_peaks[, chrom := factor(as.character(chrom),
-                                    levels = levels(peaks_genomic$chrom))]
-
-        snp_peaks[, chimeric_reads_at_snp := {
-          chr_name <- as.character(.BY$chrom)
-          vapply(snp_pos, function(sp) {
-            if (is.na(sp)) return(NA_integer_)
-            uniqueN(rt_df[
-              as.character(chrom) == chr_name &
-                pos == sp,
-              read_id
-            ])
-          }, integer(1))
-        }, by = chrom]
-
-      } else {
-        snp_peaks <- data.table(
-          chrom                 = factor(character(0), levels = fasta_chr_order),
-          peak_pos              = numeric(0),
-          peak_height           = numeric(0),
-          peak_start            = numeric(0),
-          peak_end              = numeric(0),
-          snp_pos               = numeric(0),
-          snp_n                 = integer(0),
-          chimeric_reads_at_snp = integer(0)
-        )
-      }
-      
-      results$peaks_genomic <- peaks_genomic
-      results$snp_peaks     <- snp_peaks
-
-      # ── 11. Build chromosome_fits for overview plot ─────────────────────────
-#      browser() # debug
-      incProgress(0.8, detail = "Creating overview plot")
-
-      chromosome_fits <- rbindlist(lapply(model_results, function(res) {
-        data.table(
-          sample_name     = input$sample_name,
-          chrom           = factor(res$chrom, levels = fasta_chr_order),
-          uniform_pos     = res$uniform_pos,
-          uniform_fit     = res$uniform_fit,
-          pos_kb          = res$uniform_pos / 1000,
-          smoother        = "whittaker",
-          lambda          = res$lambda,
-          mapq_cutoff     = input$mapq_cutoff,
-          baseq_cutoff    = input$baseq_cutoff,
-          min_run         = input$min_run,
-          min_peak_height = input$min_peak_height,
-          run_date        = as.character(Sys.Date())
-        )
-      }))
-
-      results$chromosome_fits <- chromosome_fits
-
-      # ── 13. Individual peak plots ───────────────────────────────────────────
-#      browser() # debug
+      # Peak plots are built here — they depend on Shiny output IDs and
+      # are not worth moving into chimera_functions.R.
       incProgress(0.9, detail = "Creating individual peak plots")
 
-      if (nrow(snp_peaks) > 0) {
-
-        peak_chrs <- levels(droplevels(snp_peaks$chrom))
-
-        peak_plots_list <- lapply(peak_chrs, function(chr_name) {
-          chr_peaks <- snp_peaks[chrom == chr_name]
-          chr_rt    <- rt_df[chrom == chr_name]
-          # Use transition_pos to identify reads that contributed a boundary at
-          # the peak SNP position; then plot the full read span from rt_df.
-          chr_trans <- transition_pos[chrom == chr_name]
-
-          peak_plots <- lapply(seq_len(nrow(chr_peaks)), function(i) {
-            peak_data <- chr_peaks[i]
-
-            read_ids <- chr_trans[pos == peak_data$snp_pos, unique(read_id)]
-
-            if (length(read_ids) == 0) return(NULL)
-
-            pltdf <- chr_rt[read_id %in% read_ids]
-            
-            peak_pts <- pltdf[pos == peak_data$snp_pos]
-            
-            ggplot(pltdf, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-              geom_point(size = 1) +
-              geom_point(
-                data        = peak_pts,
-                aes(x = pos / 1000, y = 1),
-                shape       = 21,
-                size        = 3,
-                color       = "black",
-                fill        = NA,
-                stroke      = 1.5,
-                inherit.aes = FALSE
-              ) +
-
-#             Add peak SNP highlighting
-              geom_point() +
-              facet_grid(read_id ~ .) +
-              scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
-              theme_bw() +
-              theme(
-                axis.text.y      = element_blank(),
-                axis.ticks.y     = element_blank(),
-                axis.title.y     = element_blank(),
-                legend.position  = "none",
-                plot.background  = element_blank(),
-                strip.background = element_blank(),
-                panel.border     = element_rect(linewidth = 0.1, linetype = 3),
-                panel.grid.major = element_blank(),
-                panel.grid.minor = element_blank(),
-                strip.text.y     = element_blank(),
-                panel.spacing    = unit(0, "mm")
-              ) +
-              xlab("Position (Kbp)") +
-              ggtitle(paste0(
-                "Chr ", chr_name, " - Peak ", i,
-                " (Position: ", round(peak_data$snp_pos / 1000, 2), " Kb)"
-              ))
-          })
-
-          peak_plots <- Filter(Negate(is.null), peak_plots)
-          list(chromosome = chr_name, plots = peak_plots)
-        })
-
-        results$peak_plots_by_chr <- peak_plots_list
-
-      } else {
-        results$peak_plots_by_chr <- NULL
+      peak_chrs <- character(0)
+      if (!is.null(res$snp_peaks) && nrow(res$snp_peaks) > 0) {
+        peak_chrs <- unique(as.character(res$snp_peaks$chrom))
       }
 
+      peak_plots_list <- lapply(peak_chrs, function(chr_name) {
+
+        chr_peaks <- res$snp_peaks[as.character(chrom) == chr_name]
+        chr_peaks <- chr_peaks[!is.na(snp_pos)]
+
+        if (nrow(chr_peaks) == 0) return(list(chromosome = chr_name, plots = list()))
+
+        plots <- lapply(seq_len(nrow(chr_peaks)), function(pk_i) {
+          pk       <- chr_peaks[pk_i]
+          snp_p    <- pk$snp_pos
+          pk_start <- pk$peak_start
+          pk_end   <- pk$peak_end
+
+          # Reads whose transition boundary falls inside the peak window
+          touching_ids <- res$transition_pos[
+            as.character(chrom) == chr_name & pos >= pk_start & pos <= pk_end,
+            unique(read_id)
+          ]
+          if (length(touching_ids) == 0) return(NULL)
+
+          pad_bp     <- 5000L
+          chr_pos    <- res$snp_coverage[as.character(chrom) == chr_name, pos]
+          chr_min    <- min(chr_pos, na.rm = TRUE)
+          chr_max    <- max(chr_pos, na.rm = TRUE)
+          plot_start <- max(chr_min, pk_start - pad_bp)
+          plot_end   <- min(chr_max, pk_end   + pad_bp)
+
+          plot_df <- res$rt_df[
+            as.character(chrom) == chr_name &
+              read_id %in% touching_ids &
+              pos >= plot_start &
+              pos <= plot_end
+          ]
+          if (nrow(plot_df) == 0) return(NULL)
+          setorder(plot_df, read_id, pos)
+
+          # Layer 2: explicit data frame so the RDS download handler can access it
+          peak_point_df <- data.frame(
+            pos_kb     = snp_p / 1000,
+            peak_start = pk_start / 1000,
+            peak_end   = pk_end   / 1000,
+            peak_height = pk$peak_height
+          )
+
+          p <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
+            geom_point() +
+            geom_vline(
+              data        = peak_point_df,
+              aes(xintercept = pos_kb),
+              colour      = "dodgerblue",
+              linewidth   = 1,
+              linetype    = 1,
+              inherit.aes = FALSE
+            ) +
+            geom_vline(xintercept = pk_start / 1000,
+                       color = "grey60", linewidth = 0.6, linetype = 2) +
+            geom_vline(xintercept = pk_end / 1000,
+                       color = "grey60", linewidth = 0.6, linetype = 2) +
+            facet_grid(read_id ~ .) +
+            scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+            theme_bw() +
+            theme(
+              axis.text.y      = element_blank(),
+              axis.ticks.y     = element_blank(),
+              axis.title.y     = element_blank(),
+              legend.position  = "none",
+              plot.background  = element_blank(),
+              strip.background = element_blank(),
+              panel.border     = element_rect(linewidth = 0.1, linetype = 3),
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              strip.text.y     = element_blank(),
+              panel.spacing    = unit(0, "mm")
+            ) +
+            xlab("Position (Kbp)") +
+            ggtitle(paste0(
+              "Chr ", chr_name, "  \u2014  Peak ", pk_i,
+              "  (SNP: ", round(snp_p / 1000, 2), " Kb;  Display: ",
+              round(plot_start / 1000, 2), " \u2013 ",
+              round(plot_end   / 1000, 2), " Kb)"
+            ))
+          p
+        })
+
+        plots <- Filter(Negate(is.null), plots)
+        list(chromosome = chr_name, plots = plots)
+      })
+
+      results$peak_plots_by_chr <- Filter(
+        function(x) length(x$plots) > 0,
+        peak_plots_list
+      )
+      
       incProgress(1, detail = "Complete")
     })
 
@@ -754,82 +404,11 @@ server <- function(input, output, session) {
   # the coordinate domain and panel mappings needed for brush to work
   output$chr_plot <- renderPlot({
     req(results$snp_coverage, results$chromosome_fits)
-
-    snp_coverage    <- copy(results$snp_coverage)
-    chromosome_fits <- copy(results$chromosome_fits)
-    peaks_genomic   <- results$peaks_genomic
-
-    # Convert chrom to character — Shiny's brush panel detection fails with factors
-    snp_coverage[,    chrom := as.character(chrom)]
-    chromosome_fits[, chrom := as.character(chrom)]
-    if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0)
-      peaks_genomic <- copy(peaks_genomic)[, chrom := as.character(chrom)]
-
-    p <- ggplot(snp_coverage, aes(x = pos_kb, y = n)) +
-      geom_line(
-        data  = chromosome_fits,
-        aes(x = uniform_pos / 1000, y = uniform_fit),
-        color = "firebrick", linewidth = 0.6, alpha = 0.5
-      ) +
-      geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
-      scale_x_continuous(minor_breaks = seq(0, 1600, 100)) +
-      xlab("Position (Kbp)") +
-      ylab("Number of Reads") +
-      ylim(0, max(30, max(snp_coverage$n))) +
-      facet_grid(chrom ~ ., switch = "y") +
-      theme_bw() +
-      theme(
-        panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
-        panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
-        strip.background   = element_blank(),
-        strip.placement    = "outside",
-        axis.text          = element_text(size = 12),
-        axis.title         = element_text(size = 15),
-        strip.text.y       = element_text(size = 9, angle = 0, hjust = 0, face = "bold")
-      )
-    
-    if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0) {
-      snp_peaks_local <- copy(results$snp_peaks)
-      if (!is.null(snp_peaks_local) && nrow(snp_peaks_local) > 0) {
-        snp_peaks_local[, chrom := as.character(chrom)]
-        peak_highlight <- merge(
-          snp_peaks_local[, .(chrom, pos = snp_pos)],
-          snp_coverage[, .(chrom, pos, pos_kb, n)],
-          by = c("chrom", "pos")
-        )
-        if (nrow(peak_highlight) > 0) {
-          p <- p + geom_point(
-            data        = peak_highlight,
-            aes(x = pos_kb, y = n),
-            color       = "black",
-            fill        = "dodgerblue",
-            size        = 2.5,
-            shape       = 21,
-            alpha       = 0.9,
-            inherit.aes = FALSE
-          )
-        }
-      }
-    }
-
-#    if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0) {
-#      p <- p +
-#        geom_vline(
-#          aes(xintercept = peak_pos / 1000),
-#          data  = peaks_genomic,
-#          color = "lightgreen", alpha = 0.5
-#        )
-#    }
-
-    p
+    build_overview_plot(results)
   }, height = function() {
-    
     req(results$snp_coverage)
-    
     n_chr <- length(unique(results$snp_coverage$chrom))
-    
     min(1600, max(400, n_chr * 120))
-    
   })
 
   # Peaks table
@@ -1337,57 +916,10 @@ server <- function(input, output, session) {
     filename = function() paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".png"),
     content  = function(file) {
       req(results$snp_coverage, results$chromosome_fits)
-      snp_coverage    <- copy(results$snp_coverage)
-      chromosome_fits <- copy(results$chromosome_fits)
-      peaks_genomic   <- results$peaks_genomic
-
-      # Convert chrom to character to match display plot behaviour
-      snp_coverage[,    chrom := as.character(chrom)]
-      chromosome_fits[, chrom := as.character(chrom)]
-
-      p <- ggplot(snp_coverage, aes(x = pos_kb, y = n)) +
-        geom_line(data = chromosome_fits, aes(x = uniform_pos / 1000, y = uniform_fit),
-                  color = "firebrick", linewidth = 0.6, alpha = 0.5) +
-        geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
-        scale_x_continuous(minor_breaks = seq(0, 1600, 100)) +
-        xlab("Position (Kbp)") + ylab("Number of Reads") +
-        ylim(0, max(30, max(snp_coverage$n))) +
-        facet_grid(chrom ~ ., switch = "y") +
-        theme_bw() +
-        theme(panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
-              panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
-              strip.background = element_blank(), strip.placement = "outside",
-              axis.text = element_text(size = 12), axis.title = element_text(size = 15),
-              strip.text.y = element_text(size = 9, angle = 0, hjust = 0, face = "bold"))
-
-      # Mirror the display plot: highlight peak SNP points instead of vlines
-      if (!is.null(peaks_genomic) && nrow(peaks_genomic) > 0) {
-        snp_peaks_local <- copy(results$snp_peaks)
-        if (!is.null(snp_peaks_local) && nrow(snp_peaks_local) > 0) {
-          snp_peaks_local[, chrom := as.character(chrom)]
-          peak_highlight <- merge(
-            snp_peaks_local[, .(chrom, pos = snp_pos)],
-            snp_coverage[,    .(chrom, pos, pos_kb, n)],
-            by = c("chrom", "pos")
-          )
-          if (nrow(peak_highlight) > 0) {
-            p <- p + geom_point(
-              data        = peak_highlight,
-              aes(x = pos_kb, y = n),
-              color       = "black",
-              fill        = "dodgerblue",
-              size        = 2.5,
-              shape       = 21,
-              alpha       = 0.9,
-              inherit.aes = FALSE
-            )
-          }
-        }
-      }
-
-      n_chr      <- length(unique(snp_coverage$chrom))
-      png_height <- max(3, min(16, n_chr * 1.2))
-      ggsave(file, plot = p, width = 12, height = png_height, dpi = 300)
+      p     <- build_overview_plot(results)
+      n_chr <- length(unique(results$snp_coverage$chrom))
+      png_h <- max(3, min(16, n_chr * 1.2))
+      ggsave(file, plot = p, width = 12, height = png_h, dpi = 300)
     }
   )
 
