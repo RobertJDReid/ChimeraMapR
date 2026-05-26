@@ -66,10 +66,10 @@ ui <- fluidPage(
 
       numericInput("lambda",
                    "Whittaker Lambda (λ):",
-                   value = 1,
+                   value = 50,
                    min   = 0.01,
                    step  = 0.5),
-      helpText("Smoothness penalty for Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve. Try 0.1–2 for sharp peaks."),
+      helpText("Smoothness penalty for Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve, lower = tighter"),
 
 #      hr(),
 
@@ -116,7 +116,7 @@ ui <- fluidPage(
         tabPanel("Individual Peak Plots",
                  h4("Detailed Peak Visualizations by Chromosome"),
                  helpText("Each peak shows all chimeric reads that intersect that position.
-                          Colors indicate REF (yellow) vs ALT (purple) alleles."),
+                          Colors indicate REF (blue) vs ALT (red) alleles."),
                  br(),
                  uiOutput("peak_plots_tabs")
         ),
