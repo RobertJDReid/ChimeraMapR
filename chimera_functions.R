@@ -207,11 +207,14 @@ run_chimera_analysis <- function(
   snp_by_chr <- split(snp_coverage, by = "chrom", keep.by = TRUE)
 
   model_results <- lapply(snp_by_chr, function(snps_dt) {
+    snps_dt     <- snps_dt[order(pos)]
     chr_name    <- as.character(snps_dt$chrom[1])
     uniform_pos <- seq(min(snps_dt$pos), max(snps_dt$pos), by = 200)
 
     uniform_fit <- tryCatch({
-      smoothed <- whittaker(snps_dt$n, lambda = lambda, d = 2)
+      med_step    <- if (nrow(snps_dt) > 1L) median(diff(snps_dt$pos)) else 200
+      scaled_lam  <- lambda * (200 / med_step)^2
+      smoothed    <- whittaker(snps_dt$n, lambda = scaled_lam, d = 2)
       approx(snps_dt$pos, smoothed, xout = uniform_pos, rule = 2)$y
     }, error = function(e) {
       warn_fn(paste0(
