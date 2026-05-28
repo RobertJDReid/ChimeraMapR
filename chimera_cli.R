@@ -26,7 +26,7 @@
 #      --baseq-cutoff 15 \
 #      --min-run 3 \
 #      --min-peak-height 15 \
-#      --lambda 50 \
+#      --lambda 1 \
 #      --output results/ \
 #      reads.csv.gz snps.vcf.gz genome.fa.fai
 # =============================================================================
@@ -107,7 +107,7 @@ option_list <- list(
 
   make_option(c("-l", "--lambda"),
               type    = "double",
-              default = 50,
+              default = 1,
               metavar = "FLOAT",
               help    = "Whittaker smoothing penalty lambda (lower = tighter fit) [default: %default]"),
 

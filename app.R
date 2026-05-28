@@ -66,7 +66,7 @@ ui <- fluidPage(
 
       numericInput("lambda",
                    "Whittaker Lambda (λ):",
-                   value = 50,
+                   value = 1,
                    min   = 0.01,
                    step  = 0.5),
       helpText("Smoothness penalty for Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve, lower = tighter"),
