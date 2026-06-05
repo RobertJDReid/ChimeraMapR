@@ -283,6 +283,7 @@ server <- function(input, output, session) {
 
         chr_peaks <- res$snp_peaks[as.character(chrom) == chr_name]
         chr_peaks <- chr_peaks[!is.na(snp_pos)]
+        chr_peaks <- chr_peaks[order(snp_pos)]
 
         if (nrow(chr_peaks) == 0) return(list(chromosome = chr_name, plots = list()))
 
@@ -323,8 +324,38 @@ server <- function(input, output, session) {
             peak_height = pk$peak_height
           )
 
-          p <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-            geom_point() +
+          # ── Haplotype segment data (classify2 method) ──────────────────────
+          # Summarise allele balance per position within the peak window,
+          # then run-length-encode into contiguous REF/HET/ALT blocks.
+          read_peak_df <- plot_df[pos >= pk_start & pos <= pk_end]
+
+          seg_data <- NULL
+          if (nrow(read_peak_df) > 0) {
+            peak_summary <- read_peak_df[, .(
+              REF = sum(IS_REF),
+              num = .N
+            ), by = pos][, allele_balance := REF / num][
+              , SNP_call := data.table::fcase(
+                  allele_balance < 0.2, "ALT",
+                  allele_balance > 0.8, "REF",
+                  default = "HET"
+              )
+            ]
+            setorder(peak_summary, pos)
+            peak_summary[, run := data.table::rleid(SNP_call)]
+            seg_data <- peak_summary[, .(
+              xmin    = min(pos) / 1000,
+              SNP_call = SNP_call[1]
+            ), by = run][order(xmin)][
+              , xmax := data.table::shift(xmin, type = "lead",
+                                          fill = pk_end / 1000)
+            ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
+          }
+
+          x_lims <- range(plot_df$pos / 1000)
+
+          p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
+            geom_point(size = 0.8) +
             geom_vline(
               data        = peak_point_df,
               aes(xintercept = pos_kb),
@@ -339,27 +370,66 @@ server <- function(input, output, session) {
                        color = "grey60", linewidth = 0.6, linetype = 2) +
             facet_grid(read_id ~ .) +
             scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+            scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
             theme_bw() +
             theme(
               axis.text.y      = element_blank(),
               axis.ticks.y     = element_blank(),
               axis.title.y     = element_blank(),
+              axis.text.x      = element_blank(),
+              axis.ticks.x     = element_blank(),
+              axis.title.x     = element_blank(),
               legend.position  = "none",
               plot.background  = element_blank(),
               strip.background = element_blank(),
-              panel.border     = element_rect(linewidth = 0.1, linetype = 3),
+              panel.border     = element_rect(fill = NA, linewidth = 0.1, linetype = 3),
               panel.grid.major = element_blank(),
               panel.grid.minor = element_blank(),
               strip.text.y     = element_blank(),
               panel.spacing    = unit(0, "mm")
             ) +
-            xlab("Position (Kbp)") +
             ggtitle(paste0(
               "Chr ", chr_name, "  \u2014  Peak ", pk_i,
               "  (SNP: ", round(snp_p / 1000, 2), " Kb;  Display: ",
               round(plot_start / 1000, 2), " \u2013 ",
               round(plot_end   / 1000, 2), " Kb)"
             ))
+
+          # ── Haplotype segment panel ────────────────────────────────────────
+          if (!is.null(seg_data) && nrow(seg_data) > 0) {
+            p_seg <- ggplot(seg_data) +
+              geom_rect(
+                aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = 1,
+                    fill = SNP_call),
+                alpha = 0.45
+              ) +
+              scale_fill_manual(
+                values  = c(ALT = "firebrick", HET = "gray60", REF = "dodgerblue"),
+                drop    = FALSE,
+                na.value = "black"
+              ) +
+              coord_cartesian(
+                xlim   = x_lims,
+                ylim   = c(0, 1),
+                expand = FALSE
+              ) +
+              labs(x = "Position (Kb)", y = "Haplotype\nregion") +
+              theme_bw() +
+              theme(
+                panel.grid    = element_blank(),
+                axis.text.y   = element_blank(),
+                axis.ticks.y  = element_blank(),
+                panel.border  = element_blank(),
+                legend.position = "none"
+              )
+            p <- patchwork::wrap_plots(p_reads, p_seg, ncol = 1,
+                                       heights = c(8, 1))
+          } else {
+            p <- p_reads + xlab("Position (Kbp)")
+          }
+
+          # Attach seg_data as an attribute so the RDS handler can retrieve it
+          attr(p, "seg_data") <- seg_data
           p
         })
 
@@ -526,8 +596,13 @@ server <- function(input, output, session) {
                      "_", Sys.Date(), ".png")
             },
             content = function(file) {
-              n_reads <- length(unique(ggplot_build(p)$data[[1]]$group))
-              plot_h  <- max(4, min(20, n_reads * 0.4 + 2))
+              # For patchwork objects, extract read count from the first ggplot
+              reads_plot <- if (inherits(p, "patchwork")) p[[1]] else p
+              n_reads    <- length(unique(ggplot_build(reads_plot)$data[[1]]$group))
+              # Add extra height for the haplotype segment panel
+              has_seg    <- inherits(p, "patchwork")
+              seg_extra  <- if (has_seg) 1.5 else 0
+              plot_h     <- max(4, min(22, n_reads * 0.4 + 2)) + seg_extra
               ggsave(file, plot = p, width = 10, height = plot_h, dpi = 300)
             }
           )
@@ -538,9 +613,12 @@ server <- function(input, output, session) {
                      "_", Sys.Date(), ".rds")
             },
             content = function(file) {
-              
-              plot_data <- as.data.table(p$data)
-              
+              # For patchwork objects the read data lives in the first sub-plot;
+              # for plain ggplot objects it lives directly in p$data.
+              reads_plot <- if (inherits(p, "patchwork")) p[[1]] else p
+
+              plot_data <- as.data.table(reads_plot$data)
+
               plot_data <- plot_data[, .(
                 chrom,
                 pos,
@@ -548,11 +626,18 @@ server <- function(input, output, session) {
                 IS_REF
               )]
 
+              # peak_points layer is always layer 2 of the reads sub-plot
+              peak_points_dt <- as.data.table(reads_plot$layers[[2]]$data)
+
+              # Retrieve seg_data stored as an attribute during plot construction
+              seg_dt <- attr(p, "seg_data")
+
               saveRDS(
                 list(
-                  plot_data = plot_data,
-                  peak_points = as.data.table(p$layers[[2]]$data),
-                  chromosome = .chr,
+                  plot_data   = plot_data,
+                  peak_points = peak_points_dt,
+                  seg_data    = seg_dt,
+                  chromosome  = .chr,
                   peak_number = .i,
                   sample_name = input$sample_name,
                   app_version = APP_VERSION
