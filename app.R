@@ -584,6 +584,10 @@ server <- function(input, output, session) {
   output$chr_plot <- renderPlot({
     req(results$snp_coverage, results$chromosome_fits)
     build_overview_plot(results)
+  }, height = function() {
+    req(results$snp_coverage)
+    n_chr <- length(unique(results$snp_coverage$chrom))
+    min(1600, max(400, n_chr * 120))
   })
 
   # ── Main analysis ────────────────────────────────────────────────────────────
