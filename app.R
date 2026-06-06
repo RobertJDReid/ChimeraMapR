@@ -317,11 +317,29 @@ compute_peak_pairs <- function(snp_peaks,
     read_sets <- lapply(seq_len(nrow(chr_peaks)), function(i) get_peak_reads(chr_peaks[i]))
     names(read_sets) <- chr_peaks$peak_id
 
+    # Classes that must never be fused with any neighbour
+    excluded_classes <- c("gene_conversion", "internal_crossover")
+
     # Evaluate adjacent pairs only
     for (j in seq_len(nrow(chr_peaks) - 1L)) {
 
       pk_a <- chr_peaks[j]
       pk_b <- chr_peaks[j + 1L]
+
+      # ── Peak-class guard ────────────────────────────────────────────────────
+      # If either peak has already been classified as gene_conversion or
+      # internal_crossover it must remain a singleton; skip this pair entirely.
+      label_a <- if ("haplotype_label" %in% names(pk_a)) pk_a$haplotype_label else NA_character_
+      label_b <- if ("haplotype_label" %in% names(pk_b)) pk_b$haplotype_label else NA_character_
+
+      if (isTRUE(label_a %in% excluded_classes) || isTRUE(label_b %in% excluded_classes)) next
+
+      # Only binary-classed peaks (or unlabelled peaks) are eligible for fusion.
+      # A peak that has been positively identified as something other than binary
+      # must not be joined to its neighbour.
+      eligible <- function(lbl) is.na(lbl) || lbl == "binary" || lbl == "undefined"
+      if (!eligible(label_a) || !eligible(label_b)) next
+      # ── End peak-class guard ─────────────────────────────────────────────────
 
       reads_a <- read_sets[[as.character(pk_a$peak_id)]]
       reads_b <- read_sets[[as.character(pk_b$peak_id)]]
@@ -612,6 +630,8 @@ ui <- fluidPage(
                  h4("Peak Pair Analysis"),
                  helpText(
                    "Adjacent peak pairs are evaluated for shared reads and haplotype signatures. ",
+                   "Peaks already classified as gene conversion or internal crossover are excluded from fusion ",
+                   "regardless of Jaccard score; only binary (or unlabelled) peaks are candidates. ",
                    "Green rows = automatic fusion. Yellow rows = supervised (check box to approve). ",
                    "Red rows = not fused (independent events). Grey rows = unresolvable."
                  ),
@@ -681,6 +701,12 @@ ui <- fluidPage(
                    tags$li(strong("ambiguous:"), "Read patterns do not fit a clean model. Supervised review only."),
                    tags$li(strong("unresolvable:"), "No spanning reads with sufficient SNPs in all three zones. Not fused.")
                  ),
+                 h5("Peak-Class Fusion Guard:"),
+                 p("Before edge-type scoring, each peak's haplotype label (assigned during the initial analysis) is checked.",
+                   "Peaks classified as ", strong("gene_conversion"), " or ", strong("internal_crossover"),
+                   " are treated as self-contained events and will ", strong("never"), " be merged with a neighbour,",
+                   "regardless of Jaccard score or edge type.",
+                   "Only peaks labelled ", strong("binary"), " (or still unlabelled / undefined) are eligible for fusion."),
                  h5("Input Files:"),
                  tags$ul(
                    tags$li(strong("Read Data:"), "CSV file with SNP position information from BAM file (columns: chrom, pos, read_id, call, is_del, etc.). For csv files > 200 Mb, compress with ", em("gzip"), " or ", em("pigz"), " prior to upload."),
