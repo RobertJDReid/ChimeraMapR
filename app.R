@@ -6,6 +6,9 @@ library(igraph)
 source("chimera_functions.R")   # loads all packages + whittaker + run_chimera_analysis etc.
 # APP_VERSION is now defined inside chimera_functions.R
 
+# Null-coalescing operator (base R does not provide one)
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
 # ─────────────────────────────────────────────────────────────────────────────
 #   PEAK FUSION FUNCTIONS
 #   All fusion logic is self-contained here so it can be sourced / tested
@@ -110,6 +113,164 @@ classify_edge_type <- function(state_df) {
   if (no_return) return("independent_events")
 
   return("ambiguous")
+}
+
+# ---------------------------------------------------------------------------
+# classify_peak_haplotype()
+#   Classifies the haplotype structure under a single detected peak by
+#   examining the run-length pattern of SNP_call (REF / ALT / HET) within
+#   the peak window.  The window is expanded outward (by SNP-position
+#   counting, up to the median read length of reads in the peak) when
+#   fewer than zone_min_snps + 1 positions exist on either side of snp_pos.
+#
+#   Arguments:
+#     pk          : single-row data.table from snp_peaks
+#     chr_name    : chromosome name (character)
+#     rt_df       : full RLE-smoothed read data (data.table with chrom, pos,
+#                   read_id, IS_REF columns)
+#     touching_ids: read IDs that overlap the peak window (character vector)
+#     zone_min_snps: minimum SNPs per side required (integer, default 2L)
+#
+#   Returns a named list:
+#     label      : character label for the peak
+#     seg_data   : data.table used for the segment bar (or NULL)
+#     win_start  : actual window start used (bp, possibly expanded)
+#     win_end    : actual window end used (bp, possibly expanded)
+#     expanded   : logical — was the window expanded beyond peak_start/end?
+# ---------------------------------------------------------------------------
+classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
+                                    zone_min_snps = 2L) {
+
+  snp_p    <- pk$snp_pos
+  pk_start <- pk$peak_start
+  pk_end   <- pk$peak_end
+  min_each <- zone_min_snps + 1L        # SNPs required on each side
+
+  # All positions available from reads touching this peak on this chromosome
+  avail_pos <- sort(unique(
+    rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name, pos]
+  ))
+
+  if (length(avail_pos) == 0)
+    return(list(label = "undefined", seg_data = NULL,
+                win_start = pk_start, win_end = pk_end, expanded = FALSE))
+
+  # Median read length for the expansion upper limit
+  read_lengths <- rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name,
+                        .(len = max(pos) - min(pos)), by = read_id]$len
+  max_expand   <- median(read_lengths, na.rm = TRUE)
+  if (is.na(max_expand) || max_expand <= 0) max_expand <- 0
+
+  # ── Helper: count positions strictly on each side of snp_pos ────────────
+  count_left  <- function(s) sum(avail_pos >= s & avail_pos <  snp_p)
+  count_right <- function(e) sum(avail_pos >  snp_p & avail_pos <= e)
+
+  win_start <- pk_start
+  win_end   <- pk_end
+  expanded  <- FALSE
+
+  # ── Expand left if needed ────────────────────────────────────────────────
+  if (count_left(win_start) < min_each) {
+    # Find positions to the left of snp_pos within max_expand of pk_start
+    cands <- avail_pos[avail_pos < snp_p]
+    limit <- snp_p - max_expand          # hard lower bound
+    cands <- cands[cands >= limit]
+    if (length(cands) >= min_each) {
+      # Take the min_each-th position from the right (closest to snp_p)
+      new_start <- cands[length(cands) - min_each + 1L]
+      if (new_start < win_start) {
+        win_start <- new_start
+        expanded  <- TRUE
+      }
+    }
+    # If still insufficient after expansion, we proceed; label will be "undefined"
+  }
+
+  # ── Expand right if needed ───────────────────────────────────────────────
+  if (count_right(win_end) < min_each) {
+    cands <- avail_pos[avail_pos > snp_p]
+    limit <- snp_p + max_expand
+    cands <- cands[cands <= limit]
+    if (length(cands) >= min_each) {
+      new_end <- cands[min_each]
+      if (new_end > win_end) {
+        win_end  <- new_end
+        expanded <- TRUE
+      }
+    }
+  }
+
+  # ── Build seg_data from the (possibly expanded) window ──────────────────
+  win_pos <- avail_pos[avail_pos >= win_start & avail_pos <= win_end]
+
+  # Check we have at least zone_min_snps + 1 on each side now
+  n_left  <- sum(win_pos <  snp_p)
+  n_right <- sum(win_pos >  snp_p)
+  if (n_left < min_each || n_right < min_each) {
+    return(list(label = "undefined", seg_data = NULL,
+                win_start = win_start, win_end = win_end, expanded = expanded))
+  }
+
+  # Aggregate IS_REF by position within the window to get SNP_call
+  read_win_df <- rt_df[
+    read_id %in% touching_ids &
+      as.character(chrom) == chr_name &
+      pos >= win_start & pos <= win_end
+  ]
+  if (nrow(read_win_df) == 0)
+    return(list(label = "undefined", seg_data = NULL,
+                win_start = win_start, win_end = win_end, expanded = expanded))
+
+  peak_summary <- read_win_df[, .(
+    REF = sum(IS_REF),
+    num = .N
+  ), by = pos][, allele_balance := REF / num][
+    , SNP_call := data.table::fcase(
+        allele_balance < 0.2, "ALT",
+        allele_balance > 0.8, "REF",
+        default = "HET"
+    )
+  ]
+  setorder(peak_summary, pos)
+  peak_summary[, run := data.table::rleid(SNP_call)]
+
+  seg_data <- peak_summary[, .(
+    xmin     = min(pos) / 1000,
+    SNP_call = SNP_call[1]
+  ), by = run][order(xmin)][
+    , xmax := data.table::shift(xmin, type = "lead", fill = win_end / 1000)
+  ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
+
+  # ── Classify by run pattern ──────────────────────────────────────────────
+  runs <- as.character(seg_data$SNP_call)   # ordered sequence of run states
+  n_runs <- length(runs)
+
+  label <- if (n_runs == 1L) {
+    if      (runs[1] == "HET")                           "internal_crossover"
+    else                                                  "undefined"          # single REF or ALT
+
+  } else if (n_runs == 2L) {
+    if (runs[1] %in% c("REF","ALT") && runs[2] %in% c("REF","ALT") &&
+        runs[1] != runs[2])                               "binary"
+    else                                                  "undefined"
+
+  } else if (n_runs == 3L) {
+    pat <- paste(runs, collapse = "-")
+    if      (pat %in% c("ALT-REF-ALT", "REF-ALT-REF")) "gene_conversion"
+    else if (pat %in% c("HET-ALT-HET", "HET-REF-HET")) "internal_crossover"
+    else                                                  "undefined"
+
+  } else {
+    "undefined"
+  }
+
+  list(
+    label     = label,
+    seg_data  = seg_data,
+    win_start = win_start,
+    win_end   = win_end,
+    expanded  = expanded
+  )
 }
 
 # ---------------------------------------------------------------------------
@@ -652,6 +813,13 @@ server <- function(input, output, session) {
         peak_chrs <- unique(as.character(res$snp_peaks$chrom))
       }
 
+      # ── Haplotype label lookup table (keyed by snp_peaks row index) ─────────
+      # Tag snp_peaks with a stable row index before the loop so we can join
+      # labels back even when some peaks are skipped (no touching reads).
+      res$snp_peaks[, .row_idx := .I]
+
+      hap_label_rows  <- list()
+
       peak_plots_list <- lapply(peak_chrs, function(chr_name) {
 
         chr_peaks <- res$snp_peaks[as.character(chrom) == chr_name]
@@ -671,6 +839,28 @@ server <- function(input, output, session) {
             unique(read_id)
           ]
           if (length(touching_ids) == 0) return(NULL)
+
+          # ── Haplotype classification (uses rt_df, may expand the window) ──
+          hap <- classify_peak_haplotype(
+            pk            = pk,
+            chr_name      = chr_name,
+            rt_df         = res$rt_df,
+            touching_ids  = touching_ids,
+            zone_min_snps = input$min_run
+          )
+
+          # Record label for writing back to snp_peaks later (keyed by .row_idx
+          # so skipped peaks safely receive NA on the join)
+          hap_label_rows[[length(hap_label_rows) + 1L]] <<- data.table(
+            .row_idx         = pk$.row_idx,
+            haplotype_label  = hap$label,
+            hap_win_start    = hap$win_start,
+            hap_win_end      = hap$win_end,
+            hap_win_expanded = hap$expanded
+          )
+
+          # seg_data now comes from the classifier (window may be expanded)
+          seg_data <- hap$seg_data
 
           pad_bp     <- 5000L
           chr_pos    <- res$snp_coverage[as.character(chrom) == chr_name, pos]
@@ -695,32 +885,18 @@ server <- function(input, output, session) {
             peak_height = pk$peak_height
           )
 
-          read_peak_df <- plot_df[pos >= pk_start & pos <= pk_end]
-
-          seg_data <- NULL
-          if (nrow(read_peak_df) > 0) {
-            peak_summary <- read_peak_df[, .(
-              REF = sum(IS_REF),
-              num = .N
-            ), by = pos][, allele_balance := REF / num][
-              , SNP_call := data.table::fcase(
-                  allele_balance < 0.2, "ALT",
-                  allele_balance > 0.8, "REF",
-                  default = "HET"
-              )
-            ]
-            setorder(peak_summary, pos)
-            peak_summary[, run := data.table::rleid(SNP_call)]
-            seg_data <- peak_summary[, .(
-              xmin     = min(pos) / 1000,
-              SNP_call = SNP_call[1]
-            ), by = run][order(xmin)][
-              , xmax := data.table::shift(xmin, type = "lead",
-                                          fill = pk_end / 1000)
-            ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
-          }
-
           x_lims <- range(plot_df$pos / 1000)
+
+          # ── Build plot title with haplotype label ─────────────────────────
+          hap_label_str <- gsub("_", " ", hap$label)
+          expanded_note <- if (hap$expanded) " [window expanded]" else ""
+          plot_title <- paste0(
+            "Chr ", chr_name, "  \u2014  Peak ", pk_i,
+            "  (SNP: ", round(snp_p / 1000, 2), " Kb;  Display: ",
+            round(plot_start / 1000, 2), " \u2013 ",
+            round(plot_end   / 1000, 2), " Kb)",
+            "\n\u25b6 Haplotype classification: ", hap_label_str, expanded_note
+          )
 
           p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
             geom_point(size = 0.8) +
@@ -732,6 +908,8 @@ server <- function(input, output, session) {
               linetype    = 1,
               inherit.aes = FALSE
             ) +
+            # Original peak boundary lines (solid grey if not expanded,
+            # or kept as reference even when the analysis window widened)
             geom_vline(xintercept = pk_start / 1000,
                        color = "grey60", linewidth = 0.6, linetype = 2) +
             geom_vline(xintercept = pk_end / 1000,
@@ -756,12 +934,17 @@ server <- function(input, output, session) {
               strip.text.y     = element_blank(),
               panel.spacing    = unit(0, "mm")
             ) +
-            ggtitle(paste0(
-              "Chr ", chr_name, "  \u2014  Peak ", pk_i,
-              "  (SNP: ", round(snp_p / 1000, 2), " Kb;  Display: ",
-              round(plot_start / 1000, 2), " \u2013 ",
-              round(plot_end   / 1000, 2), " Kb)"
-            ))
+            ggtitle(plot_title)
+
+          # If the analysis window was expanded, add orange dashed lines
+          # showing the actual window used for classification
+          if (hap$expanded) {
+            p_reads <- p_reads +
+              geom_vline(xintercept = hap$win_start / 1000,
+                         color = "darkorange", linewidth = 0.7, linetype = 3) +
+              geom_vline(xintercept = hap$win_end / 1000,
+                         color = "darkorange", linewidth = 0.7, linetype = 3)
+          }
 
           if (!is.null(seg_data) && nrow(seg_data) > 0) {
             p_seg <- ggplot(seg_data) +
@@ -775,6 +958,14 @@ server <- function(input, output, session) {
                 drop     = FALSE,
                 na.value = "black"
               ) +
+              # Label the classification inside the segment bar
+              annotate("text",
+                       x     = mean(c(hap$win_start, hap$win_end)) / 1000,
+                       y     = 0.5,
+                       label = hap_label_str,
+                       size  = 3,
+                       color = "black",
+                       fontface = "bold") +
               coord_cartesian(
                 xlim   = x_lims,
                 ylim   = c(0, 1),
@@ -795,13 +986,26 @@ server <- function(input, output, session) {
             p <- p_reads + xlab("Position (Kbp)")
           }
 
-          attr(p, "seg_data") <- seg_data
+          attr(p, "seg_data")       <- seg_data
+          attr(p, "haplotype_label") <- hap$label
           p
         })
 
         plots <- Filter(Negate(is.null), plots)
         list(chromosome = chr_name, plots = plots)
       })
+
+      # ── Write haplotype labels back to snp_peaks ─────────────────────────
+      if (length(hap_label_rows) > 0) {
+        hap_dt <- rbindlist(hap_label_rows, fill = TRUE)
+        # .row_idx was added to res$snp_peaks before the loop; join on it.
+        res$snp_peaks <- merge(
+          res$snp_peaks, hap_dt,
+          by = ".row_idx", all.x = TRUE
+        )
+      }
+      res$snp_peaks[, .row_idx := NULL]
+      results$snp_peaks <- res$snp_peaks
 
       results$peak_plots_by_chr <- Filter(
         function(x) length(x$plots) > 0,
@@ -996,7 +1200,7 @@ server <- function(input, output, session) {
     group_rep
   })
 
-  # ── Peak Summary table (original, unchanged) ─────────────────────────────────
+  # ── Peak Summary table ───────────────────────────────────────────────────────
   output$peaks_table <- renderTable({
     req(results$peaks_genomic)
     out <- copy(results$snp_peaks)
@@ -1011,22 +1215,45 @@ server <- function(input, output, session) {
       "None above cutoff",
       as.character(round(snp_pos / 1000, 2))
     )]
-    out[, snp_n_str := ifelse(is.na(snp_n), "", as.character(snp_n))]
+    out[, snp_n_str         := ifelse(is.na(snp_n), "", as.character(snp_n))]
     out[, chimeric_reads_str := ifelse(
       is.na(chimeric_reads_at_snp), "", as.character(chimeric_reads_at_snp)
     )]
-    out <- out[, .(
-      Chromosome              = chrom,
-      `Peak Position (Kb)`    = peak_pos_kb,
-      `Qualifying SNP (Kb)`   = snp_pos_kb_str,
-      `Raw Count at SNP`      = snp_n_str,
-      `Peak Start (Kb)`       = peak_start_kb,
-      `Peak End (Kb)`         = peak_end_kb,
-      `Peak Height`           = peak_height,
-      `Chimeric Reads at SNP` = chimeric_reads_str
-    )]
-    setorder(out, Chromosome, `Peak Position (Kb)`)
-    out
+
+    # Haplotype label columns (present only after analysis has run the plot loop)
+    has_hap  <- "haplotype_label"  %in% names(out)
+    has_wins <- "hap_win_start"    %in% names(out) && "hap_win_end" %in% names(out)
+
+    base_cols <- list(
+      Chromosome                = out$chrom,
+      `Peak Position (Kb)`      = out$peak_pos_kb,
+      `Qualifying SNP (Kb)`     = out$snp_pos_kb_str,
+      `Raw Count at SNP`        = out$snp_n_str,
+      `Peak Start (Kb)`         = out$peak_start_kb,
+      `Peak End (Kb)`           = out$peak_end_kb,
+      `Peak Height`             = out$peak_height,
+      `Chimeric Reads at SNP`   = out$chimeric_reads_str
+    )
+    if (has_hap) {
+      base_cols[["Haplotype Label"]] <-
+        ifelse(is.na(out$haplotype_label), "\u2014",
+               gsub("_", " ", out$haplotype_label))
+    }
+    if (has_hap && has_wins) {
+      base_cols[["Hap Win Start (Kb)"]] <-
+        ifelse(is.na(out$hap_win_start), "\u2014",
+               as.character(round(out$hap_win_start / 1000, 2)))
+      base_cols[["Hap Win End (Kb)"]] <-
+        ifelse(is.na(out$hap_win_end), "\u2014",
+               as.character(round(out$hap_win_end / 1000, 2)))
+      base_cols[["Win Expanded"]] <-
+        ifelse(is.na(out$hap_win_expanded), "\u2014",
+               ifelse(out$hap_win_expanded, "yes", "no"))
+    }
+
+    display <- as.data.table(base_cols)
+    setorder(display, Chromosome, `Peak Position (Kb)`)
+    display
   })
 
   # ── Dynamic UI: per-chromosome tabs of individual peak plots ─────────────────
