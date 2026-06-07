@@ -657,6 +657,9 @@ compute_peak_pairs <- function(snp_peaks,
     return(list(peak_pairs = NULL, fused_peaks = NULL))
 
   peaks_dt <- copy(snp_peaks)
+  peaks_dt <- peaks_dt[!is.na(snp_pos)]              # exclude peaks with no qualifying SNP position
+  if (nrow(peaks_dt) == 0)
+    return(list(peak_pairs = NULL, fused_peaks = NULL))
   peaks_dt[, peak_id := .I]                          # integer row ID
   peaks_dt[, chrom   := as.character(chrom)]
 
