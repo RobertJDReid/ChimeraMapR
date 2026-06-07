@@ -433,6 +433,11 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
   ), by = fusion_group]
 
   setorder(group_rep, chrom, fused_pos_bp)
+  
+  # add to avoid NAs creeping into logic
+  group_rep <- group_rep[!is.na(fused_pos_bp) &
+                           !is.na(fused_start_bp) &
+                           !is.na(fused_end_bp)]
 
   fused_chrs <- unique(group_rep$chrom)
 
