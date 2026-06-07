@@ -274,6 +274,365 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
 }
 
 # ---------------------------------------------------------------------------
+# classify_fused_peak_haplotype()
+#   Variant of classify_peak_haplotype() for a fused peak group.
+#   The "peak" is represented by fused_pos_bp (anchor), fused_start_bp, and
+#   fused_end_bp (window).  touching_ids is the union of all reads from all
+#   constituent sub-peaks.  Classification and window-expansion logic is
+#   identical to the original; the only differences are which columns are read
+#   from the fused group row and that the snp_pos anchor is the group mean.
+#
+#   Arguments:
+#     fg           : single-row data.table from fused_peaks (one row per group,
+#                    as produced by the group_rep summary — must contain
+#                    fused_pos_bp, fused_start_bp, fused_end_bp)
+#     chr_name     : chromosome name (character)
+#     rt_df        : full RLE-smoothed read data (data.table)
+#     touching_ids : union of reads from all constituent sub-peaks
+#     zone_min_snps: minimum SNPs per side required (integer, default 2L)
+#
+#   Returns the same named list as classify_peak_haplotype():
+#     label, seg_data, win_start, win_end, expanded
+# ---------------------------------------------------------------------------
+classify_fused_peak_haplotype <- function(fg, chr_name, rt_df, touching_ids,
+                                          zone_min_snps = 2L) {
+
+  snp_p    <- fg$fused_pos_bp
+  pk_start <- fg$fused_start_bp
+  pk_end   <- fg$fused_end_bp
+  min_each <- zone_min_snps + 1L
+
+  avail_pos <- sort(unique(
+    rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name, pos]
+  ))
+
+  if (length(avail_pos) == 0)
+    return(list(label = "undefined", seg_data = NULL,
+                win_start = pk_start, win_end = pk_end, expanded = FALSE))
+
+  read_lengths <- rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name,
+                        .(len = max(pos) - min(pos)), by = read_id]$len
+  max_expand   <- median(read_lengths, na.rm = TRUE)
+  if (is.na(max_expand) || max_expand <= 0) max_expand <- 0
+
+  count_left  <- function(s) sum(avail_pos >= s & avail_pos <  snp_p)
+  count_right <- function(e) sum(avail_pos >  snp_p & avail_pos <= e)
+
+  win_start <- pk_start
+  win_end   <- pk_end
+  expanded  <- FALSE
+
+  if (count_left(win_start) < min_each) {
+    cands <- avail_pos[avail_pos < snp_p]
+    limit <- snp_p - max_expand
+    cands <- cands[cands >= limit]
+    if (length(cands) >= min_each) {
+      new_start <- cands[length(cands) - min_each + 1L]
+      if (new_start < win_start) { win_start <- new_start; expanded <- TRUE }
+    }
+  }
+
+  if (count_right(win_end) < min_each) {
+    cands <- avail_pos[avail_pos > snp_p]
+    limit <- snp_p + max_expand
+    cands <- cands[cands <= limit]
+    if (length(cands) >= min_each) {
+      new_end <- cands[min_each]
+      if (new_end > win_end) { win_end <- new_end; expanded <- TRUE }
+    }
+  }
+
+  win_pos <- avail_pos[avail_pos >= win_start & avail_pos <= win_end]
+  n_left  <- sum(win_pos <  snp_p)
+  n_right <- sum(win_pos >  snp_p)
+  if (n_left < min_each || n_right < min_each)
+    return(list(label = "undefined", seg_data = NULL,
+                win_start = win_start, win_end = win_end, expanded = expanded))
+
+  read_win_df <- rt_df[
+    read_id %in% touching_ids &
+      as.character(chrom) == chr_name &
+      pos >= win_start & pos <= win_end
+  ]
+  if (nrow(read_win_df) == 0)
+    return(list(label = "undefined", seg_data = NULL,
+                win_start = win_start, win_end = win_end, expanded = expanded))
+
+  peak_summary <- read_win_df[, .(
+    REF = sum(IS_REF),
+    num = .N
+  ), by = pos][, allele_balance := REF / num][
+    , SNP_call := data.table::fcase(
+        allele_balance < 0.2, "ALT",
+        allele_balance > 0.8, "REF",
+        default = "HET"
+    )
+  ]
+  setorder(peak_summary, pos)
+  peak_summary[, run := data.table::rleid(SNP_call)]
+
+  seg_data <- peak_summary[, .(
+    xmin     = min(pos) / 1000,
+    SNP_call = SNP_call[1]
+  ), by = run][order(xmin)][
+    , xmax := data.table::shift(xmin, type = "lead", fill = win_end / 1000)
+  ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
+
+  runs   <- as.character(seg_data$SNP_call)
+  n_runs <- length(runs)
+
+  label <- if (n_runs == 1L) {
+    if (runs[1] == "HET") "internal_crossover" else "undefined"
+  } else if (n_runs == 2L) {
+    if (runs[1] %in% c("REF","ALT") && runs[2] %in% c("REF","ALT") &&
+        runs[1] != runs[2]) "binary" else "undefined"
+  } else if (n_runs == 3L) {
+    pat <- paste(runs, collapse = "-")
+    if      (pat %in% c("ALT-REF-ALT", "REF-ALT-REF")) "gene_conversion"
+    else if (pat %in% c("HET-ALT-HET", "HET-REF-HET")) "internal_crossover"
+    else                                                  "undefined"
+  } else {
+    "undefined"
+  }
+
+  list(label = label, seg_data = seg_data,
+       win_start = win_start, win_end = win_end, expanded = expanded)
+}
+
+# ---------------------------------------------------------------------------
+# build_fused_peak_plots()
+#   Builds the per-chromosome list of fused peak group plots, mirroring the
+#   structure of peak_plots_by_chr.  Called from both run_fusion and
+#   apply_supervised observers so the plots stay in sync with fusion results.
+#
+#   Returns a list of: list(chromosome, plots)  — same shape as
+#   results$peak_plots_by_chr so the renderUI / observe pattern is reusable.
+# ---------------------------------------------------------------------------
+build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
+                                   snp_coverage, zone_min_snps) {
+
+  if (is.null(fused_peaks) || nrow(fused_peaks) == 0) return(list())
+
+  fp <- copy(fused_peaks)
+  fp[, chrom := as.character(chrom)]
+
+  # One representative row per fusion group (same as fused_peaks_table logic)
+  group_rep <- fp[, .(
+    chrom           = chrom[1],
+    fused_pos_bp    = fused_pos_bp[1],
+    fused_start_bp  = fused_start_bp[1],
+    fused_end_bp    = fused_end_bp[1],
+    n_sub_peaks     = n_sub_peaks[1],
+    constituent_ids = constituent_ids[1],
+    best_edge_type  = ifelse(n_sub_peaks[1] == 1L, "singleton",
+                             ifelse(is.na(best_edge_type[1]), "—", best_edge_type[1])),
+    best_fusion_mode = ifelse(n_sub_peaks[1] == 1L, "—",
+                              ifelse(is.na(best_fusion_mode[1]), "—", best_fusion_mode[1])),
+    # Collect all constituent peak_ids as integer vector for read lookup
+    constituent_peak_ids = list(peak_id)
+  ), by = fusion_group]
+
+  setorder(group_rep, chrom, fused_pos_bp)
+
+  fused_chrs <- unique(group_rep$chrom)
+
+  plots_by_chr <- lapply(fused_chrs, function(chr_name) {
+
+    chr_groups <- group_rep[chrom == chr_name]
+
+    plots <- lapply(seq_len(nrow(chr_groups)), function(gi) {
+
+      grp         <- chr_groups[gi]
+      snp_p       <- grp$fused_pos_bp
+      fused_start <- grp$fused_start_bp
+      fused_end   <- grp$fused_end_bp
+      n_sub       <- grp$n_sub_peaks
+      edge_lbl    <- grp$best_edge_type
+
+      # Union of reads from all constituent sub-peaks (by their peak windows)
+      # We use the original sub-peak boundaries stored in fused_peaks rows
+      sub_peak_ids <- grp$constituent_peak_ids[[1]]
+      sub_peak_rows <- fp[peak_id %in% sub_peak_ids & chrom == chr_name]
+
+      touching_ids <- unique(unlist(lapply(seq_len(nrow(sub_peak_rows)), function(si) {
+        spk <- sub_peak_rows[si]
+        transition_pos[
+          as.character(chrom) == chr_name &
+            pos >= spk$peak_start & pos <= spk$peak_end,
+          unique(read_id)
+        ]
+      })))
+
+      if (length(touching_ids) == 0) return(NULL)
+
+      # Re-classify using fused window boundaries
+      hap <- classify_fused_peak_haplotype(
+        fg            = grp,
+        chr_name      = chr_name,
+        rt_df         = rt_df,
+        touching_ids  = touching_ids,
+        zone_min_snps = zone_min_snps
+      )
+
+      seg_data <- hap$seg_data
+
+      pad_bp     <- 5000L
+      chr_pos    <- snp_coverage[as.character(chrom) == chr_name, pos]
+      chr_min    <- min(chr_pos, na.rm = TRUE)
+      chr_max    <- max(chr_pos, na.rm = TRUE)
+      plot_start <- max(chr_min, fused_start - pad_bp)
+      plot_end   <- min(chr_max, fused_end   + pad_bp)
+
+      plot_df <- rt_df[
+        as.character(chrom) == chr_name &
+          read_id %in% touching_ids &
+          pos >= plot_start &
+          pos <= plot_end
+      ]
+      if (nrow(plot_df) == 0) return(NULL)
+      setorder(plot_df, read_id, pos)
+
+      x_lims <- range(plot_df$pos / 1000)
+
+      hap_label_str <- gsub("_", " ", hap$label)
+      expanded_note <- if (hap$expanded) " [window expanded]" else ""
+      sub_note      <- if (n_sub > 1L)
+        paste0("  \u2014  ", n_sub, " sub-peaks fused  [", edge_lbl, "]")
+      else
+        "  \u2014  singleton"
+
+      plot_title <- paste0(
+        "Chr ", chr_name, "  \u2014  Fused Group ", gi,
+        "  (SNP: ", round(snp_p / 1000, 2), " Kb;  Display: ",
+        round(plot_start / 1000, 2), " \u2013 ",
+        round(plot_end   / 1000, 2), " Kb)",
+        sub_note,
+        "\n\u25b6 Haplotype classification: ", hap_label_str, expanded_note
+      )
+
+      # Sub-peak anchor lines (one vertical per constituent snp_pos)
+      sub_snp_pos <- sub_peak_rows$snp_pos
+      sub_snp_pos <- sub_snp_pos[!is.na(sub_snp_pos)]
+
+      peak_point_df <- data.frame(
+        pos_kb      = snp_p / 1000,
+        peak_start  = fused_start / 1000,
+        peak_end    = fused_end   / 1000
+      )
+
+      p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
+        geom_point(size = 0.8) +
+        # Fused centre position (blue solid)
+        geom_vline(
+          data        = peak_point_df,
+          aes(xintercept = pos_kb),
+          colour      = "dodgerblue",
+          linewidth   = 1,
+          linetype    = 1,
+          inherit.aes = FALSE
+        ) +
+        # Fused boundary lines (grey dashed)
+        geom_vline(xintercept = fused_start / 1000,
+                   color = "grey60", linewidth = 0.6, linetype = 2) +
+        geom_vline(xintercept = fused_end / 1000,
+                   color = "grey60", linewidth = 0.6, linetype = 2)
+
+      # Individual sub-peak SNP positions (purple dotted) when group is fused
+      if (n_sub > 1L && length(sub_snp_pos) > 0) {
+        p_reads <- p_reads +
+          geom_vline(
+            data        = data.frame(xint = sub_snp_pos / 1000),
+            aes(xintercept = xint),
+            colour      = "mediumpurple",
+            linewidth   = 0.6,
+            linetype    = 3,
+            inherit.aes = FALSE
+          )
+      }
+
+      p_reads <- p_reads +
+        facet_grid(read_id ~ .) +
+        scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+        scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
+        theme_bw() +
+        theme(
+          axis.text.y      = element_blank(),
+          axis.ticks.y     = element_blank(),
+          axis.title.y     = element_blank(),
+          axis.text.x      = element_blank(),
+          axis.ticks.x     = element_blank(),
+          axis.title.x     = element_blank(),
+          legend.position  = "none",
+          plot.background  = element_blank(),
+          strip.background = element_blank(),
+          panel.border     = element_rect(fill = NA, linewidth = 0.1, linetype = 3),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.text.y     = element_blank(),
+          panel.spacing    = unit(0, "mm")
+        ) +
+        ggtitle(plot_title)
+
+      if (hap$expanded) {
+        p_reads <- p_reads +
+          geom_vline(xintercept = hap$win_start / 1000,
+                     color = "darkorange", linewidth = 0.7, linetype = 3) +
+          geom_vline(xintercept = hap$win_end / 1000,
+                     color = "darkorange", linewidth = 0.7, linetype = 3)
+      }
+
+      if (!is.null(seg_data) && nrow(seg_data) > 0) {
+        p_seg <- ggplot(seg_data) +
+          geom_rect(
+            aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = 1,
+                fill = SNP_call),
+            alpha = 0.45
+          ) +
+          scale_fill_manual(
+            values   = c(ALT = "firebrick", HET = "gray60", REF = "dodgerblue"),
+            drop     = FALSE,
+            na.value = "black"
+          ) +
+          annotate("text",
+                   x     = mean(c(hap$win_start, hap$win_end)) / 1000,
+                   y     = 0.5,
+                   label = hap_label_str,
+                   size  = 3,
+                   color = "black",
+                   fontface = "bold") +
+          coord_cartesian(
+            xlim   = x_lims,
+            ylim   = c(0, 1),
+            expand = FALSE
+          ) +
+          labs(x = "Position (Kb)", y = "Haplotype\nregion") +
+          theme_bw() +
+          theme(
+            panel.grid      = element_blank(),
+            axis.text.y     = element_blank(),
+            axis.ticks.y    = element_blank(),
+            panel.border    = element_blank(),
+            legend.position = "none"
+          )
+        p <- patchwork::wrap_plots(p_reads, p_seg, ncol = 1,
+                                   heights = c(8, 1))
+      } else {
+        p <- p_reads + xlab("Position (Kbp)")
+      }
+
+      attr(p, "seg_data")        <- seg_data
+      attr(p, "haplotype_label") <- hap$label
+      p
+    })
+
+    plots <- Filter(Negate(is.null), plots)
+    list(chromosome = chr_name, plots = plots)
+  })
+
+  Filter(function(x) length(x$plots) > 0, plots_by_chr)
+}
+
+# ---------------------------------------------------------------------------
 # compute_peak_pairs()
 #   Main fusion analysis function.  Takes the existing snp_peaks table and
 #   rt_df (raw read data with RLE-smoothed IS_REF), returns:
@@ -656,6 +1015,19 @@ ui <- fluidPage(
                  uiOutput("peak_plots_tabs")
         ),
 
+        tabPanel("Fused Peak Plots",
+                 h4("Post-Fusion Peak Visualizations by Chromosome"),
+                 helpText(
+                   "One plot per fusion group using the merged window boundaries and the union of reads ",
+                   "from all constituent sub-peaks. Haplotype classification is re-run on the fused window. ",
+                   "Blue solid line = fused group SNP centre; grey dashed lines = fused boundaries; ",
+                   "purple dotted lines = individual sub-peak positions (fused groups only). ",
+                   "Run 'Run Peak Fusion' first to populate this tab."
+                 ),
+                 br(),
+                 uiOutput("fused_peak_plots_tabs")
+        ),
+
         tabPanel("Curve Fits",
                  h4("Whittaker Smoother Parameters"),
                  tableOutput("span_table"),
@@ -753,8 +1125,9 @@ server <- function(input, output, session) {
     selected_region_plot  = NULL,
     selected_region_data  = NULL,
     # Fusion results (non-destructive — sit alongside originals)
-    peak_pairs            = NULL,
-    fused_peaks           = NULL
+    peak_pairs              = NULL,
+    fused_peaks             = NULL,
+    fused_peak_plots_by_chr = NULL
   )
 
   # Tracks which supervised pair_keys the user has checked
@@ -1065,9 +1438,19 @@ server <- function(input, output, session) {
 
       results$peak_pairs  <- fusion_res$peak_pairs
       results$fused_peaks <- fusion_res$fused_peaks
+
+      incProgress(0.7, detail = "Building fused peak plots")
+
+      results$fused_peak_plots_by_chr <- build_fused_peak_plots(
+        fused_peaks    = fusion_res$fused_peaks,
+        rt_df          = results$rt_df,
+        transition_pos = results$transition_pos,
+        snp_coverage   = results$snp_coverage,
+        zone_min_snps  = zone_min_snps
+      )
     })
 
-    showNotification("Peak fusion complete. Review results in the 'Peak Fusion' tab.", type = "message", duration = 4)
+    showNotification("Peak fusion complete. Review results in the 'Peak Fusion' and 'Fused Peak Plots' tabs.", type = "message", duration = 4)
   })
 
   # Apply supervised fusions: collect checked boxes, store, re-run fusion
@@ -1098,6 +1481,16 @@ server <- function(input, output, session) {
       )
       results$peak_pairs  <- fusion_res$peak_pairs
       results$fused_peaks <- fusion_res$fused_peaks
+
+      incProgress(0.7, detail = "Rebuilding fused peak plots")
+
+      results$fused_peak_plots_by_chr <- build_fused_peak_plots(
+        fused_peaks    = fusion_res$fused_peaks,
+        rt_df          = results$rt_df,
+        transition_pos = results$transition_pos,
+        snp_coverage   = results$snp_coverage,
+        zone_min_snps  = zone_min_snps
+      )
     })
 
     n_approved <- length(approved)
@@ -1385,6 +1778,119 @@ server <- function(input, output, session) {
                   peak_number = .i,
                   sample_name = input$sample_name,
                   app_version = APP_VERSION
+                ),
+                file
+              )
+            }
+          )
+        })
+      })
+    })
+  })
+
+  # ── Fused Peak Plots tab (post-fusion) ───────────────────────────────────────
+  output$fused_peak_plots_tabs <- renderUI({
+    if (is.null(results$fused_peak_plots_by_chr) ||
+        length(results$fused_peak_plots_by_chr) == 0) {
+      return(p("Run 'Run Peak Fusion' first to generate fused peak plots."))
+    }
+
+    chr_tabs <- lapply(results$fused_peak_plots_by_chr, function(chr_data) {
+      chr_name <- chr_data$chromosome
+      plots    <- chr_data$plots
+
+      if (length(plots) == 0) return(NULL)
+
+      plot_outputs <- lapply(seq_along(plots), function(i) {
+        tagList(
+          plotOutput(paste0("fused_peak_plot_", chr_name, "_", i), height = "600px"),
+          fluidRow(
+            column(3,
+              downloadButton(
+                paste0("dl_fused_peak_png_", chr_name, "_", i),
+                "Download Plot Image (.png)",
+                class = "btn-sm btn-default"
+              )
+            ),
+            column(4,
+              downloadButton(
+                paste0("dl_fused_peak_rds_", chr_name, "_", i),
+                "Download Plot Data (.rds)",
+                class = "btn-sm btn-default"
+              )
+            )
+          ),
+          hr()
+        )
+      })
+
+      tabPanel(
+        paste("Chr", chr_name),
+        h5(paste0("Chromosome ", chr_name, " — ", length(plots), " fused group(s)")),
+        hr(),
+        do.call(tagList, plot_outputs)
+      )
+    })
+
+    chr_tabs <- Filter(Negate(is.null), chr_tabs)
+    if (length(chr_tabs) == 0)
+      return(p("No fused peak groups to display."))
+    do.call(tabsetPanel, chr_tabs)
+  })
+
+  # Render fused peak plots with download handlers
+  observe({
+    req(results$fused_peak_plots_by_chr)
+
+    lapply(results$fused_peak_plots_by_chr, function(chr_data) {
+      chr_name <- chr_data$chromosome
+      plots    <- chr_data$plots
+
+      lapply(seq_along(plots), function(i) {
+        output_name <- paste0("fused_peak_plot_", chr_name, "_", i)
+        png_dl_id   <- paste0("dl_fused_peak_png_", chr_name, "_", i)
+        rds_dl_id   <- paste0("dl_fused_peak_rds_", chr_name, "_", i)
+        local({
+          p    <- plots[[i]]
+          .chr <- chr_name
+          .i   <- i
+
+          output[[output_name]] <- renderPlot({ p })
+
+          output[[png_dl_id]] <- downloadHandler(
+            filename = function() {
+              paste0(input$sample_name, "_fused_peak_chr", .chr,
+                     "_group", .i, "_", Sys.Date(), ".png")
+            },
+            content = function(file) {
+              reads_plot <- if (inherits(p, "patchwork")) p[[1]] else p
+              n_reads    <- length(unique(ggplot_build(reads_plot)$data[[1]]$group))
+              has_seg    <- inherits(p, "patchwork")
+              seg_extra  <- if (has_seg) 1.5 else 0
+              plot_h     <- max(4, min(22, n_reads * 0.4 + 2)) + seg_extra
+              ggsave(file, plot = p, width = 10, height = plot_h, dpi = 300)
+            }
+          )
+
+          output[[rds_dl_id]] <- downloadHandler(
+            filename = function() {
+              paste0(input$sample_name, "_fused_peak_chr", .chr,
+                     "_group", .i, "_", Sys.Date(), ".rds")
+            },
+            content = function(file) {
+              reads_plot <- if (inherits(p, "patchwork")) p[[1]] else p
+              plot_data  <- as.data.table(reads_plot$data)
+              plot_data  <- plot_data[, .(chrom, pos, read_id, IS_REF)]
+              seg_dt     <- attr(p, "seg_data")
+              saveRDS(
+                list(
+                  plot_data        = plot_data,
+                  seg_data         = seg_dt,
+                  haplotype_label  = attr(p, "haplotype_label"),
+                  chromosome       = .chr,
+                  fused_group      = .i,
+                  sample_name      = input$sample_name,
+                  app_version      = APP_VERSION
                 ),
                 file
               )
