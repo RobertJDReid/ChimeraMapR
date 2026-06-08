@@ -425,8 +425,7 @@ run_chimera_analysis <- function(
 # -----------------------------------------------------------------------------
 #  Overview plot builder
 #
-#  Expressed as a plain function that returns a ggplot object (or a patchwork
-#  composite when LOH data are present).
+#  Expressed as a plain function that returns a single ggplot object.
 #
 #  results : the list returned by run_chimera_analysis()
 #
@@ -438,9 +437,10 @@ run_chimera_analysis <- function(
 #  the longest chromosome in the dataset.
 #
 #  When results$loh_map is present and contains REF_fixed / ALT_fixed regions,
-#  a thin LOH strip panel is assembled below the main coverage panel via
-#  patchwork.  When no loh_map is available the function returns the plain
-#  overview plot unchanged.
+#  a thin LOH band (4% of the y-axis height) is drawn at the bottom of each
+#  chromosome facet panel via geom_rect(), ensuring perfect per-chromosome
+#  alignment regardless of the number of chromosomes.  When no loh_map is
+#  available the function returns the plain overview plot unchanged.
 # -----------------------------------------------------------------------------
 build_overview_plot <- function(results) {
 
@@ -518,8 +518,12 @@ build_overview_plot <- function(results) {
     }
   }
 
-  # ── LOH strip panel ──────────────────────────────────────────────────────
-  # Only build it when loh_map has usable REF_fixed / ALT_fixed data.
+  # ── LOH overlay ──────────────────────────────────────────────────────────────────────
+  # Rendered as a geom_rect band at the base of each facet panel so that
+  # LOH regions are always aligned with their chromosome row without relying
+  # on patchwork to synchronise two separate faceted plots.
+  #
+  # Only add it when loh_map has usable REF_fixed / ALT_fixed data.
   has_loh <- !is.null(loh_map) && nrow(loh_map) > 0 &&
              any(loh_map$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
 
@@ -531,7 +535,7 @@ build_overview_plot <- function(results) {
   loh_fixed <- loh_map[loh_state %in% c("REF_fixed", "ALT_fixed")]
   if (nrow(loh_fixed) == 0) return(p_main)
 
-  # Convert position to Kb and ensure chrom factor matches the coverage plot
+  # Convert position to Kb and ensure chrom matches the coverage plot
   loh_fixed[, pos_kb := pos / 1000]
   loh_fixed[, chrom  := as.character(chrom)]
   loh_fixed <- loh_fixed[chrom %in% unique(snp_cov$chrom)]
@@ -560,12 +564,19 @@ build_overview_plot <- function(results) {
   loh_segs    <- build_loh_segments(loh_fixed)
   loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
 
-  p_loh <- ggplot(loh_segs) +
+  # Height of the LOH band in data (read-count) units: 4% of the y ceiling.
+  # Placed at ymin = 0 so it sits flush with the x-axis baseline in every facet.
+  y_ceiling  <- max(30, max(snp_cov$n))
+  loh_band_h <- y_ceiling * 0.04
+
+  p_main <- p_main +
     geom_rect(
+      data        = loh_segs,
       aes(xmin = xmin, xmax = xmax,
-          ymin = 0,    ymax = 1,
+          ymin = 0,    ymax = loh_band_h,
           fill = loh_state),
-      alpha = 0.85
+      alpha       = 0.85,
+      inherit.aes = FALSE
     ) +
     scale_fill_manual(
       values = loh_colours,
@@ -573,44 +584,13 @@ build_overview_plot <- function(results) {
       name   = "LOH",
       drop   = FALSE
     ) +
-    scale_x_continuous(
-      limits       = c(0, x_max_kb),
-      minor_breaks = seq(0, x_max_kb, 100)
-    ) +
-    facet_grid(chrom ~ ., switch = "y") +
-    xlab(NULL) +
-    ylab(NULL) +
-    theme_bw() +
+    labs(caption = "LOH band (bottom of each panel): blue = REF-fixed, red = ALT-fixed") +
     theme(
-      strip.text         = element_blank(),   # chromosome labels already on main plot
-      strip.background   = element_blank(),
-      strip.placement    = "outside",
-      axis.text.x        = element_blank(),
-      axis.ticks.x       = element_blank(),
-      axis.text.y        = element_blank(),
-      axis.ticks.y       = element_blank(),
-      panel.grid         = element_blank(),
-      panel.spacing      = unit(0.3, "lines"),
-      panel.border       = element_rect(fill = NA, colour = "grey70", linewidth = 0.3),
-      legend.position    = "bottom",
-      legend.title       = element_text(size = 8, face = "bold"),
-      legend.text        = element_text(size = 7),
-      plot.margin        = margin(0, 5, 2, 5)
+      plot.caption     = element_text(size = 7, colour = "grey40"),
+      legend.position  = "bottom",
+      legend.title     = element_text(size = 8, face = "bold"),
+      legend.text      = element_text(size = 7)
     )
 
-  # ── Combine using patchwork ──────────────────────────────────────────────
-  combined <- patchwork::wrap_plots(
-    p_main + theme(axis.title.x = element_blank(),
-                   axis.text.x  = element_blank(),
-                   axis.ticks.x = element_blank()),
-    p_loh,
-    ncol    = 1,
-    heights = c(1 - 0.08, 0.08)   # 92% main, 8% LOH strip
-  ) +
-    patchwork::plot_annotation(
-      caption = "LOH strip: blue = REF-fixed, red = ALT-fixed"
-    ) &
-    theme(plot.caption = element_text(size = 7, colour = "grey40"))
-
-  combined
+  p_main
 }
