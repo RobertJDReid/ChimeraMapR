@@ -671,8 +671,94 @@ FUSION_HEURISTICS <- list(
                     crossover          = 2,
                     ambiguous          = 3,
                     independent_events = 4,
-                    unresolvable       = 5)
+                    unresolvable       = 5),
+
+  # ── LOH map parameters ──────────────────────────────────────────────────────
+  # Minimum number of SNP positions required in a window to make a LOH call.
+  # Windows with fewer positions are left as NA rather than called.
+  loh_min_depth = 5L,
+
+  # Allele-balance thresholds for fixed-haplotype calls across all reads.
+  # A position where mean(IS_REF) < loh_alt_max is called ALT-fixed (SK1 LOH);
+  # mean(IS_REF) > loh_ref_min is REF-fixed (S288C LOH); otherwise HET.
+  loh_alt_max   = 0.15,
+  loh_ref_min   = 0.85,
+
+  # Minimum fraction of positions in the inter-peak gap that must be LOH-fixed
+  # (either ALT or REF) before the gap is declared an LOH region.  A low value
+  # (e.g. 0.5) is intentionally permissive because peak boundaries already
+  # localise the region; raise it if spurious LOH signals cause false fusions.
+  loh_gap_min_frac = 0.5
 )
+
+# ---------------------------------------------------------------------------
+# compute_loh_map()
+#   Builds a genome-wide position-level LOH state table from rt_df.
+#   Uses ALL reads at each SNP position (not just chimeric reads), so it
+#   reflects the population-level haplotype rather than individual read state.
+#
+#   Returns a data.table with columns:
+#     chrom, pos, n_ref, n_total, allele_balance, loh_state
+#   where loh_state is one of "ALT_fixed" | "REF_fixed" | "HET" | NA
+#   (NA = fewer than loh_min_depth reads at that position).
+#
+#   Parameters come from FUSION_HEURISTICS so no arguments are needed beyond
+#   rt_df; add arguments here if per-call overrides are ever needed.
+# ---------------------------------------------------------------------------
+compute_loh_map <- function(rt_df) {
+
+  h <- FUSION_HEURISTICS   # local alias for readability
+
+  loh <- rt_df[, .(
+    n_ref   = sum(IS_REF,  na.rm = TRUE),
+    n_total = sum(!is.na(IS_REF))
+  ), by = .(chrom, pos)]
+
+  loh[, allele_balance := n_ref / n_total]
+
+  loh[, loh_state := fcase(
+    n_total < h$loh_min_depth,                    NA_character_,
+    allele_balance < h$loh_alt_max,               "ALT_fixed",
+    allele_balance > h$loh_ref_min,               "REF_fixed",
+    default =                                      "HET"
+  )]
+
+  loh[]
+}
+
+# ---------------------------------------------------------------------------
+# gap_has_loh()
+#   Given a pre-computed loh_map and a genomic interval (exclusive of the
+#   peak snp_pos endpoints), returns TRUE when the interval contains an LOH
+#   signal strong enough to suggest the two peaks flank a single event.
+#
+#   "Strong enough" means the fraction of called (non-NA, non-HET) positions
+#   in the gap meets or exceeds FUSION_HEURISTICS$loh_gap_min_frac.
+#
+#   Arguments
+#     loh_map   : data.table from compute_loh_map()
+#     chr_name  : character chromosome name
+#     pos_start : left peak snp_pos  (bp, exclusive)
+#     pos_end   : right peak snp_pos (bp, exclusive)
+#
+#   Returns logical scalar (FALSE when the gap has no SNP data at all).
+# ---------------------------------------------------------------------------
+gap_has_loh <- function(loh_map, chr_name, pos_start, pos_end) {
+
+  gap_rows <- loh_map[
+    as.character(chrom) == chr_name &
+      pos > pos_start & pos < pos_end
+  ]
+
+  if (nrow(gap_rows) == 0) return(FALSE)
+
+  # Positions with a usable call (not NA due to low depth)
+  called <- gap_rows[!is.na(loh_state)]
+  if (nrow(called) == 0) return(FALSE)
+
+  frac_fixed <- sum(called$loh_state != "HET") / nrow(called)
+  frac_fixed >= FUSION_HEURISTICS$loh_gap_min_frac
+}
 
 # ---------------------------------------------------------------------------
 # peak_is_fusion_eligible()
@@ -699,20 +785,37 @@ peak_is_fusion_eligible <- function(lbl) {
 #     edge_type         : character — output of classify_edge_type()
 #     jaccard           : numeric in [0, 1]
 #     jaccard_threshold : numeric — minimum Jaccard for automatic fusion
+#     loh_in_gap        : logical — TRUE when gap_has_loh() found fixed LOH
+#                         between the two peaks; promotes "supervised" to
+#                         "automatic" for eligible edge types even when
+#                         Jaccard is below the normal threshold.
 #
 #   Returns "automatic" | "supervised" | "none"
 # ---------------------------------------------------------------------------
-decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold) {
+decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
+                               loh_in_gap = FALSE) {
 
   if (edge_type %in% FUSION_HEURISTICS$unfusable_edge_types)
     return("none")
 
+  # Standard Jaccard-based automatic fusion
   if (jaccard >= jaccard_threshold &&
       edge_type %in% FUSION_HEURISTICS$auto_edge_types)
     return("automatic")
 
+  # LOH promotion: intervening fixed LOH is strong structural evidence that
+  # the two peaks bracket a single event, so promote to automatic even when
+  # read overlap is too low to meet the Jaccard threshold.
+  if (loh_in_gap && edge_type %in% FUSION_HEURISTICS$auto_edge_types)
+    return("automatic")
+
   if (jaccard > 0 &&
       edge_type %in% FUSION_HEURISTICS$supervised_edge_types)
+    return("supervised")
+
+  # LOH with no spanning reads: flag for supervised review rather than
+  # silently discarding — the user can inspect and approve if warranted.
+  if (loh_in_gap && edge_type %in% FUSION_HEURISTICS$supervised_edge_types)
     return("supervised")
 
   "none"
@@ -724,10 +827,15 @@ decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold) {
 #   rt_df (raw read data with RLE-smoothed IS_REF), returns:
 #     - peak_pairs:  one row per candidate pair with Jaccard, edge type, etc.
 #     - fused_peaks: original peaks table with fusion group membership added
+#
+#   loh_map is the output of compute_loh_map() and is used to check for fixed
+#   LOH in the gap between candidate peak pairs.  Pass NULL to skip LOH checks
+#   (behaviour identical to the pre-LOH version).
 # ---------------------------------------------------------------------------
 compute_peak_pairs <- function(snp_peaks,
                                rt_df,
                                transition_pos,
+                               loh_map            = NULL,
                                jaccard_threshold  = 0.20,
                                zone_min_snps      = 2L,
                                supervised_override = NULL) {
@@ -836,13 +944,22 @@ compute_peak_pairs <- function(snp_peaks,
         }
       }
 
+      # LOH check: does the inter-peak gap contain fixed LOH?
+      # gap_has_loh() returns FALSE immediately when loh_map is NULL.
+      loh_in_gap <- if (!is.null(loh_map)) {
+        gap_has_loh(loh_map, chr_name, pk_a$snp_pos, pk_b$snp_pos)
+      } else {
+        FALSE
+      }
+
       # Fusion mode decision — all criteria in decide_fusion_mode(); edit there.
       pair_key <- paste0(chr_name, "_", pk_a$peak_id, "_", pk_b$peak_id)
 
       fusion_mode <- decide_fusion_mode(
         edge_type         = edge_type,
         jaccard           = jaccard,
-        jaccard_threshold = jaccard_threshold
+        jaccard_threshold = jaccard_threshold,
+        loh_in_gap        = loh_in_gap
       )
 
       # User-approved supervised fusions override to automatic
@@ -864,6 +981,7 @@ compute_peak_pairs <- function(snp_peaks,
         n_shared     = n_shared,
         n_spanning   = n_spanning,
         jaccard      = round(jaccard, 4),
+        loh_in_gap   = loh_in_gap,
         edge_type    = edge_type,
         fusion_mode  = fusion_mode
       )
@@ -1280,7 +1398,8 @@ server <- function(input, output, session) {
     peak_pairs              = NULL,
     fused_peaks             = NULL,
     fused_peak_plots_by_chr = NULL,
-    fused_hap_labels        = NULL   # data.table: fusion_group, chrom, fused_classification
+    fused_hap_labels        = NULL,  # data.table: fusion_group, chrom, fused_classification
+    loh_map                 = NULL   # data.table from compute_loh_map(); built once per analysis run
   )
 
   # Tracks which supervised pair_keys the user has checked
@@ -1315,6 +1434,7 @@ server <- function(input, output, session) {
     results$peak_pairs           <- NULL
     results$fused_peaks          <- NULL
     results$fused_hap_labels     <- NULL
+    results$loh_map              <- NULL
     supervised_approved(character(0))
 
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
@@ -1358,6 +1478,10 @@ server <- function(input, output, session) {
       results$snp_peaks         <- res$snp_peaks
       results$chromosome_fits   <- res$chromosome_fits
       results$chr_span          <- res$chr_span
+
+      # Build LOH map once from the full read data — used by peak fusion to
+      # detect fixed-haplotype regions between candidate peak pairs.
+      results$loh_map <- compute_loh_map(res$rt_df)
 
       incProgress(0.9, detail = "Creating individual peak plots")
 
@@ -1585,6 +1709,7 @@ server <- function(input, output, session) {
         snp_peaks          = results$snp_peaks,
         rt_df              = results$rt_df,
         transition_pos     = results$transition_pos,
+        loh_map            = results$loh_map,
         jaccard_threshold  = input$jaccard_threshold,
         zone_min_snps      = zone_min_snps,
         supervised_override = supervised_approved()
@@ -1635,6 +1760,7 @@ server <- function(input, output, session) {
         snp_peaks           = results$snp_peaks,
         rt_df               = results$rt_df,
         transition_pos      = results$transition_pos,
+        loh_map             = results$loh_map,
         jaccard_threshold   = input$jaccard_threshold,
         zone_min_snps       = zone_min_snps,
         supervised_override = supervised_approved()
@@ -1685,6 +1811,7 @@ server <- function(input, output, session) {
       jac   <- pairs$jaccard[[i]]
       n_sh  <- pairs$n_shared[[i]]
       n_sp  <- pairs$n_spanning[[i]]
+      loh_g <- if ("loh_in_gap" %in% names(pairs)) isTRUE(pairs$loh_in_gap[[i]]) else FALSE
 
       # Row background colour
       bg <- if (fm == "automatic") {
@@ -1722,6 +1849,11 @@ server <- function(input, output, session) {
           paste0("Shared: ", n_sh)),
         tags$span(style = "min-width:70px;",
           paste0("Spanning: ", n_sp)),
+        tags$span(style = "min-width:55px;",
+          if (loh_g)
+            tags$span(style = "background:#6f42c1; color:white; padding:1px 5px; border-radius:3px; font-size:0.8em;", "LOH")
+          else
+            tags$span(style = "color:#aaa; font-size:0.8em;", "\u2014")),
         tags$span(style = "min-width:160px; font-style:italic;", et),
         tags$span(style = "min-width:100px;",
           strong(decision_label)),
@@ -1752,6 +1884,7 @@ server <- function(input, output, session) {
         tags$span(style="min-width:90px;",  "Jaccard"),
         tags$span(style="min-width:60px;",  "Shared"),
         tags$span(style="min-width:70px;",  "Spanning"),
+        tags$span(style="min-width:55px;",  "LOH"),
         tags$span(style="min-width:160px;", "Edge Type"),
         tags$span(style="min-width:100px;", "Decision"),
         tags$span("Approve?")
