@@ -162,6 +162,11 @@ run_chimera_analysis <- function(
   full_read <- full_read[, .(chrom, pos, read_id, IS_REF, ALLELE)]
   setorder(full_read, read_id, pos)
 
+  # Snapshot of all filtered reads BEFORE chimeric-only subsetting.
+  # Returned as $full_read so the caller can build a population-level LOH map
+  # that covers fixed-haplotype regions even where no chimeric reads exist.
+  full_read_all <- copy(full_read)
+
   # ── 3. Detect chimeric reads via RLE ─────────────────────────────────────────
   message("  Detecting chimeric reads ...")
   full_read[, runs := rle_helper(ALLELE), by = read_id]
@@ -402,6 +407,7 @@ run_chimera_analysis <- function(
   # ── Return all results ────────────────────────────────────────────────────────
   list(
     rt_df             = rt_df,
+    full_read         = full_read_all,   # complete filtered reads (pre-chimeric filter); used for LOH
     chimeric_read_ids = chimeric_read_ids,
     transition_pos    = transition_pos,
     snp_coverage      = snp_coverage,
