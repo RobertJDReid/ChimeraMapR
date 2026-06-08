@@ -10,6 +10,179 @@ source("chimera_functions.R")   # loads all packages + whittaker + run_chimera_a
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # ─────────────────────────────────────────────────────────────────────────────
+#   build_overview_plot() — EXTENDED VERSION
+#   Overrides the version from chimera_functions.R to add a per-chromosome
+#   LOH strip below each coverage panel.
+#
+#   The LOH strip is a thin coloured bar drawn as geom_rect segments:
+#     • REF-fixed regions → dodgerblue
+#     • ALT-fixed regions → firebrick
+#     • HET / NA          → transparent (not drawn)
+#
+#   The strip uses its own faceted sub-plot assembled alongside the main
+#   overview via patchwork.  When no loh_map is available the function
+#   falls through to identical behaviour as the original.
+# ─────────────────────────────────────────────────────────────────────────────
+build_overview_plot <- function(results) {
+
+  snp_cov   <- copy(results$snp_coverage)
+  fits      <- copy(results$chromosome_fits)
+  peaks     <- results$peaks_genomic
+  snp_peaks <- results$snp_peaks
+  loh_map   <- results$loh_map   # may be NULL if analysis not yet run
+
+  # ── Main coverage panel (same as original build_overview_plot) ───────────
+  p_main <- ggplot(snp_cov, aes(x = pos_kb, y = n)) +
+    geom_line(
+      data  = fits,
+      aes(x = uniform_pos / 1000, y = uniform_fit),
+      color = "firebrick", linewidth = 0.6, alpha = 0.7
+    ) +
+    geom_point(color = "black", alpha = 0.4, size = 0.5, shape = 21) +
+    facet_wrap(~ chrom, ncol = 1, scales = "free_x", strip.position = "left") +
+    scale_x_continuous(minor_breaks = seq(0, 2000, 100)) +
+    xlab("Position (Kbp)") +
+    ylab("Chimeric Reads") +
+    theme_bw() +
+    theme(
+      strip.text.y     = element_text(angle = 180, face = "bold", size = 8),
+      strip.placement  = "outside",
+      axis.text.x      = element_text(size = 7),
+      axis.text.y      = element_text(size = 7),
+      panel.spacing    = unit(0.3, "lines"),
+      panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
+      panel.grid.major.x = element_line(linewidth = 0.05, color = "red")
+    )
+
+  # Add peak highlight points when snp_peaks is present
+  if (!is.null(snp_peaks) && nrow(snp_peaks) > 0) {
+    snp_cov_char    <- copy(snp_cov)
+    snp_cov_char[, chrom := as.character(chrom)]
+    snp_peaks_char  <- copy(snp_peaks)
+    snp_peaks_char[, chrom := as.character(chrom)]
+
+    peak_highlight <- merge(
+      snp_peaks_char[!is.na(snp_pos), .(chrom, pos = snp_pos)],
+      snp_cov_char[, .(chrom, pos, pos_kb, n)],
+      by = c("chrom", "pos")
+    )
+    if (nrow(peak_highlight) > 0) {
+      peak_highlight[, chrom := factor(chrom, levels = levels(snp_cov$chrom))]
+      p_main <- p_main +
+        geom_point(
+          data        = peak_highlight,
+          aes(x = pos_kb, y = n),
+          color       = "black",
+          fill        = "dodgerblue",
+          size        = 2.5,
+          shape       = 21,
+          alpha       = 0.9,
+          inherit.aes = FALSE
+        )
+    }
+  }
+
+  # ── LOH strip panel ──────────────────────────────────────────────────────
+  # Only build it when the loh_map has usable data
+  has_loh <- !is.null(loh_map) && nrow(loh_map) > 0 &&
+             any(loh_map$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
+
+  if (!has_loh) {
+    return(p_main)   # nothing to add — return the plain overview
+  }
+
+  # Keep only fixed-haplotype positions (discard HET and NA)
+  loh_fixed <- loh_map[loh_state %in% c("REF_fixed", "ALT_fixed")]
+  if (nrow(loh_fixed) == 0) return(p_main)
+
+  # Convert position to Kb and ensure chrom factor matches the coverage plot
+  loh_fixed[, pos_kb  := pos / 1000]
+  loh_fixed[, chrom   := factor(as.character(chrom), levels = levels(snp_cov$chrom))]
+  loh_fixed           <- loh_fixed[!is.na(chrom)]
+
+  # Build RLE-compressed segments per chromosome so adjacent same-state
+  # positions are merged into a single rectangle (much faster rendering)
+  build_loh_segments <- function(dt) {
+    setorder(dt, chrom, pos_kb)
+    dt[, run_id := rleid(chrom, loh_state)]   # changes on chrom OR state change
+
+    segs <- dt[, .(
+      xmin      = min(pos_kb),
+      xmax      = max(pos_kb),
+      loh_state = loh_state[1],
+      chrom     = chrom[1]
+    ), by = run_id]
+    segs[, run_id := NULL]
+
+    # Give each segment a small width buffer (half the median SNP spacing)
+    # so single-position calls are still visible
+    half_step <- median(diff(sort(unique(dt$pos_kb))), na.rm = TRUE) / 2
+    if (is.na(half_step) || half_step <= 0) half_step <- 0.5
+    segs[, xmin := xmin - half_step]
+    segs[, xmax := xmax + half_step]
+    segs
+  }
+
+  loh_segs <- build_loh_segments(loh_fixed)
+
+  loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
+
+  p_loh <- ggplot(loh_segs) +
+    geom_rect(
+      aes(xmin = xmin, xmax = xmax,
+          ymin = 0,    ymax = 1,
+          fill = loh_state),
+      alpha = 0.85
+    ) +
+    scale_fill_manual(
+      values   = loh_colours,
+      labels   = c(REF_fixed = "REF (blue)", ALT_fixed = "ALT (red)"),
+      name     = "LOH",
+      drop     = FALSE
+    ) +
+    facet_wrap(~ chrom, ncol = 1, scales = "free_x", strip.position = "left") +
+    scale_x_continuous(minor_breaks = seq(0, 2000, 100)) +
+    xlab(NULL) +
+    ylab(NULL) +
+    theme_bw() +
+    theme(
+      strip.text         = element_blank(),   # chromosome labels already on main plot
+      axis.text.x        = element_blank(),
+      axis.ticks.x       = element_blank(),
+      axis.text.y        = element_blank(),
+      axis.ticks.y       = element_blank(),
+      panel.grid         = element_blank(),
+      panel.spacing      = unit(0.3, "lines"),
+      panel.border       = element_rect(fill = NA, colour = "grey70", linewidth = 0.3),
+      legend.position    = "bottom",
+      legend.title       = element_text(size = 8, face = "bold"),
+      legend.text        = element_text(size = 7),
+      plot.margin        = margin(0, 5, 2, 5)
+    )
+
+  # ── Combine using patchwork ──────────────────────────────────────────────
+  # The LOH strip is placed directly below the main panel, taking ~8% of
+  # total height.  patchwork stacks them with ncol = 1 and shared x-axis
+  # alignment because both use the same facet_wrap(~ chrom) structure.
+  n_chr <- length(unique(snp_cov$chrom))
+
+  combined <- patchwork::wrap_plots(
+    p_main + theme(axis.title.x = element_blank(),
+                   axis.text.x  = element_blank(),
+                   axis.ticks.x = element_blank()),
+    p_loh,
+    ncol    = 1,
+    heights = c(1 - 0.08, 0.08)   # 92% main, 8% LOH strip
+  ) +
+    patchwork::plot_annotation(
+      caption = "LOH strip: blue = REF-fixed, red = ALT-fixed"
+    ) &
+    theme(plot.caption = element_text(size = 7, colour = "grey40"))
+
+  combined
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 #   PEAK FUSION FUNCTIONS
 #   All fusion logic is self-contained here so it can be sourced / tested
 #   independently of the Shiny server.
@@ -1418,8 +1591,13 @@ server <- function(input, output, session) {
     build_overview_plot(results)
   }, height = function() {
     req(results$snp_coverage)
-    n_chr <- length(unique(results$snp_coverage$chrom))
-    min(1600, max(400, n_chr * 120))
+    n_chr   <- length(unique(results$snp_coverage$chrom))
+    has_loh <- !is.null(results$loh_map) &&
+               nrow(results$loh_map) > 0 &&
+               any(results$loh_map$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
+    # Add ~15px per chromosome for the LOH strip when present
+    loh_bonus <- if (has_loh) n_chr * 15 else 0
+    min(1800, max(400, n_chr * 120 + loh_bonus))
   })
 
   # ── Main analysis ────────────────────────────────────────────────────────────
@@ -2683,9 +2861,13 @@ server <- function(input, output, session) {
     filename = function() paste0(input$sample_name, "_chromosome_tracking_", Sys.Date(), ".png"),
     content  = function(file) {
       req(results$snp_coverage, results$chromosome_fits)
-      p     <- build_overview_plot(results)
-      n_chr <- length(unique(results$snp_coverage$chrom))
-      png_h <- max(3, min(16, n_chr * 1.2))
+      p       <- build_overview_plot(results)
+      n_chr   <- length(unique(results$snp_coverage$chrom))
+      has_loh <- !is.null(results$loh_map) &&
+                 nrow(results$loh_map) > 0 &&
+                 any(results$loh_map$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
+      loh_bonus <- if (has_loh) n_chr * 0.12 else 0
+      png_h   <- max(3, min(18, n_chr * 1.2 + loh_bonus))
       ggsave(file, plot = p, width = 12, height = png_h, dpi = 300)
     }
   )
