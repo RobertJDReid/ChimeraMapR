@@ -637,6 +637,87 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
   Filter(function(x) length(x$plots) > 0, plots_by_chr)
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+#   FUSION HEURISTICS
+#
+#   All tuneable constants and decision logic live here.  When experimenting
+#   with new criteria, edit FUSION_HEURISTICS, peak_is_fusion_eligible(), or
+#   decide_fusion_mode() — nothing else needs to change.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FUSION_HEURISTICS <- list(
+
+  # Edge types that block fusion for an individual peak regardless of anything
+  # else.  A peak carrying one of these labels is treated as a self-contained
+  # event and will never be merged with a neighbour.
+  excluded_peak_classes  = c("gene_conversion", "internal_crossover"),
+
+  # Peak labels that are allowed into the fusion pipeline.  NA / unlabelled
+  # peaks are also eligible (handled in peak_is_fusion_eligible()).
+  eligible_peak_classes  = c("binary", "undefined"),
+
+  # Edge types that can never produce a fusion regardless of Jaccard.
+  unfusable_edge_types   = c("independent_events", "unresolvable"),
+
+  # Edge types that qualify for *automatic* fusion (when Jaccard is met).
+  auto_edge_types        = c("gene_conversion", "crossover"),
+
+  # Edge types that qualify for *supervised* fusion (Jaccard > 0 is enough).
+  supervised_edge_types  = c("gene_conversion", "crossover", "ambiguous"),
+
+  # Ranked priority for choosing the "best" edge type when a peak has
+  # multiple adjacent pairs.  Lower number = higher priority.
+  edge_priority = c(gene_conversion    = 1,
+                    crossover          = 2,
+                    ambiguous          = 3,
+                    independent_events = 4,
+                    unresolvable       = 5)
+)
+
+# ---------------------------------------------------------------------------
+# peak_is_fusion_eligible()
+#   Returns TRUE if a peak's haplotype_label allows it to participate in the
+#   fusion pipeline.  Peaks that have been positively classified as a
+#   self-contained event type are excluded regardless of any other metric.
+#
+#   lbl : character scalar (haplotype_label), or NA
+# ---------------------------------------------------------------------------
+peak_is_fusion_eligible <- function(lbl) {
+  is.na(lbl) ||
+    lbl %in% FUSION_HEURISTICS$eligible_peak_classes
+}
+
+# ---------------------------------------------------------------------------
+# decide_fusion_mode()
+#   Pure function: given the metrics for a single candidate pair, return the
+#   fusion decision ("automatic", "supervised", or "none").
+#
+#   The supervised_override flag is handled by the caller (compute_peak_pairs)
+#   after this function returns, so this function stays stateless.
+#
+#   Arguments
+#     edge_type         : character — output of classify_edge_type()
+#     jaccard           : numeric in [0, 1]
+#     jaccard_threshold : numeric — minimum Jaccard for automatic fusion
+#
+#   Returns "automatic" | "supervised" | "none"
+# ---------------------------------------------------------------------------
+decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold) {
+
+  if (edge_type %in% FUSION_HEURISTICS$unfusable_edge_types)
+    return("none")
+
+  if (jaccard >= jaccard_threshold &&
+      edge_type %in% FUSION_HEURISTICS$auto_edge_types)
+    return("automatic")
+
+  if (jaccard > 0 &&
+      edge_type %in% FUSION_HEURISTICS$supervised_edge_types)
+    return("supervised")
+
+  "none"
+}
+
 # ---------------------------------------------------------------------------
 # compute_peak_pairs()
 #   Main fusion analysis function.  Takes the existing snp_peaks table and
@@ -684,9 +765,6 @@ compute_peak_pairs <- function(snp_peaks,
     read_sets <- lapply(seq_len(nrow(chr_peaks)), function(i) get_peak_reads(chr_peaks[i]))
     names(read_sets) <- chr_peaks$peak_id
 
-    # Classes that must never be fused with any neighbour
-    excluded_classes <- c("gene_conversion", "internal_crossover")
-
     # Evaluate adjacent pairs only
     for (j in seq_len(nrow(chr_peaks) - 1L)) {
 
@@ -694,18 +772,12 @@ compute_peak_pairs <- function(snp_peaks,
       pk_b <- chr_peaks[j + 1L]
 
       # ── Peak-class guard ────────────────────────────────────────────────────
-      # If either peak has already been classified as gene_conversion or
-      # internal_crossover it must remain a singleton; skip this pair entirely.
+      # Eligibility rules are defined in FUSION_HEURISTICS and enforced by
+      # peak_is_fusion_eligible().  Edit those — not this block.
       label_a <- if ("haplotype_label" %in% names(pk_a)) pk_a$haplotype_label else NA_character_
       label_b <- if ("haplotype_label" %in% names(pk_b)) pk_b$haplotype_label else NA_character_
 
-      if (isTRUE(label_a %in% excluded_classes) || isTRUE(label_b %in% excluded_classes)) next
-
-      # Only binary-classed peaks (or unlabelled peaks) are eligible for fusion.
-      # A peak that has been positively identified as something other than binary
-      # must not be joined to its neighbour.
-      eligible <- function(lbl) is.na(lbl) || lbl == "binary" || lbl == "undefined"
-      if (!eligible(label_a) || !eligible(label_b)) next
+      if (!peak_is_fusion_eligible(label_a) || !peak_is_fusion_eligible(label_b)) next
       # ── End peak-class guard ─────────────────────────────────────────────────
 
       reads_a <- read_sets[[as.character(pk_a$peak_id)]]
@@ -764,20 +836,14 @@ compute_peak_pairs <- function(snp_peaks,
         }
       }
 
-      # Fusion mode decision
+      # Fusion mode decision — all criteria in decide_fusion_mode(); edit there.
       pair_key <- paste0(chr_name, "_", pk_a$peak_id, "_", pk_b$peak_id)
 
-      fusion_mode <- if (edge_type %in% c("independent_events", "unresolvable")) {
-        "none"
-      } else if (jaccard >= jaccard_threshold &&
-                 edge_type %in% c("gene_conversion", "crossover")) {
-        "automatic"
-      } else if (jaccard > 0 &&
-                 edge_type %in% c("gene_conversion", "crossover", "ambiguous")) {
-        "supervised"
-      } else {
-        "none"
-      }
+      fusion_mode <- decide_fusion_mode(
+        edge_type         = edge_type,
+        jaccard           = jaccard,
+        jaccard_threshold = jaccard_threshold
+      )
 
       # User-approved supervised fusions override to automatic
       if (!is.null(supervised_override) && pair_key %in% supervised_override) {
@@ -838,18 +904,15 @@ compute_peak_pairs <- function(snp_peaks,
   peaks_dt <- merge(peaks_dt, fused_coords, by = "fusion_group", all.x = TRUE)
 
   # Annotate with edge_type and fusion_mode from pairs where this peak is
-  # involved (take the "strongest" relationship if multiple edges)
-  edge_priority <- c(gene_conversion = 1, crossover = 2,
-                     ambiguous = 3, independent_events = 4,
-                     unresolvable = 5)
-
+  # involved (take the "strongest" relationship if multiple edges).
+  # Priority ranking defined in FUSION_HEURISTICS$edge_priority.
   get_peak_edge_info <- function(pid) {
     rel_pairs <- pairs_dt[peak_id_a == pid | peak_id_b == pid]
     if (nrow(rel_pairs) == 0)
       return(data.table(peak_id = pid, best_edge_type = NA_character_,
                         best_fusion_mode = NA_character_,
                         adjacent_pair_keys = NA_character_))
-    rel_pairs[, priority := edge_priority[edge_type]]
+    rel_pairs[, priority := FUSION_HEURISTICS$edge_priority[edge_type]]
     best <- rel_pairs[which.min(priority)]
     data.table(
       peak_id            = pid,
@@ -866,6 +929,66 @@ compute_peak_pairs <- function(snp_peaks,
     peak_pairs  = pairs_dt,
     fused_peaks = peaks_dt
   )
+}
+
+# ---------------------------------------------------------------------------
+# extract_fused_haplotype_labels()
+#   Walks the list returned by build_fused_peak_plots and extracts the
+#   haplotype_label attr from each plot.  Returns a data.table with one row
+#   per fusion group containing:
+#     chrom, group_index (within chromosome), fusion_group (integer ID),
+#     fused_classification (character label from the post-fusion window)
+#
+#   This is the authoritative post-fusion classification source for the
+#   blended peak summary table.
+# ---------------------------------------------------------------------------
+extract_fused_haplotype_labels <- function(fused_peak_plots_by_chr, fused_peaks) {
+
+  if (is.null(fused_peak_plots_by_chr) || length(fused_peak_plots_by_chr) == 0)
+    return(NULL)
+  if (is.null(fused_peaks) || nrow(fused_peaks) == 0)
+    return(NULL)
+
+  # Build a lookup: (chrom, within-chr group index) -> fusion_group integer
+  # This mirrors the ordering used in build_fused_peak_plots (setorder chrom, fused_pos_bp)
+  fp <- copy(fused_peaks)
+  fp[, chrom := as.character(chrom)]
+
+  group_rep <- fp[, .(
+    chrom          = chrom[1],
+    fused_pos_bp   = fused_pos_bp[1],
+    n_sub_peaks    = n_sub_peaks[1]
+  ), by = fusion_group]
+  group_rep <- group_rep[!is.na(fused_pos_bp)]
+  setorder(group_rep, chrom, fused_pos_bp)
+
+  # Add a within-chromosome index (gi) matching build_fused_peak_plots loop order
+  group_rep[, gi := seq_len(.N), by = chrom]
+
+  rows <- list()
+  for (chr_data in fused_peak_plots_by_chr) {
+    chr_name <- chr_data$chromosome
+    plots    <- chr_data$plots
+    for (i in seq_along(plots)) {
+      p   <- plots[[i]]
+      lbl <- attr(p, "haplotype_label")
+      if (is.null(lbl)) lbl <- NA_character_
+
+      # Match back to the fusion_group integer via (chrom, gi)
+      match_row <- group_rep[chrom == chr_name & gi == i]
+      fg        <- if (nrow(match_row) == 1L) match_row$fusion_group else NA_integer_
+
+      rows[[length(rows) + 1L]] <- data.table(
+        chrom                 = chr_name,
+        group_index           = i,
+        fusion_group          = fg,
+        fused_classification  = lbl
+      )
+    }
+  }
+
+  if (length(rows) == 0) return(NULL)
+  rbindlist(rows, fill = TRUE)
 }
 
 # ─────────────────────────────────────────────
@@ -1036,6 +1159,22 @@ ui <- fluidPage(
                  uiOutput("fused_peak_plots_tabs")
         ),
 
+        tabPanel("Post Fusion Peak Summary",
+                 h4("Blended Peak Summary — Initial Peaks with Post-Fusion Classification"),
+                 helpText(
+                   "This table combines the initial peak positions and metrics with updated haplotype ",
+                   "classifications after peak fusion. Singleton peaks retain their original classification. ",
+                   "Fused groups show the re-classified haplotype from the merged window. ",
+                   "Run 'Run Peak Fusion' first to populate the fused classifications."
+                 ),
+                 br(),
+                 uiOutput("post_fusion_summary_legend"),
+                 br(),
+                 tableOutput("post_fusion_peak_summary_table"),
+                 br(),
+                 downloadButton("download_post_fusion_summary", "Download Post-Fusion Summary (.csv)")
+        ),
+
         tabPanel("Curve Fits",
                  h4("Whittaker Smoother Parameters"),
                  tableOutput("span_table"),
@@ -1083,10 +1222,15 @@ ui <- fluidPage(
                  ),
                  h5("Peak-Class Fusion Guard:"),
                  p("Before edge-type scoring, each peak's haplotype label (assigned during the initial analysis) is checked.",
+                   "Eligibility rules are defined in ", strong("FUSION_HEURISTICS"), " and enforced by ",
+                   strong("peak_is_fusion_eligible()"), ".",
                    "Peaks classified as ", strong("gene_conversion"), " or ", strong("internal_crossover"),
                    " are treated as self-contained events and will ", strong("never"), " be merged with a neighbour,",
                    "regardless of Jaccard score or edge type.",
-                   "Only peaks labelled ", strong("binary"), " (or still unlabelled / undefined) are eligible for fusion."),
+                   "Only peaks labelled ", strong("binary"), " (or still unlabelled / undefined) are eligible for fusion.",
+                   "The fusion mode decision (automatic / supervised / none) is made by ",
+                   strong("decide_fusion_mode()"), " — edit that function or ", strong("FUSION_HEURISTICS"),
+                   " to change scoring criteria without touching the main analysis loop."),
                  h5("Input Files:"),
                  tags$ul(
                    tags$li(strong("Read Data:"), "CSV file with SNP position information from BAM file (columns: chrom, pos, read_id, call, is_del, etc.). For csv files > 200 Mb, compress with ", em("gzip"), " or ", em("pigz"), " prior to upload."),
@@ -1135,7 +1279,8 @@ server <- function(input, output, session) {
     # Fusion results (non-destructive — sit alongside originals)
     peak_pairs              = NULL,
     fused_peaks             = NULL,
-    fused_peak_plots_by_chr = NULL
+    fused_peak_plots_by_chr = NULL,
+    fused_hap_labels        = NULL   # data.table: fusion_group, chrom, fused_classification
   )
 
   # Tracks which supervised pair_keys the user has checked
@@ -1169,6 +1314,7 @@ server <- function(input, output, session) {
     results$selected_region_data <- NULL
     results$peak_pairs           <- NULL
     results$fused_peaks          <- NULL
+    results$fused_hap_labels     <- NULL
     supervised_approved(character(0))
 
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
@@ -1456,6 +1602,12 @@ server <- function(input, output, session) {
         snp_coverage   = results$snp_coverage,
         zone_min_snps  = zone_min_snps
       )
+
+      # Extract fused haplotype labels from plots and store for the blended summary table
+      results$fused_hap_labels <- extract_fused_haplotype_labels(
+        results$fused_peak_plots_by_chr,
+        results$fused_peaks
+      )
     })
 
     showNotification("Peak fusion complete. Review results in the 'Peak Fusion' and 'Fused Peak Plots' tabs.", type = "message", duration = 4)
@@ -1498,6 +1650,11 @@ server <- function(input, output, session) {
         transition_pos = results$transition_pos,
         snp_coverage   = results$snp_coverage,
         zone_min_snps  = zone_min_snps
+      )
+
+      results$fused_hap_labels <- extract_fused_haplotype_labels(
+        results$fused_peak_plots_by_chr,
+        results$fused_peaks
       )
     })
 
@@ -2228,6 +2385,164 @@ server <- function(input, output, session) {
     results$selected_region_plot <- NULL
     results$selected_region_data <- NULL
   })
+
+  # ── Post Fusion Peak Summary table ──────────────────────────────────────────
+  # Builds the blended summary: one row per initial peak, with the post-fusion
+  # haplotype classification substituted in for fused groups.
+  # Singletons retain their original classification from snp_peaks.
+
+  build_post_fusion_summary <- reactive({
+    req(results$snp_peaks)
+
+    peaks <- copy(results$snp_peaks)
+    peaks[, chrom := as.character(chrom)]
+
+    # Start with the initial (pre-fusion) haplotype label
+    has_hap <- "haplotype_label" %in% names(peaks)
+
+    out <- peaks[, {
+      list(
+        Chromosome            = chrom,
+        `Peak Position (Kb)`  = round(peak_pos   / 1000, 2),
+        `Qualifying SNP (Kb)` = ifelse(is.na(snp_pos), "None above cutoff",
+                                       as.character(round(snp_pos / 1000, 2))),
+        `Peak Start (Kb)`     = round(peak_start / 1000, 2),
+        `Peak End (Kb)`       = round(peak_end   / 1000, 2),
+        `Peak Height`         = round(peak_height, 2),
+        `Chimeric Reads`      = ifelse(is.na(chimeric_reads_at_snp), "",
+                                       as.character(chimeric_reads_at_snp)),
+        `Initial Classification` = if (has_hap)
+          ifelse(is.na(haplotype_label), "\u2014", gsub("_", " ", haplotype_label))
+        else "\u2014",
+        # Placeholders filled below
+        `Fusion Status`          = "singleton",
+        `Fusion Group`           = NA_integer_,
+        `Sub-peaks in Group`     = 1L,
+        `Post-Fusion Classification` = if (has_hap)
+          ifelse(is.na(haplotype_label), "\u2014", gsub("_", " ", haplotype_label))
+        else "\u2014",
+        `Classification Changed` = "no"
+      )
+    }]
+
+    # If fusion has been run, overlay fused group information
+    if (!is.null(results$fused_peaks) && !is.null(results$fused_hap_labels)) {
+
+      fp  <- copy(results$fused_peaks)
+      fp[, chrom := as.character(chrom)]
+      fhl <- copy(results$fused_hap_labels)
+
+      # fused_peaks has one row per original peak_id with fusion_group membership
+      # Join the fused haplotype label from fhl via fusion_group
+      fhl_keyed <- fhl[, .(fusion_group, fused_classification)]
+
+      # Build a peak_id -> fusion_group + fused_classification lookup
+      pk_lookup <- fp[, .(peak_id, chrom, snp_pos, fusion_group, n_sub_peaks,
+                          best_edge_type, best_fusion_mode)]
+      pk_lookup <- merge(pk_lookup, fhl_keyed, by = "fusion_group", all.x = TRUE)
+
+      # We need to match by chrom + snp_pos (bp) since out doesn't have peak_id.
+      # snp_peaks and fused_peaks share the same rows/snp_pos values.
+      # Re-attach peak_id to out via snp_pos + chrom
+      peaks_id <- peaks[, .(chrom, snp_pos, peak_start, peak_end)]
+      peaks_id[, row_seq := .I]
+
+      out[, row_seq := .I]
+
+      # Join pk_lookup onto out row by row using chrom + snp_pos
+      pk_lookup[, snp_pos_chr := paste(chrom, snp_pos)]
+      out_join_key <- paste(
+        peaks[, chrom],
+        peaks[, snp_pos]
+      )
+
+      for (ri in seq_len(nrow(out))) {
+        key <- out_join_key[ri]
+        match_rows <- pk_lookup[paste(chrom, snp_pos) == key]
+        if (nrow(match_rows) == 0) next
+
+        mr <- match_rows[1]
+        fg <- mr$fusion_group
+        ns <- mr$n_sub_peaks
+        et <- mr$best_edge_type
+        fm <- mr$best_fusion_mode
+        fc <- mr$fused_classification
+
+        status <- if (!is.na(fm) && fm == "automatic") {
+          if (ns > 1L) "fused (auto)" else "singleton"
+        } else if (!is.na(fm) && fm == "supervised") {
+          if (ns > 1L) "fused (supervised)" else "singleton"
+        } else {
+          "singleton"
+        }
+
+        fused_label <- if (!is.na(fc) && fc != "") {
+          gsub("_", " ", fc)
+        } else {
+          out$`Initial Classification`[ri]
+        }
+
+        changed <- if (fused_label != out$`Initial Classification`[ri] &&
+                       !is.na(fused_label) && fused_label != "\u2014") "yes" else "no"
+
+        out$`Fusion Status`[ri]              <- status
+        out$`Fusion Group`[ri]               <- fg
+        out$`Sub-peaks in Group`[ri]         <- ns
+        out$`Post-Fusion Classification`[ri] <- fused_label
+        out$`Classification Changed`[ri]     <- changed
+      }
+      out[, row_seq := NULL]
+    }
+
+    setorder(out, Chromosome, `Peak Position (Kb)`)
+    out
+  })
+
+  output$post_fusion_peak_summary_table <- renderTable({
+    req(results$snp_peaks)
+    df <- build_post_fusion_summary()
+
+    # If fusion not yet run, hide the fusion-specific columns
+    if (is.null(results$fused_peaks)) {
+      cols_keep <- c("Chromosome", "Peak Position (Kb)", "Qualifying SNP (Kb)",
+                     "Peak Start (Kb)", "Peak End (Kb)", "Peak Height",
+                     "Chimeric Reads", "Initial Classification")
+      df[, ..cols_keep]
+    } else {
+      df
+    }
+  }, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "s",
+     na = "\u2014")
+
+  # Legend for Post Fusion Peak Summary
+  output$post_fusion_summary_legend <- renderUI({
+    if (is.null(results$fused_peaks)) {
+      return(helpText("Run 'Run Peak Fusion' to populate fusion status and post-fusion classifications."))
+    }
+    tags$div(
+      style = "margin-bottom: 8px; font-size: 0.85em; color: #444;",
+      strong("Classification types: "),
+      tags$span("binary", style = "background:#cce5ff; padding:2px 7px; border-radius:3px; margin-right:5px;"),
+      tags$span("gene conversion", style = "background:#d4edda; padding:2px 7px; border-radius:3px; margin-right:5px;"),
+      tags$span("internal crossover", style = "background:#fff3cd; padding:2px 7px; border-radius:3px; margin-right:5px;"),
+      tags$span("undefined", style = "background:#e2e3e5; padding:2px 7px; border-radius:3px; margin-right:5px;"),
+      br(), br(),
+      strong("Fusion status: "),
+      tags$span("singleton", style = "background:#f8f9fa; padding:2px 7px; border-radius:3px; margin-right:5px; border:1px solid #ccc;"),
+      tags$span("fused (auto)", style = "background:#d4edda; padding:2px 7px; border-radius:3px; margin-right:5px;"),
+      tags$span("fused (supervised)", style = "background:#fff3cd; padding:2px 7px; border-radius:3px; margin-right:5px;"),
+      br(), br(),
+      tags$em("'Classification Changed' = yes indicates the post-fusion re-classification differs from the initial per-peak label.")
+    )
+  })
+
+  output$download_post_fusion_summary <- downloadHandler(
+    filename = function() paste0(input$sample_name, "_post_fusion_peak_summary_", Sys.Date(), ".csv"),
+    content  = function(file) {
+      req(results$snp_peaks)
+      fwrite(build_post_fusion_summary(), file)
+    }
+  )
 
   # ── Download handlers ────────────────────────────────────────────────────────
 
