@@ -30,7 +30,7 @@ File locations
 
 read_data_path = '~/Dropbox/__Work/__Lab-Notebook/2026/05/2026-05-28 new swaps chrXI/s101/reads.csv'
 SNP_data_path = '~/Dropbox/__Work/__Lab-Notebook/2026/05/2026-05-28 new swaps chrXI/SNP/set_200.vcf'
-Chrom_data_path = '~/Dropbox/__Work/__Lab-Notebook/2026/05/2026-05-28 new swaps chrXI/genome/S288C_chrXI.fasta.fai'
+chrom_data_path = '~/Dropbox/__Work/__Lab-Notebook/2026/05/2026-05-28 new swaps chrXI/genome/S288C_chrXI.fasta.fai'
 
 
 
@@ -42,8 +42,58 @@ Load
 ```{r}
 read_data = load_read_data(read_data_path)
 SNP_data = load_snp_data(SNP_data_path)
-chrom_data = load_chr_size(Chrom_data_path)
+chrom_data = load_chr_size(chrom_data_path)
 ```
+
+Process
+
+```{r}
+x_trial = run_chimera_analysis(read_data_path,SNP_data_path,chrom_data_path)
+
+
+loh_trial = compute_loh_map(x_trial$full_read_loh)
+```
+
+Plot LOH segments
+
+
+```{r}
+#library(dplyr,stringr)
+loh_trial$loh_segments |>
+#  filter(!stringr::str_detect(chrom,"chrmt")) |>
+  dplyr::mutate(chromosome = factor(stringr::str_remove(chrom,"S288C_chr"),
+                             levels=as.character(as.roman(1:16)))) |>
+  ggplot(aes(xmin=start/1000,xmax=end/1000,ymin=-0.1,ymax=0.1,fill=loh_state)) +
+  geom_rect() +
+  facet_grid(chromosome ~ .) +
+  scale_fill_manual(values = c("REF_fixed"="dodgerblue","HET"="grey","ALT_fixed"="firebrick")) +
+#  ggtitle(params$sample) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "none",
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 12),
+    strip.background.y = element_rect(fill = "white",colour = "white"),
+    strip.text.y = element_text(size = 10,face = "bold",angle = 0),
+    panel.border = element_rect(linewidth = 0),
+    panel.spacing.y = unit(0.5, "lines"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.spacing = unit(-1, "lines"),
+    panel.grid = element_line(color = "black",linewidth = 0.1,linetype = "15")
+  ) #+
+#  geom_point(data = CEN,aes(x=start/1000,y=0),color="black",pch="•",size=10, inherit.aes = FALSE)  
+```
+
+
+
+
+
+
+
 
 ```{r}
   # ── 2. Filter reads and classify alleles ─────────────────────────────────────

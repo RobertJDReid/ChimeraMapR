@@ -675,13 +675,12 @@ FUSION_HEURISTICS <- list(
                     unresolvable       = 5),
 
   # ── LOH map parameters ──────────────────────────────────────────────────────
-  # Minimum number of SNP positions required in a window to make a LOH call.
-  # Windows with fewer positions are left as NA rather than called.
+  # NOTE: loh_min_depth, loh_alt_max, and loh_ref_min were used by the
+  # deprecated threshold-based compute_loh_map_full().  LOH classification is
+  # now performed by compute_loh_map() in chimera_functions.R using Mclust.
+  # These values are retained here but are no longer referenced in the main
+  # analysis path.
   loh_min_depth = 5L,
-
-  # Allele-balance thresholds for fixed-haplotype calls across all reads.
-  # A position where mean(IS_REF) < loh_alt_max is called ALT-fixed (SK1 LOH);
-  # mean(IS_REF) > loh_ref_min is REF-fixed (S288C LOH); otherwise HET.
   loh_alt_max   = 0.15,
   loh_ref_min   = 0.85,
 
@@ -693,117 +692,46 @@ FUSION_HEURISTICS <- list(
 )
 
 # ---------------------------------------------------------------------------
-# compute_loh_map_from_rt()
-#   LEGACY / RETAINED FOR REFERENCE — not currently wired into the analysis
-#   pipeline.  Builds a position-level LOH state table using only rt_df
-#   (chimeric reads).  Because rt_df contains only reads with haplotype
-#   changes it can miss fixed-haplotype regions where no chimeric reads are
-#   present, and may over-represent transition boundaries.
+# LOH map computation
+#   compute_loh_map() is defined in chimera_functions.R.
+#   It uses a three-component Mclust GMM on per-position allele balance
+#   (from the no-base-qual-filter read set) followed by run-length smoothing
+#   to produce a data.table with columns:
+#     chrom, pos, n_ref, n_total, balance, AC, loh_state
+#   where loh_state is "ALT_fixed" | "REF_fixed" | "HET" | NA.
 #
-#   Retained so the approach can be compared with compute_loh_map_full().
-#   Not called from the main analysis path.
-#
-#   Returns a data.table with columns:
-#     chrom, pos, n_ref, n_total, allele_balance, loh_state
-#   where loh_state is one of "ALT_fixed" | "REF_fixed" | "HET" | NA.
+#   Called in the run_analysis observer below; result stored in results$loh_map.
 # ---------------------------------------------------------------------------
-compute_loh_map_from_rt <- function(rt_df) {
-
-  h <- FUSION_HEURISTICS
-
-  loh <- rt_df[, .(
-    n_ref   = sum(IS_REF,  na.rm = TRUE),
-    n_total = sum(!is.na(IS_REF))
-  ), by = .(chrom, pos)]
-
-  loh[, allele_balance := n_ref / n_total]
-
-  loh[, loh_state := fcase(
-    n_total < h$loh_min_depth,                    NA_character_,
-    allele_balance < h$loh_alt_max,               "ALT_fixed",
-    allele_balance > h$loh_ref_min,               "REF_fixed",
-    default =                                      "HET"
-  )]
-
-  loh[]
-}
-
-# ---------------------------------------------------------------------------
-# compute_loh_map_full()
-#   Builds a genome-wide position-level LOH state table from the COMPLETE
-#   filtered read dataset (all reads passing MAPQ / base-quality filters and
-#   matched to known SNP positions — not restricted to chimeric reads).
-#
-#   Using the full dataset means:
-#     * Fixed-haplotype (LOH) regions are detected even where no chimeric
-#       reads are present, giving a true population-level picture.
-#     * Heterozygous regions where chimeric reads happen to concentrate do
-#       not inflate the LOH signal.
-#
-#   full_read_dt must be the data.table returned in run_chimera_analysis()$full_read
-#   (columns: chrom, pos, read_id, IS_REF, ALLELE).
-#
-#   Returns a data.table with columns:
-#     chrom, pos, n_ref, n_total, allele_balance, loh_state
-#   where loh_state is one of "ALT_fixed" | "REF_fixed" | "HET" | NA
-#   (NA = fewer than loh_min_depth reads at that position).
-#
-#   Parameters come from FUSION_HEURISTICS so no arguments are needed beyond
-#   the read data; add arguments here if per-call overrides are ever needed.
-# ---------------------------------------------------------------------------
-compute_loh_map_full <- function(full_read_dt) {
-
-  h <- FUSION_HEURISTICS
-
-  loh <- full_read_dt[, .(
-    n_ref   = sum(IS_REF,  na.rm = TRUE),
-    n_total = sum(!is.na(IS_REF))
-  ), by = .(chrom, pos)]
-
-  loh[, allele_balance := n_ref / n_total]
-
-  loh[, loh_state := fcase(
-    n_total < h$loh_min_depth,           NA_character_,
-    allele_balance < h$loh_alt_max,      "ALT_fixed",
-    allele_balance > h$loh_ref_min,      "REF_fixed",
-    default =                             "HET"
-  )]
-
-  loh[]
-}
 
 # ---------------------------------------------------------------------------
 # gap_has_loh()
-#   Given a pre-computed loh_map and a genomic interval (exclusive of the
-#   peak snp_pos endpoints), returns TRUE when the interval contains an LOH
-#   signal strong enough to suggest the two peaks flank a single event.
+#   Given a pre-computed loh_segments table and a genomic interval (exclusive
+#   of the peak snp_pos endpoints), returns TRUE when any fixed-haplotype
+#   segment overlaps the gap.
 #
-#   "Strong enough" means the fraction of called (non-NA, non-HET) positions
-#   in the gap meets or exceeds FUSION_HEURISTICS$loh_gap_min_frac.
+#   Uses the pre-collapsed segment table from compute_loh_map()$loh_segments
+#   (one row per contiguous run) instead of the per-SNP snp_table, so the
+#   check is O(n_segments) rather than O(n_snps).
 #
 #   Arguments
-#     loh_map   : data.table from compute_loh_map()
-#     chr_name  : character chromosome name
-#     pos_start : left peak snp_pos  (bp, exclusive)
-#     pos_end   : right peak snp_pos (bp, exclusive)
+#     loh_segments : data.table from compute_loh_map()$loh_segments
+#     chr_name     : character chromosome name
+#     pos_start    : left peak snp_pos  (bp, exclusive)
+#     pos_end      : right peak snp_pos (bp, exclusive)
 #
-#   Returns logical scalar (FALSE when the gap has no SNP data at all).
+#   Returns logical scalar (FALSE when loh_segments is NULL or has no overlap).
 # ---------------------------------------------------------------------------
-gap_has_loh <- function(loh_map, chr_name, pos_start, pos_end) {
+gap_has_loh <- function(loh_segments, chr_name, pos_start, pos_end) {
 
-  gap_rows <- loh_map[
-    as.character(chrom) == chr_name &
-      pos > pos_start & pos < pos_end
-  ]
+  if (is.null(loh_segments) || nrow(loh_segments) == 0) return(FALSE)
 
-  if (nrow(gap_rows) == 0) return(FALSE)
-
-  # Positions with a usable call (not NA due to low depth)
-  called <- gap_rows[!is.na(loh_state)]
-  if (nrow(called) == 0) return(FALSE)
-
-  frac_fixed <- sum(called$loh_state != "HET") / nrow(called)
-  frac_fixed >= FUSION_HEURISTICS$loh_gap_min_frac
+  # Any fixed-haplotype segment that overlaps the open interval (pos_start, pos_end)
+  any(
+    as.character(loh_segments$chrom) == chr_name &
+    loh_segments$loh_state %in% c("REF_fixed", "ALT_fixed") &
+    loh_segments$start < pos_end &
+    loh_segments$end   > pos_start
+  )
 }
 
 # ---------------------------------------------------------------------------
@@ -881,7 +809,7 @@ decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
 compute_peak_pairs <- function(snp_peaks,
                                rt_df,
                                transition_pos,
-                               loh_map            = NULL,
+                               loh_segments       = NULL,
                                jaccard_threshold  = 0.20,
                                zone_min_snps      = 2L,
                                supervised_override = NULL) {
@@ -991,9 +919,9 @@ compute_peak_pairs <- function(snp_peaks,
       }
 
       # LOH check: does the inter-peak gap contain fixed LOH?
-      # gap_has_loh() returns FALSE immediately when loh_map is NULL.
-      loh_in_gap <- if (!is.null(loh_map)) {
-        gap_has_loh(loh_map, chr_name, pk_a$snp_pos, pk_b$snp_pos)
+      # gap_has_loh() returns FALSE immediately when loh_segments is NULL.
+      loh_in_gap <- if (!is.null(loh_segments)) {
+        gap_has_loh(loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
       } else {
         FALSE
       }
@@ -1190,6 +1118,16 @@ ui <- fluidPage(
       textInput("sample_name",
                 "Sample Name:",
                 value = "Sample_01"),
+
+      textInput("strain_ref",
+                "REF Strain Name (optional):",
+                value = "",
+                placeholder = "e.g. S288C"),
+      textInput("strain_alt",
+                "ALT Strain Name (optional):",
+                value = "",
+                placeholder = "e.g. SK1"),
+      helpText("Strain names appear in LOH band legends. Leave blank to use generic REF / ALT labels."),
 
       numericInput("mapq_cutoff",
                    "Minimum MAPQ Value:",
@@ -1445,7 +1383,10 @@ server <- function(input, output, session) {
     fused_peaks             = NULL,
     fused_peak_plots_by_chr = NULL,
     fused_hap_labels        = NULL,  # data.table: fusion_group, chrom, fused_classification
-    loh_map                 = NULL   # data.table from compute_loh_map(); built once per analysis run
+    loh_map                 = NULL,   # snp_table from compute_loh_map()$snp_table; per-SNP; used by gap_has_loh()
+    loh_segments            = NULL,   # loh_segments from compute_loh_map()$loh_segments; used by plots
+    strain_ref              = "",     # display name for REF haplotype (from UI input)
+    strain_alt              = ""      # display name for ALT haplotype (from UI input)
   )
 
   # Tracks which supervised pair_keys the user has checked
@@ -1461,13 +1402,14 @@ server <- function(input, output, session) {
   # ── Overview plot (genome-wide) ───────────────────────────────────────────────
   output$chr_plot <- renderPlot({
     req(results$snp_coverage, results$chromosome_fits)
+    results$loh_segments   # explicit reactive dep — triggers re-render after LOH finishes
     build_overview_plot(results)
   }, height = function() {
     req(results$snp_coverage)
     n_chr   <- length(unique(results$snp_coverage$chrom))
-    has_loh <- !is.null(results$loh_map) &&
-               nrow(results$loh_map) > 0 &&
-               any(results$loh_map$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
+    has_loh <- !is.null(results$loh_segments) &&
+               nrow(results$loh_segments) > 0 &&
+               any(results$loh_segments$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
     # Add ~15px per chromosome for the LOH strip when present
     loh_bonus <- if (has_loh) n_chr * 15 else 0
     min(1800, max(400, n_chr * 120 + loh_bonus))
@@ -1486,6 +1428,7 @@ server <- function(input, output, session) {
     results$fused_peaks          <- NULL
     results$fused_hap_labels     <- NULL
     results$loh_map              <- NULL
+    results$loh_segments         <- NULL
     supervised_approved(character(0))
 
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
@@ -1529,13 +1472,19 @@ server <- function(input, output, session) {
       results$snp_peaks         <- res$snp_peaks
       results$chromosome_fits   <- res$chromosome_fits
       results$chr_span          <- res$chr_span
+      results$strain_ref        <- trimws(input$strain_ref)
+      results$strain_alt        <- trimws(input$strain_alt)
 
-      # Build LOH map from the COMPLETE filtered read dataset (not just chimeric
-      # reads) so that fixed-haplotype regions are detected across the full
-      # population, including positions where no chimeric reads are present.
-      # compute_loh_map_from_rt() (rt_df-based) is retained for reference but
-      # is not called here.
-      results$loh_map <- compute_loh_map_full(res$full_read)
+      # Build LOH map using the Mclust-based method from chimera_functions.R.
+      # full_read_loh applies only MAPQ + is_del filters (no base-quality filter)
+      # so that allele-balance estimates reflect the deepest possible pileup.
+      incProgress(0.87, detail = "Computing LOH map (Mclust)")
+      loh_out              <- compute_loh_map(
+        res$full_read_loh,
+        warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)
+      )
+      results$loh_map      <- loh_out$snp_table    # per-SNP; used by gap_has_loh()
+      results$loh_segments <- loh_out$loh_segments # pre-collapsed runs; used by plots
 
       incProgress(0.9, detail = "Creating individual peak plots")
 
@@ -1763,7 +1712,7 @@ server <- function(input, output, session) {
         snp_peaks          = results$snp_peaks,
         rt_df              = results$rt_df,
         transition_pos     = results$transition_pos,
-        loh_map            = results$loh_map,
+        loh_segments       = results$loh_segments,
         jaccard_threshold  = input$jaccard_threshold,
         zone_min_snps      = zone_min_snps,
         supervised_override = supervised_approved()
@@ -1814,7 +1763,7 @@ server <- function(input, output, session) {
         snp_peaks           = results$snp_peaks,
         rt_df               = results$rt_df,
         transition_pos      = results$transition_pos,
-        loh_map             = results$loh_map,
+        loh_segments        = results$loh_segments,
         jaccard_threshold   = input$jaccard_threshold,
         zone_min_snps       = zone_min_snps,
         supervised_override = supervised_approved()
@@ -2294,10 +2243,14 @@ server <- function(input, output, session) {
     snp_cov_all   <- copy(results$snp_coverage)
     fits_all      <- copy(results$chromosome_fits)
     peaks_all     <- results$peaks_genomic
+    # Read snp_peaks and chr_span as reactive dependencies so the observer
+    # re-runs when they are set (chr_span is assigned after snp_coverage in the
+    # analysis observer, so an explicit read here ensures .x_max_kb is
+    # recomputed from chromosome lengths rather than falling back to pos_kb).
     snp_peaks_all <- if (!is.null(results$snp_peaks) && nrow(results$snp_peaks) > 0)
       copy(results$snp_peaks)[, chrom := as.character(chrom)]
     else NULL
-    loh_map_all   <- results$loh_map   # may be NULL before analysis
+    chr_span_local <- results$chr_span   # explicit reactive dep; may be NULL on first fire
     snp_cov_all[, chrom := as.character(chrom)]
     fits_all[,    chrom := as.character(chrom)]
     if (!is.null(peaks_all) && nrow(peaks_all) > 0)
@@ -2307,7 +2260,6 @@ server <- function(input, output, session) {
     # chr_span (chromosome length) so each panel is scaled to its own extent
     # rather than the genome-wide maximum.  Falls back to observed SNP positions
     # when chr_span is unavailable.
-    chr_span_local <- results$chr_span
     chr_x_max_kb <- if (!is.null(chr_span_local) && nrow(chr_span_local) > 0) {
       span_dt <- copy(chr_span_local)
       span_dt[, chrom := as.character(chrom)]
@@ -2343,15 +2295,33 @@ server <- function(input, output, session) {
         .snp_peaks_chr <- if (!is.null(snp_peaks_all) && nrow(snp_peaks_all) > 0)
                             snp_peaks_all[chrom == .chr]
                           else NULL
-        # LOH data for this chromosome
-        .loh_chr       <- if (!is.null(loh_map_all) && nrow(loh_map_all) > 0) {
-                            lm <- copy(loh_map_all)
-                            lm[, chrom := as.character(chrom)]
-                            lm[chrom == .chr & loh_state %in% c("REF_fixed", "ALT_fixed")]
-                          } else NULL
+        # LOH data is read inside renderPlot (not captured here) so that it
+        # picks up results$loh_map reactively after analysis completes, and
+        # so that copy() prevents in-place pos mutation across renders.
 
         output[[.plot_id]] <- renderPlot({
           y_ceil <- max(30, max(.snp$n))
+
+          # Compute x-axis limit reactively inside renderPlot so it always
+          # reflects the live chr_span value rather than a value captured
+          # at observer-construction time (which may be NULL / stale).
+          x_max_kb_live <- if (!is.null(results$chr_span) && nrow(results$chr_span) > 0) {
+            span_row <- results$chr_span[as.character(chrom) == .chr]
+            if (nrow(span_row) > 0)
+              ceiling(ceiling(span_row$length / 1000) / 100) * 100
+            else
+              ceiling(ceiling(max(.snp$pos_kb)) / 100) * 100
+          } else {
+            ceiling(ceiling(max(.snp$pos_kb)) / 100) * 100
+          }
+
+          # Read LOH segments fresh each render — use pre-collapsed table
+          # from compute_loh_map()$loh_segments so no inline RLE is needed.
+          .loh_chr <- if (!is.null(results$loh_segments) && nrow(results$loh_segments) > 0) {
+            segs <- copy(results$loh_segments)
+            segs[, chrom := as.character(chrom)]
+            segs[chrom == .chr & loh_state %in% c("REF_fixed", "ALT_fixed")]
+          } else NULL
 
           p <- ggplot(.snp, aes(x = pos_kb, y = n)) +
             geom_line(
@@ -2360,7 +2330,7 @@ server <- function(input, output, session) {
               color = "firebrick", linewidth = 0.8, alpha = 0.7
             ) +
             geom_point(color = "black", alpha = 0.5, size = 0.8, shape = 21) +
-            scale_x_continuous(limits = c(0, .x_max_kb), minor_breaks = seq(0, .x_max_kb, 100)) +
+            scale_x_continuous(limits = c(0, x_max_kb_live), minor_breaks = seq(0, x_max_kb_live, 100)) +
             xlab("Position (Kbp)") +
             ylab("Number of Reads") +
             ylim(0, y_ceil) +
@@ -2394,32 +2364,32 @@ server <- function(input, output, session) {
           # ── LOH band at the base of the plot ──────────────────────────────
           # Drawn as a thin geom_rect strip (4 % of y ceiling) flush with the
           # x-axis baseline.  REF-fixed = dodgerblue, ALT-fixed = firebrick.
-          # Only shown when loh_map has been computed and has fixed positions.
+          # Uses pre-collapsed loh_segments — no inline rleid/half_step needed.
           if (!is.null(.loh_chr) && nrow(.loh_chr) > 0) {
-            .loh_chr[, pos_kb := pos / 1000]
+            .loh_chr[, xmin := start / 1000]
+            .loh_chr[, xmax := end   / 1000]
 
-            # Compress adjacent same-state positions into segments
-            setorder(.loh_chr, pos_kb)
-            .loh_chr[, run_id := rleid(loh_state)]
-            loh_segs <- .loh_chr[, .(
-              xmin      = min(pos_kb),
-              xmax      = max(pos_kb),
-              loh_state = loh_state[1]
-            ), by = run_id]
-
-            # Widen each segment by half the median SNP step so adjacent bars
-            # touch rather than leaving gaps between them.
-            half_step <- median(diff(sort(unique(.loh_chr$pos_kb))), na.rm = TRUE) / 2
-            if (is.na(half_step) || half_step <= 0) half_step <- 0.5
-            loh_segs[, xmin := xmin - half_step]
-            loh_segs[, xmax := xmax + half_step]
-
-            loh_band_h <- y_ceil * 0.04
+            loh_band_h  <- y_ceil * 0.04
             loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
+
+            # Resolve strain display names from results (fall back to generic)
+            s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
+              results$strain_ref else "REF"
+            s_alt <- if (!is.null(results$strain_alt) && nzchar(results$strain_alt))
+              results$strain_alt else "ALT"
+
+            loh_labels  <- c(
+              REF_fixed = paste0(s_ref, " (blue)"),
+              ALT_fixed = paste0(s_alt, " (red)")
+            )
+            loh_caption <- paste0(
+              "LOH band (bottom): blue\u202f=\u202f", s_ref,
+              ", red\u202f=\u202f", s_alt
+            )
 
             p <- p +
               geom_rect(
-                data        = loh_segs,
+                data        = .loh_chr,
                 aes(xmin = xmin, xmax = xmax,
                     ymin = 0,    ymax = loh_band_h,
                     fill = loh_state),
@@ -2428,11 +2398,11 @@ server <- function(input, output, session) {
               ) +
               scale_fill_manual(
                 values = loh_colours,
-                labels = c(REF_fixed = "REF (blue)", ALT_fixed = "ALT (red)"),
+                labels = loh_labels,
                 name   = "LOH",
                 drop   = FALSE
               ) +
-              labs(caption = "LOH band (bottom): blue\u202f=\u202fREF-fixed, red\u202f=\u202fALT-fixed") +
+              labs(caption = loh_caption) +
               theme(
                 plot.caption    = element_text(size = 7, colour = "grey40"),
                 legend.position = "right",
@@ -2821,9 +2791,9 @@ server <- function(input, output, session) {
       req(results$snp_coverage, results$chromosome_fits)
       p       <- build_overview_plot(results)
       n_chr   <- length(unique(results$snp_coverage$chrom))
-      has_loh <- !is.null(results$loh_map) &&
-                 nrow(results$loh_map) > 0 &&
-                 any(results$loh_map$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
+      has_loh <- !is.null(results$loh_segments) &&
+                 nrow(results$loh_segments) > 0 &&
+                 any(results$loh_segments$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
       loh_bonus <- if (has_loh) n_chr * 0.12 else 0
       png_h   <- max(3, min(18, n_chr * 1.2 + loh_bonus))
       ggsave(file, plot = p, width = 12, height = png_h, dpi = 300)
