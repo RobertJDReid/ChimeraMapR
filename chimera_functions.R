@@ -708,9 +708,9 @@ build_overview_plot <- function(results) {
       panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
       strip.background   = element_blank(),
       strip.placement    = "outside",
-      axis.text          = element_text(size = 12),
-      axis.title         = element_text(size = 15),
-      strip.text.y       = element_text(size = 9, angle = 0, hjust = 0, face = "bold")
+      axis.text          = element_text(size = rel(1.2)),
+      axis.title         = element_text(size = rel(1.5)),
+      strip.text.y       = element_text(size = rel(1.1), angle = 0, hjust = 0, face = "bold")
     )
 
   # Highlight peak SNP points in blue
@@ -766,7 +766,7 @@ build_overview_plot <- function(results) {
   # Height of the LOH band in data (read-count) units: 4% of the y ceiling.
   # Placed at ymin = 0 so it sits flush with the x-axis baseline in every facet.
   y_ceiling  <- max(30, max(snp_cov$n))
-  loh_band_h <- y_ceiling * -0.04 # negative to put it below number line
+  loh_band_h <- y_ceiling * -0.10 # negative to put it below number line
 
   loh_labels <- c(
     REF_fixed = paste0(strain_ref, " (blue)"),
@@ -794,10 +794,10 @@ build_overview_plot <- function(results) {
     ) +
     labs(caption = loh_caption) +
     theme(
-      plot.caption     = element_text(size = 7, colour = "grey40"),
+      plot.caption     = element_text(size = rel(1), colour = "grey40"),
       legend.position  = "bottom",
-      legend.title     = element_text(size = 8, face = "bold"),
-      legend.text      = element_text(size = 7)
+      legend.title     = element_text(size = rel(1), face = "bold"),
+      legend.text      = element_text(size = rel(1))
     )
 
   p_main

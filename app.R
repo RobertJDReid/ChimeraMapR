@@ -2338,7 +2338,10 @@ server <- function(input, output, session) {
             theme_bw() +
             theme(
               panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
-              panel.grid.major.x = element_line(linewidth = 0.05, color = "red")
+              panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
+              axis.text          = element_text(size = rel(1.2)),
+              axis.title         = element_text(size = rel(1.5))
+              
             )
 
           # ── Peak highlight points ──────────────────────────────────────────
@@ -2369,7 +2372,7 @@ server <- function(input, output, session) {
             .loh_chr[, xmin := start / 1000]
             .loh_chr[, xmax := end   / 1000]
 
-            loh_band_h  <- y_ceil * -0.04 # negative to put under number line
+            loh_band_h  <- y_ceil * -0.10 # negative to put under number line
             loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
 
             # Resolve strain display names from results (fall back to generic)
@@ -2379,8 +2382,8 @@ server <- function(input, output, session) {
               results$strain_alt else "ALT"
 
             loh_labels  <- c(
-              REF_fixed = paste0(s_ref, " (blue)"),
-              ALT_fixed = paste0(s_alt, " (red)")
+              REF_fixed = s_ref,
+              ALT_fixed = s_alt
             )
             loh_caption <- paste0(
               "LOH band (bottom): blue\u202f=\u202f", s_ref,
@@ -2404,10 +2407,10 @@ server <- function(input, output, session) {
               ) +
               labs(caption = loh_caption) +
               theme(
-                plot.caption    = element_text(size = 7, colour = "grey40"),
+                plot.caption    = element_blank(), #element_text(size = 7, colour = "grey40"),
                 legend.position = "right",
-                legend.title    = element_text(size = 8, face = "bold"),
-                legend.text     = element_text(size = 7)
+                legend.title    = element_text(size = rel(1.1), face = "bold"),
+                legend.text     = element_text(size = rel(1.1))
               )
           }
 
