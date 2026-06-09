@@ -2264,12 +2264,12 @@ server <- function(input, output, session) {
       span_dt <- copy(chr_span_local)
       span_dt[, chrom := as.character(chrom)]
       setNames(
-        ceiling(ceiling(span_dt$length / 1000) / 100) * 100,
+        ceiling(ceiling(span_dt$length / 1000) / 25) * 25,
         span_dt$chrom
       )
     } else {
       # Fallback: max observed SNP position per chromosome
-      snp_cov_all[, .(x_max = ceiling(ceiling(max(pos_kb)) / 100) * 100), by = chrom] |>
+      snp_cov_all[, .(x_max = ceiling(ceiling(max(pos_kb)) / 25) * 25), by = chrom] |>
         (\(dt) setNames(dt$x_max, dt$chrom))()
     }
 
@@ -2287,7 +2287,7 @@ server <- function(input, output, session) {
         .txt_id        <- txt_id
         # Per-chromosome x-axis upper limit (Kbp), rounded to nearest 100 Kb
         .x_max_kb      <- chr_x_max_kb[.chr] %||%
-                          ceiling(ceiling(max(snp_cov_all[chrom == .chr, pos_kb])) / 100) * 100
+                          ceiling(ceiling(max(snp_cov_all[chrom == .chr, pos_kb])) / 25) * 25
         .snp           <- snp_cov_all[chrom == .chr]
         .fits          <- fits_all[chrom == .chr]
         .peaks         <- if (!is.null(peaks_all) && nrow(peaks_all) > 0)
@@ -2308,11 +2308,11 @@ server <- function(input, output, session) {
           x_max_kb_live <- if (!is.null(results$chr_span) && nrow(results$chr_span) > 0) {
             span_row <- results$chr_span[as.character(chrom) == .chr]
             if (nrow(span_row) > 0)
-              ceiling(ceiling(span_row$length / 1000) / 100) * 100
+              ceiling(ceiling(span_row$length / 1000) / 25) * 25
             else
-              ceiling(ceiling(max(.snp$pos_kb)) / 100) * 100
+              ceiling(ceiling(max(.snp$pos_kb)) / 25) * 25
           } else {
-            ceiling(ceiling(max(.snp$pos_kb)) / 100) * 100
+            ceiling(ceiling(max(.snp$pos_kb)) / 25) * 25
           }
 
           # Read LOH segments fresh each render — use pre-collapsed table
@@ -2333,7 +2333,7 @@ server <- function(input, output, session) {
             scale_x_continuous(limits = c(0, x_max_kb_live), minor_breaks = seq(0, x_max_kb_live, 100)) +
             xlab("Position (Kbp)") +
             ylab("Number of Reads") +
-            ylim(0, y_ceil) +
+            ylim(NA, y_ceil) +
             ggtitle(paste("Chromosome", .chr)) +
             theme_bw() +
             theme(
@@ -2369,7 +2369,7 @@ server <- function(input, output, session) {
             .loh_chr[, xmin := start / 1000]
             .loh_chr[, xmax := end   / 1000]
 
-            loh_band_h  <- y_ceil * 0.04
+            loh_band_h  <- y_ceil * -0.04 # negative to put under number line
             loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
 
             # Resolve strain display names from results (fall back to generic)

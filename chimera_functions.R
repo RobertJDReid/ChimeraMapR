@@ -23,7 +23,7 @@ suppressPackageStartupMessages({
 # requireNamespace() and calls it with mclust:: qualification so it is loaded
 # lazily only when the LOH analysis step runs.
 
-APP_VERSION <- "0.5.0"
+APP_VERSION <- "0.6.0"
 
 
 # -----------------------------------------------------------------------------
@@ -680,7 +680,7 @@ build_overview_plot <- function(results) {
     x_max_kb <- ceiling(max(snp_cov$pos_kb, na.rm = TRUE))
   }
   # Round up to the nearest 100 Kb for clean minor-break grid lines
-  x_max_kb <- ceiling(x_max_kb / 100) * 100
+  x_max_kb <- ceiling(x_max_kb / 25) * 25
 
   # Convert chrom to character so factors don't cause facet alignment issues
   snp_cov[, chrom := as.character(chrom)]
@@ -700,7 +700,7 @@ build_overview_plot <- function(results) {
     ) +
     xlab("Position (Kbp)") +
     ylab("Number of Reads") +
-    ylim(0, max(30, max(snp_cov$n))) +
+    ylim(NA, max(30, max(snp_cov$n))) +
     facet_grid(chrom ~ ., switch = "y") +
     theme_bw() +
     theme(
@@ -742,7 +742,7 @@ build_overview_plot <- function(results) {
   # ── LOH overlay ──────────────────────────────────────────────────────────────────────
   # Rendered as a geom_rect band at the base of each facet panel so that
   # LOH regions are always aligned with their chromosome row without relying
-  # on patchwork to synchronise two separate faceted plots.
+  # on patchwork to synchronize two separate faceted plots.
   #
   # loh_segments is a pre-collapsed segment table from compute_loh_map():
   # one row per contiguous run of the same loh_state.  No inline RLE needed.
@@ -766,7 +766,7 @@ build_overview_plot <- function(results) {
   # Height of the LOH band in data (read-count) units: 4% of the y ceiling.
   # Placed at ymin = 0 so it sits flush with the x-axis baseline in every facet.
   y_ceiling  <- max(30, max(snp_cov$n))
-  loh_band_h <- y_ceiling * 0.04
+  loh_band_h <- y_ceiling * -0.04 # negative to put it below number line
 
   loh_labels <- c(
     REF_fixed = paste0(strain_ref, " (blue)"),
