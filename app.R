@@ -1277,6 +1277,15 @@ ui <- fluidPage(
                  downloadButton("download_post_fusion_summary", "Download Post-Fusion Summary (.csv)")
         ),
 
+        tabPanel("LOH Regions",
+                 h4("Loss of Heterozygosity Regions"),
+                 helpText("Fixed-haplotype LOH segments (REF_fixed and ALT_fixed) identified by the Mclust allele-balance model. Run analysis first to populate this table."),
+                 br(),
+                 tableOutput("loh_regions_table"),
+                 br(),
+                 downloadButton("download_loh_regions", "Download LOH Regions (.csv)")
+        ),
+
         tabPanel("Curve Fits",
                  h4("Whittaker Smoother Parameters"),
                  tableOutput("span_table"),
@@ -2783,6 +2792,82 @@ server <- function(input, output, session) {
     content  = function(file) {
       req(results$snp_peaks)
       fwrite(build_post_fusion_summary(), file)
+    }
+  )
+
+  # ── LOH Regions table ────────────────────────────────────────────────────────
+  output$loh_regions_table <- renderTable({
+    req(results$loh_segments)
+
+    segs <- copy(results$loh_segments)
+    segs <- segs[loh_state %in% c("REF_fixed", "ALT_fixed")]
+
+    if (nrow(segs) == 0)
+      return(data.frame(Message = "No fixed LOH regions detected."))
+
+    segs[, chrom := as.character(chrom)]
+
+    # Resolve strain display names
+    s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
+      results$strain_ref else "REF"
+    s_alt <- if (!is.null(results$strain_alt) && nzchar(results$strain_alt))
+      results$strain_alt else "ALT"
+
+    segs[, `LOH State` := fcase(
+      loh_state == "REF_fixed", paste0("REF fixed (", s_ref, ")"),
+      loh_state == "ALT_fixed", paste0("ALT fixed (", s_alt, ")")
+    )]
+
+    out <- segs[, .(
+      Chromosome          = chrom,
+      `Start (bp)`        = format(start,      big.mark = ",", scientific = FALSE),
+      `End (bp)`          = format(end,         big.mark = ",", scientific = FALSE),
+      `Length (kb)`       = round(length_bp / 1000, 2),
+      `SNPs in Region`    = n_snps,
+      `LOH State`         = `LOH State`,
+      `Mean Allele Balance` = round(balance_mean, 3),
+      `SD Allele Balance`   = ifelse(is.na(balance_sd), "\u2014",
+                                     as.character(round(balance_sd, 3)))
+    )]
+
+    setorder(out, Chromosome, `Start (bp)`)
+    out
+  }, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "s", na = "\u2014")
+
+  output$download_loh_regions <- downloadHandler(
+    filename = function() paste0(input$sample_name, "_loh_regions_", Sys.Date(), ".csv"),
+    content  = function(file) {
+      req(results$loh_segments)
+
+      segs <- copy(results$loh_segments)
+      segs <- segs[loh_state %in% c("REF_fixed", "ALT_fixed")]
+      segs[, chrom := as.character(chrom)]
+
+      s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
+        results$strain_ref else "REF"
+      s_alt <- if (!is.null(results$strain_alt) && nzchar(results$strain_alt))
+        results$strain_alt else "ALT"
+
+      segs[, loh_state_label := fcase(
+        loh_state == "REF_fixed", paste0("REF_fixed (", s_ref, ")"),
+        loh_state == "ALT_fixed", paste0("ALT_fixed (", s_alt, ")")
+      )]
+
+      out <- segs[, .(
+        sample      = input$sample_name,
+        chrom,
+        start,
+        end,
+        length_bp,
+        length_kb   = round(length_bp / 1000, 2),
+        n_snps,
+        loh_state   = loh_state_label,
+        balance_mean = round(balance_mean, 4),
+        balance_sd   = round(balance_sd,   4)
+      )]
+
+      setorder(out, chrom, start)
+      fwrite(out, file)
     }
   )
 
