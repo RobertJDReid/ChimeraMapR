@@ -1,4 +1,5 @@
 *.DS_store
+test_data
 archive
 .Rhistory
 .Rapp.history
