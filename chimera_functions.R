@@ -89,8 +89,8 @@ load_snp_data <- function(path) {
 #' Load chromosome size from a FASTA index (.fai).
 #' Returns a data.table with columns: CHROM, length
 load_chr_size <- function(path) {
-  dt <- fread(path,
-              col.names = c("CHROM", "length", "offset", "col1", "col2"))
+  dt <- fread(path, header = FALSE)
+  setnames(dt, 1:2, c("CHROM", "length"))
   dt[, .(CHROM, length)]
 }
 
