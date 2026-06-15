@@ -17,11 +17,6 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(Matrix)
 })
-# mclust is intentionally NOT loaded here at the top level.
-# It exports em() which conflicts with data.table's internal gzip detection
-# and causes a fatal error at startup.  compute_loh_map() checks for it via
-# requireNamespace() and calls it with mclust:: qualification so it is loaded
-# lazily only when the LOH analysis step runs.
 
 APP_VERSION <- "0.6.0"
 
@@ -460,162 +455,221 @@ run_chimera_analysis <- function(
 # -----------------------------------------------------------------------------
 #  compute_loh_map()
 #
-#  Replaces the simple threshold-based compute_loh_map_full().  Uses a
-#  three-component Gaussian mixture model (Mclust) to classify per-position
-#  allele balance into AC = 0 (ALT-fixed / REF homozygous), AC = 1 (het), or
-#  AC = 2 (REF-fixed / ALT homozygous), then applies run-length smoothing to
-#  remove isolated short runs that are likely noise.
+#  Classifies per-position allele balance into three haplotype states using a
+#  custom EM algorithm (beta-binomial mixture) followed by Viterbi HMM
+#  segmentation.  No external mixture-model packages are required.
+#
+#  States (keyed on ALT allele count k = n_alt):
+#    HOM_REF     — binomial near 0 ALT  → REF_fixed (AC = 2)
+#    DIP_HET_0.5 — beta-binomial at 0.5 → HET       (AC = 1)
+#    HOM_ALT     — binomial near 1 ALT  → ALT_fixed (AC = 0)
 #
 #  Arguments
 #    full_read_loh : data.table from run_chimera_analysis()$full_read_loh
 #                   (MAPQ-only filtered; NO base-quality filter so that
 #                   allele-balance estimates reflect the full pileup depth)
-#    min_depth     : minimum reads at a position to attempt a call (default 5)
-#    min_run_snps  : short runs <= this length are subjected to strict balance
-#                   re-checking; those that fail are removed before final
-#                   run re-labelling (default 2, mirrors Rmd logic)
+#    min_depth     : hard minimum reads per position; positions below this are
+#                   excluded before fitting (default 5)
+#    min_run_snps  : retained for API compatibility; not used by the HMM
+#    trans_stay    : HMM self-transition probability — higher values produce
+#                   fewer state changes / longer segments (default 0.999)
 #
-#  Returns a data.table with columns:
-#    chrom, pos, n_ref, n_total, balance, AC, loh_state
-#  where loh_state is one of "ALT_fixed" | "REF_fixed" | "HET" | NA
-#  (NA = fewer than min_depth reads at that position or Mclust could not fit).
+#  Returns a named list:
+#    $snp_table    : per-SNP data.table
+#                   (chrom, pos, n_ref, n_total, balance, AC, loh_state)
+#    $loh_segments : collapsed contiguous-run table
+#                   (chrom, start, end, length_bp, n_snps, AC, loh_state,
+#                    balance_mean, balance_sd)
 # -----------------------------------------------------------------------------
 compute_loh_map <- function(full_read_loh,
                             min_depth    = 5L,
                             min_run_snps = 2L,
+                            trans_stay   = 0.999,
                             warn_fn      = function(msg) message("WARNING: ", msg)) {
 
-  if (!requireNamespace("mclust", quietly = TRUE))
-    stop("Package 'mclust' is required for LOH calling. Install with: install.packages('mclust')")
-  
-  # Attach mclust temporarily so Mclust()'s internal eval(mc, parent.frame())
-  # can resolve MclustBIC. We detach on exit to avoid the em()/data.table conflict.
-  # library() would permanently attach it; this scopes it to this function call only.
-  already_attached <- "package:mclust" %in% search()
-  if (!already_attached) {
-    suppressPackageStartupMessages(
-      attachNamespace("mclust")
-    )
-    on.exit({
-      try(detach("package:mclust", unload = FALSE, character.only = TRUE), silent = TRUE)
-    }, add = TRUE)
+  # ── Internal model functions ───────────────────────────────────────────────
+
+  dbinom_err <- function(k, N, p)
+    dbinom(k, N, pmax(pmin(p, 1 - 1e-9), 1e-9))
+
+  dbetabinom <- function(k, N, mu, theta) {
+    alpha <- mu * theta
+    beta_ <- (1 - mu) * theta
+    out   <- exp(lchoose(N, k) + lbeta(k + alpha, N - k + beta_) - lbeta(alpha, beta_))
+    out[!is.finite(out)] <- 0
+    out
   }
-  
+
+  wll_theta <- function(theta, k, N, mu, w) {
+    ll <- dbetabinom(k, N, mu, theta)
+    ll[ll <= 0] <- 1e-300
+    sum(w * log(ll))
+  }
+
+  fit_ab_mixture <- function(k, N, theta_init = 80, eps_init = 0.02,
+                             max_iter = 200, tol = 1e-5) {
+    labels <- c("HOM_REF", "DIP_HET_0.5", "HOM_ALT")
+    pi     <- rep(1/3, 3)
+    eps    <- eps_init
+    theta  <- theta_init
+    r      <- matrix(0, length(k), 3)
+    for (iter in seq_len(max_iter)) {
+      old    <- c(pi, eps, theta)
+      r[, 1] <- pi[1] * dbinom_err(k, N, eps)
+      r[, 2] <- pi[2] * dbetabinom(k, N, 0.5, theta)
+      r[, 3] <- pi[3] * dbinom_err(k, N, 1 - eps)
+      rs     <- rowSums(r); rs[rs == 0] <- 1e-300
+      r      <- r / rs
+      pi     <- colMeans(r)
+      w_ref  <- r[, 1]; w_alt <- r[, 3]
+      num    <- sum(w_ref * k / N) + sum(w_alt * (1 - k / N))
+      den    <- sum(w_ref) + sum(w_alt)
+      if (den > 0) eps <- pmax(pmin(num / den, 0.15), 1e-4)
+      wj <- r[, 2]
+      if (sum(wj) >= 1)
+        theta <- optimize(wll_theta, c(5, 5000),
+                          k = k, N = N, mu = 0.5, w = wj,
+                          maximum = TRUE)$maximum
+      if (max(abs(c(pi, eps, theta) - old) / (abs(old) + 1)) < tol) break
+    }
+    list(
+      mixing_proportions = setNames(pi, labels),
+      error_rate         = eps,
+      theta              = theta,
+      posterior          = `colnames<-`(r, labels),
+      assignments        = labels[max.col(r)]
+    )
+  }
+
+  viterbi_segment <- function(k, N, chrom, fit, trans_stay) {
+    n_states  <- 3L
+    trans_off <- (1 - trans_stay) / (n_states - 1)
+    A_log     <- matrix(log(trans_off), n_states, n_states)
+    diag(A_log) <- log(trans_stay)
+    eps           <- fit$error_rate
+    theta         <- fit$theta
+    labels        <- names(fit$mixing_proportions)
+    log_emit      <- matrix(0, length(k), n_states)
+    log_emit[, 1] <- log(pmax(dbinom_err(k, N, eps),          1e-300))
+    log_emit[, 2] <- log(pmax(dbetabinom(k, N, 0.5, theta),   1e-300))
+    log_emit[, 3] <- log(pmax(dbinom_err(k, N, 1 - eps),      1e-300))
+    log_pi        <- log(fit$mixing_proportions)
+    assignments   <- character(length(k))
+    for (chr in unique(chrom)) {
+      idx <- which(chrom == chr)
+      T_  <- length(idx)
+      E   <- log_emit[idx, , drop = FALSE]
+      delta      <- matrix(-Inf, T_, n_states)
+      psi        <- matrix(0L,   T_, n_states)
+      delta[1, ] <- log_pi + E[1, ]
+      if (T_ > 1L) {
+        for (t in 2L:T_) {
+          scores     <- matrix(delta[t - 1L, ], n_states, n_states) + A_log
+          psi[t, ]   <- apply(scores, 2, which.max)
+          delta[t, ] <- apply(scores, 2, max) + E[t, ]
+        }
+        path     <- integer(T_)
+        path[T_] <- which.max(delta[T_, ])
+        for (t in (T_ - 1L):1L)
+          path[t] <- psi[t + 1L, path[t + 1L]]
+        assignments[idx] <- labels[path]
+      } else {
+        assignments[idx] <- labels[which.max(delta[1L, ])]
+      }
+    }
+    assignments
+  }
+
   # ── 1. Aggregate to per-position allele balance ────────────────────────────
   summary_dt <- full_read_loh[, .(
     n_ref   = sum(IS_REF, na.rm = TRUE),
     n_total = .N,
+    n_alt   = .N - sum(IS_REF, na.rm = TRUE),
     balance = sum(IS_REF, na.rm = TRUE) / .N
   ), by = .(chrom, pos)]
 
-  # Drop positions with insufficient depth — Mclust can't use them
-  summary_dt <- summary_dt[n_total >= min_depth]
+  # Adaptive depth floor: median - 3*IQR (data-driven), clipped below at min_depth
+  depth_cutoff <- max(min_depth,
+                      floor(median(summary_dt$n_total) -
+                              3 * IQR(summary_dt$n_total)),
+                      na.rm = TRUE)
+  summary_dt   <- summary_dt[n_total >= depth_cutoff]
+
+  empty_segs <- data.table(
+    chrom = character(), start = integer(), end = integer(),
+    length_bp = integer(), n_snps = integer(), AC = integer(),
+    loh_state = character(), balance_mean = numeric(), balance_sd = numeric()
+  )
 
   if (nrow(summary_dt) < 10L) {
-    warn_fn("Too few SNP positions with sufficient depth for Mclust LOH calling; returning NA.")
+    warn_fn("Too few SNP positions with sufficient depth for LOH calling; returning NA.")
     summary_dt[, `:=`(AC = NA_integer_, loh_state = NA_character_)]
-    return(summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)])
+    return(list(
+      snp_table    = summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)],
+      loh_segments = empty_segs
+    ))
   }
-  
-  # ── 2. Fit Gaussian mixture model on allele balance ────────────────────────
-  # Allow Mclust to select the best number of components (G = 1:3).
-  # Forcing G = 3 can fail silently on samples that are predominantly HET
-  # (only 1–2 components present), returning NULL and causing no LOH to be
-  # called.  Letting Mclust pick means it may return G = 1 or G = 2;
-  # the cluster-ranking step below handles any G gracefully.
-  fit <- withCallingHandlers(
-    tryCatch(
-      mclust::Mclust(summary_dt$balance, G = 1:3, verbose = FALSE),
-      error = function(e) { warn_fn(paste0("Mclust error: ", e$message)); NULL }
-    ),
-    warning = function(w) {
-      warn_fn(paste0("Mclust warning: ", conditionMessage(w)))
-      invokeRestart("muffleWarning")
+
+  # ── 2. Fit 3-state EM mixture ──────────────────────────────────────────────
+  fit <- tryCatch(
+    fit_ab_mixture(k = summary_dt$n_alt, N = summary_dt$n_total),
+    error = function(e) {
+      warn_fn(paste0("EM fit error: ", e$message))
+      NULL
     }
   )
-  
   if (is.null(fit)) {
-    warn_fn("Mclust returned NULL; LOH map will contain no called regions.")
+    warn_fn("EM fit failed; LOH map will contain no called regions.")
     summary_dt[, `:=`(AC = NA_integer_, loh_state = NA_character_)]
-    return(summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)])
-  }
-  
-  summary_dt[, cluster := fit$classification]
-
-  # Rank clusters by mean balance: lowest mean → AC=0, middle → AC=1, highest → AC=2.
-  # When G < 3 is selected, only 1 or 2 AC values will be present; positions in
-  # the single cluster of a G=1 fit are all called HET (AC=1).
-  n_clusters <- length(fit$parameters$mean)
-  cluster_means <- data.table(
-    cluster      = seq_len(n_clusters),
-    mean_balance = fit$parameters$mean
-  )
-  setorder(cluster_means, mean_balance)
-
-  if (n_clusters == 1L) {
-    # Only one component — all positions are HET; no LOH regions
-    cluster_means[, AC := 1L]
-  } else if (n_clusters == 2L) {
-    # Two components: assign AC=0 (low balance) and AC=2 (high balance)
-    # This handles a sample with only REF-LOH and HET, or ALT-LOH and HET,
-    # or (rarely) pure REF-LOH vs ALT-LOH.
-    # Use the midpoint: if both means are near 0/1 extremes → AC 0 and 2;
-    # if one is near 0.5 → AC 0/2 and 1 respectively.
-    mid <- mean(cluster_means$mean_balance)
-    if (mid < 0.25) {
-      cluster_means[, AC := c(0L, 1L)]   # ALT-fixed + HET
-    } else if (mid > 0.75) {
-      cluster_means[, AC := c(1L, 2L)]   # HET + REF-fixed
-    } else {
-      cluster_means[, AC := c(0L, 2L)]   # ALT-fixed + REF-fixed (no HET)
-    }
-  } else {
-    # Three components: standard AC=0/1/2 ranking by mean balance
-    cluster_means[, AC := 0L:2L]
+    return(list(
+      snp_table    = summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)],
+      loh_segments = empty_segs
+    ))
   }
 
-  summary_dt[cluster_means, AC := i.AC, on = "cluster"]
-  summary_dt[, cluster := NULL]
-
-  # ── 3. Run-length smoothing — remove noisy short runs ─────────────────────
-  # First pass: label runs per chromosome
+  # ── 3. Viterbi HMM segmentation ───────────────────────────────────────────
   setorder(summary_dt, chrom, pos)
-  summary_dt[, LOH_factor := rleid(AC), by = chrom]
-  summary_dt[, AC_runs    := .N,        by = .(chrom, LOH_factor)]
-
-  # For runs of <= min_run_snps, keep only rows that pass strict balance gates.
-  # Positions that fail are dropped so that formerly-split runs can merge.
-  strict_pass <- function(ac, bal) {
-    (ac == 0L & bal < 0.02) |
-    (ac == 1L & bal > 0.40 & bal < 0.60) |
-    (ac == 2L & bal > 0.98)
+  hmm_states <- tryCatch(
+    viterbi_segment(
+      k          = summary_dt$n_alt,
+      N          = summary_dt$n_total,
+      chrom      = as.character(summary_dt$chrom),
+      fit        = fit,
+      trans_stay = trans_stay
+    ),
+    error = function(e) {
+      warn_fn(paste0("Viterbi segmentation error: ", e$message))
+      NULL
+    }
+  )
+  if (is.null(hmm_states)) {
+    summary_dt[, `:=`(AC = NA_integer_, loh_state = NA_character_)]
+    return(list(
+      snp_table    = summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)],
+      loh_segments = empty_segs
+    ))
   }
-  summary_dt <- summary_dt[
-    !(AC_runs <= min_run_snps & !strict_pass(AC, balance))
-  ]
 
-  # Re-label after deletions so formerly-interrupted runs merge
-  summary_dt[, LOH_factor := rleid(AC), by = chrom]
-  summary_dt[, AC_runs    := .N,        by = .(chrom, LOH_factor)]
-
-  # ── 4. Map AC to loh_state ──────────────────────────────────────────────────
+  # ── 4. Map HMM states → AC and loh_state ──────────────────────────────────
+  summary_dt[, hmm_state := hmm_states]
+  summary_dt[, AC := fcase(
+    hmm_state == "HOM_REF",     2L,
+    hmm_state == "DIP_HET_0.5", 1L,
+    hmm_state == "HOM_ALT",     0L,
+    default = NA_integer_
+  )]
   summary_dt[, loh_state := fcase(
     AC == 0L, "ALT_fixed",
-    AC == 2L, "REF_fixed",
     AC == 1L, "HET",
+    AC == 2L, "REF_fixed",
     default  = NA_character_
   )]
+  summary_dt[, hmm_state := NULL]
 
   snp_table <- summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)]
 
-  # ── 5. Collapse per-SNP rows into contiguous LOH segments ──────────────────
-  # Mirrors the LOH_table aggregation from the Rmd workflow.  Adjacent
-  # same-state positions are merged into one row per run, giving start/end
-  # coordinates that downstream plotting and gap_has_loh() can use directly
-  # without re-running RLE compression on every render.
+  # ── 5. Collapse into contiguous LOH segments ──────────────────────────────
   setorder(summary_dt, chrom, pos)
-  # LOH_factor was set in step 3; re-derive on the final filtered set so
-  # indices are contiguous after any row deletions.
   summary_dt[, LOH_factor := rleid(AC), by = chrom]
 
   loh_segments <- summary_dt[, .(

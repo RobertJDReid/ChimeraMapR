@@ -679,9 +679,9 @@ FUSION_HEURISTICS <- list(
   # ── LOH map parameters ──────────────────────────────────────────────────────
   # NOTE: loh_min_depth, loh_alt_max, and loh_ref_min were used by the
   # deprecated threshold-based compute_loh_map_full().  LOH classification is
-  # now performed by compute_loh_map() in chimera_functions.R using Mclust.
-  # These values are retained here but are no longer referenced in the main
-  # analysis path.
+  # now performed by compute_loh_map() in chimera_functions.R using a
+  # beta-binomial EM + Viterbi HMM.  These values are retained here but are
+  # no longer referenced in the main analysis path.
   loh_min_depth = 5L,
   loh_alt_max   = 0.15,
   loh_ref_min   = 0.85,
@@ -696,9 +696,8 @@ FUSION_HEURISTICS <- list(
 # ---------------------------------------------------------------------------
 # LOH map computation
 #   compute_loh_map() is defined in chimera_functions.R.
-#   It uses a three-component Mclust GMM on per-position allele balance
-#   (from the no-base-qual-filter read set) followed by run-length smoothing
-#   to produce a data.table with columns:
+#   Uses a beta-binomial EM mixture + Viterbi HMM on per-position allele
+#   balance (from the no-base-qual-filter read set) to produce a data.table:
 #     chrom, pos, n_ref, n_total, balance, AC, loh_state
 #   where loh_state is "ALT_fixed" | "REF_fixed" | "HET" | NA.
 #
@@ -1311,7 +1310,7 @@ ui <- fluidPage(
 
         tabPanel("LOH Regions",
                  h4("Loss of Heterozygosity Regions"),
-                 helpText("Fixed-haplotype LOH segments (REF_fixed and ALT_fixed) identified by the Mclust allele-balance model. Run analysis first to populate this table."),
+                 helpText("Fixed-haplotype LOH segments (REF_fixed and ALT_fixed) identified by a beta-binomial EM mixture + Viterbi HMM on per-position allele balance. Run analysis first to populate this table."),
                  br(),
                  tableOutput("loh_regions_table"),
                  br(),
@@ -1544,10 +1543,10 @@ server <- function(input, output, session) {
       results$strain_ref        <- trimws(input$strain_ref)
       results$strain_alt        <- trimws(input$strain_alt)
 
-      # Build LOH map using the Mclust-based method from chimera_functions.R.
+      # Build LOH map using the beta-binomial EM + Viterbi HMM from chimera_functions.R.
       # full_read_loh applies only MAPQ + is_del filters (no base-quality filter)
       # so that allele-balance estimates reflect the deepest possible pileup.
-      incProgress(0.87, detail = "Computing LOH map (Mclust)")
+      incProgress(0.87, detail = "Computing LOH map (HMM)")
       loh_out              <- compute_loh_map(
         res$full_read_loh,
         warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)

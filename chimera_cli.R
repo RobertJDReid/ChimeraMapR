@@ -136,7 +136,7 @@ option_list <- list(
               action  = "store_true",
               default = FALSE,
               help    = paste("Run the chain-based LOH event caller and write",
-                              "one CSV per pass (step 0–4). Requires the mclust package.")),
+                              "one CSV per pass (step 0–4).")),
 
   make_option("--tel-tol",
               type    = "integer",
