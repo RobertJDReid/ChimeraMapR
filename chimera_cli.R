@@ -156,6 +156,14 @@ option_list <- list(
               metavar = "INT",
               help    = "Minimum spanning reads required for a read-based chain call [default: %default]"),
 
+  make_option("--peak-pad",
+              type    = "integer",
+              default = 200L,
+              metavar = "BP",
+              help    = paste("Peak association padding in bp: a peak is attached to a token",
+                              "junction if its SNP position falls within this distance of the",
+                              "token boundary [default: %default]")),
+
   # Output path
   make_option(c("-o", "--output"),
               type    = "character",
@@ -262,6 +270,7 @@ if (opts[["chain-all"]]) {
   cat("  Telomere tol.   :", opts[["tel-tol"]],   "kb\n")
   cat("  Merge gap       :", opts[["merge-gap"]], "kb\n")
   cat("  Min spanning    :", opts[["min-span"]],  "reads\n")
+  cat("  Peak pad        :", opts[["peak-pad"]],  "bp\n")
 }
 cat("\n")
 
@@ -410,9 +419,11 @@ if (opts[["chain-all"]]) {
 
   # Build chain params from CLI opts (remaining tuning uses defaults)
   cp <- default_chain_params()
-  cp$tel_tol_bp   <- as.integer(opts[["tel-tol"]]   * 1000L)
-  cp$merge_gap_bp <- as.integer(opts[["merge-gap"]] * 1000L)
-  cp$min_span     <- as.integer(opts[["min-span"]])
+  cp$tel_tol_bp        <- as.integer(opts[["tel-tol"]]   * 1000L)
+  cp$merge_gap_bp      <- as.integer(opts[["merge-gap"]] * 1000L)
+  cp$min_span          <- as.integer(opts[["min-span"]])
+  cp$peak_pad_bp       <- as.integer(opts[["peak-pad"]])
+  cp$min_snps_for_peak <- as.integer(opts[["min-run"]])
 
   cat("\n── Chain analysis ───────────────────────────────────────────────────────────\n")
 
@@ -470,12 +481,26 @@ if (opts[["chain-all"]]) {
     cat(sprintf("  Labeled %d / %d peaks\n\n", n_labeled, nrow(sp)))
   }
 
+  # ── Step 0c: Peak fusion ─────────────────────────────────────────────────────
+  cat("[chain] Step 0c: Computing peak pairs (fusion analysis) ...\n")
+  fusion_res <- compute_peak_pairs(
+    snp_peaks      = results$snp_peaks,
+    rt_df          = results$rt_df,
+    transition_pos = results$transition_pos,
+    loh_segments   = loh_segs,
+    zone_min_snps  = as.integer(opts[["min-run"]])
+  )
+  n_pairs <- if (!is.null(fusion_res$peak_pairs)) nrow(fusion_res$peak_pairs) else 0L
+  cat(sprintf("  Peak pairs: %d candidate pairs evaluated\n\n", n_pairs))
+
   # ── Step 1: Build raw chains ──────────────────────────────────────────────────
   cat("[chain] Step 1: Building raw chains ...\n")
   raw_chains <- build_raw_chains(
     loh_segments = loh_segs,
     chr_span     = results$chr_span,
     params       = cp,
+    fused_peaks  = fusion_res$fused_peaks,
+    peak_pairs   = fusion_res$peak_pairs,
     snp_peaks    = results$snp_peaks
   )
 
@@ -521,8 +546,8 @@ if (opts[["chain-all"]]) {
   rec <- reconcile(
     scan_results = scan_results,
     chains       = canonical_chains,
-    fused_peaks  = NULL,
-    peak_pairs   = NULL,
+    fused_peaks  = fusion_res$fused_peaks,
+    peak_pairs   = fusion_res$peak_pairs,
     snp_peaks    = results$snp_peaks
   )
 

@@ -16,6 +16,7 @@ suppressPackageStartupMessages({
   library(pracma)
   library(ggplot2)
   library(Matrix)
+  if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
 APP_VERSION <- "0.6.0"
@@ -1137,4 +1138,373 @@ classify_fused_peak_haplotype <- function(fg, chr_name, rt_df, touching_ids,
 
   list(label = label, seg_data = seg_data,
        win_start = win_start, win_end = win_end, expanded = expanded)
+}
+
+# =============================================================================
+#  PEAK FUSION FUNCTIONS
+#  Moved from app.R so chimera_cli.R can call compute_peak_pairs() without
+#  loading Shiny.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# classify_zone_state()
+#   For a single read's RLE-smoothed IS_REF vector and positions, return the
+#   majority-vote haplotype ("REF" / "ALT") for a defined genomic interval.
+#   Returns NA if fewer than min_snps positions fall in the interval.
+# ---------------------------------------------------------------------------
+classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_snps) {
+  idx <- pos_vec >= zone_start & pos_vec <= zone_end
+  if (sum(idx) < min_snps) return(NA_character_)
+  majority <- mean(is_ref_vec[idx], na.rm = TRUE)
+  if (is.na(majority)) return(NA_character_)
+  if (majority >= 0.5) "REF" else "ALT"
+}
+
+# ---------------------------------------------------------------------------
+# classify_edge_type()
+#   Given the set of spanning reads (reads with data in all three zones),
+#   determine whether the pair represents a gene_conversion, crossover,
+#   independent_events, or ambiguous relationship.
+#
+#   state_df: data.frame with columns read_id, state_L, state_M, state_R
+#             (each is "REF", "ALT", or NA)
+#   Returns a character scalar.
+# ---------------------------------------------------------------------------
+classify_edge_type <- function(state_df) {
+
+  classifiable <- state_df[!is.na(state_df$state_L) &
+                           !is.na(state_df$state_R), ]
+
+  no_middle <- all(is.na(state_df$state_M))
+
+  if (nrow(classifiable) == 0) return("unresolvable")
+
+  if (no_middle) {
+    lr_patterns <- paste(classifiable$state_L, classifiable$state_R, sep = "-")
+    unique_pats <- unique(lr_patterns)
+    if (length(unique_pats) == 2) {
+      sorted <- sort(unique_pats)
+      if (sorted[1] == "ALT-REF" && sorted[2] == "REF-ALT")
+        return("crossover")
+    }
+    return("ambiguous")
+  }
+
+  classifiable_3 <- classifiable[!is.na(classifiable$state_M), ]
+
+  if (nrow(classifiable_3) == 0) {
+    lr_patterns <- paste(classifiable$state_L, classifiable$state_R, sep = "-")
+    unique_pats <- unique(lr_patterns)
+    if (length(unique_pats) == 2) {
+      sorted <- sort(unique_pats)
+      if (sorted[1] == "ALT-REF" && sorted[2] == "REF-ALT")
+        return("crossover")
+    }
+    return("ambiguous")
+  }
+
+  patterns <- paste(classifiable_3$state_L,
+                    classifiable_3$state_M,
+                    classifiable_3$state_R, sep = "-")
+  unique_pats <- unique(patterns)
+
+  is_return <- function(p) {
+    parts <- strsplit(p, "-")[[1]]
+    parts[1] == parts[3] && parts[1] != parts[2]
+  }
+  all_return <- all(sapply(unique_pats, is_return))
+  if (all_return && length(unique_pats) <= 2) return("gene_conversion")
+
+  if (length(unique_pats) == 2) {
+    sorted <- sort(unique_pats)
+    if ((sorted[1] == "ALT-REF-REF" && sorted[2] == "REF-ALT-ALT"))
+      return("crossover")
+  }
+
+  no_return <- all(!sapply(unique_pats, is_return))
+  if (no_return) return("independent_events")
+
+  return("ambiguous")
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#   FUSION HEURISTICS
+# ─────────────────────────────────────────────────────────────────────────────
+
+FUSION_HEURISTICS <- list(
+
+  excluded_peak_classes  = c("gene_conversion", "internal_crossover"),
+  eligible_peak_classes  = c("binary", "undefined"),
+  unfusable_edge_types   = c("independent_events", "unresolvable"),
+  auto_edge_types        = c("gene_conversion", "crossover"),
+  supervised_edge_types  = c("gene_conversion", "crossover", "ambiguous"),
+
+  edge_priority = c(gene_conversion    = 1,
+                    crossover          = 2,
+                    ambiguous          = 3,
+                    independent_events = 4,
+                    unresolvable       = 5),
+
+  loh_min_depth    = 5L,
+  loh_alt_max      = 0.15,
+  loh_ref_min      = 0.85,
+  loh_gap_min_frac = 0.5
+)
+
+# ---------------------------------------------------------------------------
+# gap_has_loh()
+#   Returns TRUE when any fixed-haplotype segment in loh_segments overlaps
+#   the open interval (pos_start, pos_end) on chr_name.
+# ---------------------------------------------------------------------------
+gap_has_loh <- function(loh_segments, chr_name, pos_start, pos_end) {
+  if (is.null(loh_segments) || nrow(loh_segments) == 0) return(FALSE)
+  any(
+    as.character(loh_segments$chrom) == chr_name &
+    loh_segments$loh_state %in% c("REF_fixed", "ALT_fixed") &
+    loh_segments$start < pos_end &
+    loh_segments$end   > pos_start
+  )
+}
+
+# ---------------------------------------------------------------------------
+# peak_is_fusion_eligible()
+# ---------------------------------------------------------------------------
+peak_is_fusion_eligible <- function(lbl) {
+  is.na(lbl) ||
+    lbl %in% FUSION_HEURISTICS$eligible_peak_classes
+}
+
+# ---------------------------------------------------------------------------
+# decide_fusion_mode()
+# ---------------------------------------------------------------------------
+decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
+                               loh_in_gap = FALSE) {
+
+  if (edge_type %in% FUSION_HEURISTICS$unfusable_edge_types)
+    return("none")
+
+  if (jaccard >= jaccard_threshold &&
+      edge_type %in% FUSION_HEURISTICS$auto_edge_types)
+    return("automatic")
+
+  if (loh_in_gap && edge_type %in% FUSION_HEURISTICS$auto_edge_types)
+    return("automatic")
+
+  if (jaccard > 0 &&
+      edge_type %in% FUSION_HEURISTICS$supervised_edge_types)
+    return("supervised")
+
+  if (loh_in_gap && edge_type %in% FUSION_HEURISTICS$supervised_edge_types)
+    return("supervised")
+
+  "none"
+}
+
+# ---------------------------------------------------------------------------
+# compute_peak_pairs()
+#   Takes snp_peaks + rt_df + transition_pos and returns:
+#     list(peak_pairs = data.table, fused_peaks = data.table)
+#   Pass loh_segments (from compute_loh_map()$loh_segments) to enable LOH
+#   promotion of supervised pairs; pass NULL to skip.
+# ---------------------------------------------------------------------------
+compute_peak_pairs <- function(snp_peaks,
+                               rt_df,
+                               transition_pos,
+                               loh_segments       = NULL,
+                               jaccard_threshold  = 0.20,
+                               zone_min_snps      = 2L,
+                               supervised_override = NULL) {
+
+  if (is.null(snp_peaks) || nrow(snp_peaks) == 0)
+    return(list(peak_pairs = NULL, fused_peaks = NULL))
+
+  peaks_dt <- copy(snp_peaks)
+  peaks_dt <- peaks_dt[!is.na(snp_pos)]
+  if (nrow(peaks_dt) == 0)
+    return(list(peak_pairs = NULL, fused_peaks = NULL))
+  peaks_dt[, peak_id := .I]
+  peaks_dt[, chrom   := as.character(chrom)]
+
+  all_pairs <- list()
+
+  for (chr_name in unique(peaks_dt$chrom)) {
+
+    chr_peaks <- peaks_dt[chrom == chr_name][order(snp_pos)]
+    if (nrow(chr_peaks) < 2) next
+
+    get_peak_reads <- function(pk) {
+      transition_pos[
+        as.character(chrom) == chr_name &
+          pos >= pk$peak_start & pos <= pk$peak_end,
+        unique(read_id)
+      ]
+    }
+
+    read_sets <- lapply(seq_len(nrow(chr_peaks)), function(i) get_peak_reads(chr_peaks[i]))
+    names(read_sets) <- chr_peaks$peak_id
+
+    for (j in seq_len(nrow(chr_peaks) - 1L)) {
+
+      pk_a <- chr_peaks[j]
+      pk_b <- chr_peaks[j + 1L]
+
+      label_a <- if ("haplotype_label" %in% names(pk_a)) pk_a$haplotype_label else NA_character_
+      label_b <- if ("haplotype_label" %in% names(pk_b)) pk_b$haplotype_label else NA_character_
+
+      if (!peak_is_fusion_eligible(label_a) || !peak_is_fusion_eligible(label_b)) next
+
+      reads_a <- read_sets[[as.character(pk_a$peak_id)]]
+      reads_b <- read_sets[[as.character(pk_b$peak_id)]]
+
+      all_pair_reads <- union(reads_a, reads_b)
+      if (length(all_pair_reads) == 0) next
+
+      read_lengths <- rt_df[read_id %in% all_pair_reads,
+                            .(len = max(pos) - min(pos)), by = read_id]$len
+      median_read_len <- median(read_lengths, na.rm = TRUE)
+      if (is.na(median_read_len) || median_read_len <= 0) next
+
+      if (is.na(pk_a$snp_pos) || is.na(pk_b$snp_pos)) next
+
+      gap_bp <- pk_b$snp_pos - pk_a$snp_pos
+      if (is.na(gap_bp) || gap_bp > median_read_len) next
+
+      n_shared <- length(intersect(reads_a, reads_b))
+      n_union  <- length(union(reads_a, reads_b))
+      jaccard  <- if (n_union > 0) n_shared / n_union else 0
+
+      spanning_ids <- intersect(reads_a, reads_b)
+
+      zone_l_start <- -Inf
+      zone_l_end   <- pk_a$snp_pos
+      zone_m_start <- pk_a$snp_pos
+      zone_m_end   <- pk_b$snp_pos
+      zone_r_start <- pk_b$snp_pos
+      zone_r_end   <- Inf
+
+      n_spanning <- 0L
+      edge_type  <- "unresolvable"
+
+      if (length(spanning_ids) > 0) {
+        span_df <- rt_df[read_id %in% spanning_ids &
+                           as.character(chrom) == chr_name]
+
+        if (nrow(span_df) > 0) {
+          state_list <- span_df[, {
+            sL <- classify_zone_state(pos, IS_REF, zone_l_start, zone_l_end, zone_min_snps)
+            sM <- classify_zone_state(pos, IS_REF, zone_m_start, zone_m_end, zone_min_snps)
+            sR <- classify_zone_state(pos, IS_REF, zone_r_start, zone_r_end, zone_min_snps)
+            .(state_L = sL, state_M = sM, state_R = sR)
+          }, by = read_id]
+
+          n_spanning <- nrow(state_list)
+          edge_type  <- classify_edge_type(as.data.frame(state_list))
+        }
+      }
+
+      loh_in_gap <- if (!is.null(loh_segments)) {
+        gap_has_loh(loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
+      } else {
+        FALSE
+      }
+
+      pair_key <- paste0(chr_name, "_", pk_a$peak_id, "_", pk_b$peak_id)
+
+      fusion_mode <- decide_fusion_mode(
+        edge_type         = edge_type,
+        jaccard           = jaccard,
+        jaccard_threshold = jaccard_threshold,
+        loh_in_gap        = loh_in_gap
+      )
+
+      if (!is.null(supervised_override) && pair_key %in% supervised_override) {
+        if (fusion_mode == "supervised") fusion_mode <- "automatic"
+      }
+
+      all_pairs[[length(all_pairs) + 1L]] <- data.table(
+        pair_key     = pair_key,
+        chrom        = chr_name,
+        peak_id_a    = pk_a$peak_id,
+        peak_id_b    = pk_b$peak_id,
+        snp_pos_a    = pk_a$snp_pos,
+        snp_pos_b    = pk_b$snp_pos,
+        gap_bp       = gap_bp,
+        median_read_len_bp = round(median_read_len),
+        n_reads_a    = length(reads_a),
+        n_reads_b    = length(reads_b),
+        n_shared     = n_shared,
+        n_spanning   = n_spanning,
+        jaccard      = round(jaccard, 4),
+        loh_in_gap   = loh_in_gap,
+        edge_type    = edge_type,
+        fusion_mode  = fusion_mode
+      )
+    }
+  }
+
+  pairs_dt <- if (length(all_pairs) > 0) {
+    rbindlist(all_pairs)
+  } else {
+    data.table(
+      pair_key           = character(), chrom        = character(),
+      peak_id_a          = integer(),   peak_id_b    = integer(),
+      snp_pos_a          = numeric(),   snp_pos_b    = numeric(),
+      gap_bp             = numeric(),   median_read_len_bp = numeric(),
+      n_reads_a          = integer(),   n_reads_b    = integer(),
+      n_shared           = integer(),   n_spanning   = integer(),
+      jaccard            = numeric(),   loh_in_gap   = logical(),
+      edge_type          = character(), fusion_mode  = character()
+    )
+  }
+
+  auto_edges <- pairs_dt[fusion_mode == "automatic"]
+
+  peaks_dt[, fusion_group := peak_id]
+
+  if (nrow(auto_edges) > 0) {
+    if (!requireNamespace("igraph", quietly = TRUE))
+      stop("Package 'igraph' is required for peak fusion. Install with: install.packages('igraph')")
+    g <- igraph::graph_from_data_frame(
+      d        = auto_edges[, .(from = peak_id_a, to = peak_id_b)],
+      directed = FALSE,
+      vertices = data.frame(name = peaks_dt$peak_id)
+    )
+    comps <- igraph::components(g)
+    mem   <- comps$membership
+    peaks_dt[, fusion_group := mem[as.character(peak_id)]]
+  }
+
+  fused_coords <- peaks_dt[, .(
+    fused_pos_bp    = round(mean(snp_pos,    na.rm = TRUE)),
+    fused_start_bp  = min(peak_start, na.rm = TRUE),
+    fused_end_bp    = max(peak_end,   na.rm = TRUE),
+    n_sub_peaks     = .N,
+    constituent_ids = paste(peak_id, collapse = ",")
+  ), by = fusion_group]
+
+  peaks_dt <- merge(peaks_dt, fused_coords, by = "fusion_group", all.x = TRUE)
+
+  get_peak_edge_info <- function(pid) {
+    rel_pairs <- pairs_dt[peak_id_a == pid | peak_id_b == pid]
+    if (nrow(rel_pairs) == 0)
+      return(data.table(peak_id = pid, best_edge_type = NA_character_,
+                        best_fusion_mode = NA_character_,
+                        adjacent_pair_keys = NA_character_))
+    rel_pairs[, priority := FUSION_HEURISTICS$edge_priority[edge_type]]
+    best <- rel_pairs[which.min(priority)]
+    data.table(
+      peak_id            = pid,
+      best_edge_type     = best$edge_type,
+      best_fusion_mode   = best$fusion_mode,
+      adjacent_pair_keys = paste(rel_pairs$pair_key, collapse = ";")
+    )
+  }
+
+  edge_info <- rbindlist(lapply(peaks_dt$peak_id, get_peak_edge_info))
+  peaks_dt  <- merge(peaks_dt, edge_info, by = "peak_id", all.x = TRUE)
+
+  list(
+    peak_pairs  = pairs_dt,
+    fused_peaks = peaks_dt
+  )
 }

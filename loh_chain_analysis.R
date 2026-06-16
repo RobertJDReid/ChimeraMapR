@@ -36,8 +36,9 @@ default_chain_params <- function() {
     merge_gap_bp    = 5000L,
 
     # A peak is "associated" with an LOH token if peak_start..peak_end
-    # overlaps it, OR snp_pos is within peak_pad_bp of the token boundary
-    peak_pad_bp     = 2000L,
+    # overlaps it, OR snp_pos is within peak_pad_bp of the token boundary.
+    # Chimeric-read peaks are sharp; 200 bp is a tight but appropriate default.
+    peak_pad_bp     = 200L,
 
     # Minimum spanning reads to make a read-based call; below this ->
     # AMBIGUOUS(low_coverage)
@@ -56,7 +57,15 @@ default_chain_params <- function() {
 
     # Distal / chromosome-median depth ratio below which a terminal region
     # is flagged as a possible deletion rather than copy-neutral LOH
-    depth_drop      = 0.60
+    depth_drop      = 0.60,
+
+    # Fixed-LOH tokens with fewer SNPs than this threshold may be too short
+    # for any individual chimeric read to span with enough consecutive
+    # same-haplotype calls to generate a peak.  Such tokens are classified
+    # as POSSIBLE_GC rather than UNCATEGORIZED_LOH.
+    # Should be set to the same value as the Minimum Run Length parameter
+    # used during chimeric-read detection (default 2).
+    min_snps_for_peak = 2L
   )
 }
 
@@ -98,11 +107,15 @@ make_token <- function(type,           # "F"=fixed | "H"=HET | "G"=NA gap | "TEL
 }
 
 make_chain <- function(tokens, chrom, chr_len,
+                       snp_start      = NA_integer_,
+                       snp_end        = NA_integer_,
                        schema_version = CHAIN_SCHEMA_VERSION) {
   structure(
     list(tokens         = tokens,
          chrom          = chrom,
          chr_len        = as.integer(chr_len),
+         snp_start      = as.integer(snp_start),
+         snp_end        = as.integer(snp_end),
          schema_version = schema_version),
     class = "loh_chain"
   )
@@ -194,11 +207,22 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     # -----------------------------------------------------------
     # Build token list: TEL_L, segments, gaps, TEL_R
     # -----------------------------------------------------------
+    # Define telomere sentinels by the min/max SNP positions for this
+    # chromosome rather than by physical chromosome ends.  This absorbs the
+    # large unscored regions that always flank the called segments (regions
+    # that have been trimmed from the data) into the TEL tokens so that the
+    # first and last called segments are directly adjacent to their sentinel —
+    # no spurious G gap between TEL and the terminal F.
+    first_pos <- as.integer(min(chr_segs$start))
+    last_pos  <- as.integer(max(chr_segs$end))
+
+    left_tel_end <- max(1L, first_pos - 1L)
+
     tokens <- list()
     tokens[[1]] <- make_token("TEL", state = NA,
-                               start = 1L, end = 1L, n_snps = 0L)
+                               start = 1L, end = left_tel_end, n_snps = 0L)
 
-    prev_end <- 0L
+    prev_end <- left_tel_end
     for (si in seq_len(nrow(chr_segs))) {
       seg <- chr_segs[si]
 
@@ -238,18 +262,14 @@ build_raw_chains <- function(loh_segments, chr_span, params,
       prev_end <- seg$end
     }
 
-    # Gap after last segment to chromosome end
-    if (prev_end < chr_len) {
-      tokens[[length(tokens) + 1L]] <- make_token(
-        "G", start = as.integer(prev_end + 1L), end = chr_len, n_snps = 0L
-      )
-    }
-
+    # Right TEL absorbs the trailing unscored region — no trailing G token.
+    right_tel_start <- min(as.integer(chr_len), last_pos + 1L)
     tokens[[length(tokens) + 1L]] <- make_token(
-      "TEL", state = NA, start = chr_len, end = chr_len, n_snps = 0L
+      "TEL", state = NA, start = right_tel_start, end = chr_len, n_snps = 0L
     )
 
-    make_chain(tokens, chr_name, chr_len)
+    make_chain(tokens, chr_name, chr_len,
+               snp_start = first_pos, snp_end = last_pos)
   })
 
   names(chains) <- sapply(chains, `[[`, "chrom")
@@ -356,12 +376,15 @@ build_raw_chains <- function(loh_segments, chr_span, params,
 canonicalise <- function(chain, params) {
   tokens <- chain$tokens
 
-  # Zero-SNP gaps are pure coordinate fill (unscored space between adjacent
-  # segments). They carry no allele data and no peak attachments, so they can
-  # be dropped before the merge rules run.  This makes terminal F tokens
-  # directly adjacent to TEL sentinels, allowing R01/R02 to match.
-  tokens <- Filter(function(t) !(t$type == "G" && isTRUE(t$n_snps == 0L)), tokens)
-
+  # Zero-SNP G tokens represent coordinate space between called segments (i.e.
+  # unscored HET context in real loh_segments output that only emits fixed rows).
+  # They must be kept so motif rules R04/R07 see the non-fixed flanking context
+  # around interstitial fixed tracts.  Small zero-SNP gaps between same-state F
+  # tokens are absorbed by the F-G-F merge rule below; large ones are left in
+  # place and act as G (non-fixed) flanks for het_bounded / double_gc matching.
+  # Terminal F tokens that genuinely start at position 1 are still directly
+  # adjacent to the left TEL sentinel (no gap token exists when seg$start == 1),
+  # so R01/R02 continue to match correctly without this filter.
   changed <- TRUE
 
   while (changed) {
@@ -506,10 +529,11 @@ classify_tract <- function(peak, params) {
                 n_support = n_spanning))
 
   result <- switch(edge_type,
-    "gene_conversion" = list(call = "NCO_GC",   reason = edge_type, n_support = n_spanning),
-    "crossover"       = list(call = "CO_GC",     reason = edge_type, n_support = n_spanning),
-    "binary"          = list(call = "AMBIGUOUS", reason = "binary_single_peak",
-                              n_support = n_spanning),
+    "gene_conversion"    = list(call = "NCO_GC", reason = edge_type, n_support = n_spanning),
+    "crossover"          = list(call = "CO_GC",  reason = edge_type, n_support = n_spanning),
+    "internal_crossover" = list(call = "CO_GC",  reason = edge_type, n_support = n_spanning),
+    "binary"             = list(call = "AMBIGUOUS", reason = "binary_single_peak",
+                                 n_support = n_spanning),
     "independent_events" = list(call = "AMBIGUOUS", reason = "independent_reads",
                                  n_support = n_spanning),
     "ambiguous"       = list(call = "AMBIGUOUS", reason = "mixed_pattern",
@@ -583,9 +607,17 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 #  HELPER PREDICATES
 # =============================================================================
 
-.is_telomeric <- function(token, chr_len, tel_tol) {
+# TEL proximity is measured relative to the SNP-bounded ends of the chain
+# (stored as chain$snp_start / chain$snp_end by build_raw_chains).  Falls
+# back to positional 1 / chr_len for manually constructed test chains.
+.is_telomeric <- function(token, chain, params) {
   if (is.na(token$start) || is.na(token$end)) return(FALSE)
-  token$start <= tel_tol || token$end >= (chr_len - tel_tol)
+  ref_start <- if (!is.null(chain$snp_start) && !is.na(chain$snp_start))
+    chain$snp_start else 1L
+  ref_end   <- if (!is.null(chain$snp_end)   && !is.na(chain$snp_end))
+    chain$snp_end   else chain$chr_len
+  token$start <= ref_start + params$tel_tol_bp ||
+  token$end   >= ref_end   - params$tel_tol_bp
 }
 
 .opp_state <- function(state) {
@@ -731,13 +763,26 @@ rule_terminal_loh <- list(
     NULL
   },
   fire_fn = function(m, chain, params) {
-    tract <- classify_tract(m$peak, params)
-    call  <- if (tract$call %in% c("NCO_GC", "CO_GC")) "TERMINAL_LOH" else
-               paste0("AMBIGUOUS(", tract$reason, ")")
+    edge_type  <- m$peak$best_edge_type %||% m$peak$edge_type
+    n_raw      <- m$peak$n_spanning %||% NA_integer_
+    n_spanning <- if (is.null(n_raw) || is.na(n_raw)) NA_integer_ else as.integer(n_raw)
+    has_count  <- !is.na(n_spanning) && n_spanning > 0L
+
+    # Terminal LOH has a single haplotype boundary: the expected peak pattern
+    # is "binary" (one clean switch, e.g. REF→ALT).  gene_conversion and
+    # crossover patterns imply internal events, not a terminal boundary.
+    call <- if (has_count && n_spanning < params$min_span) {
+      "AMBIGUOUS(low_coverage)"
+    } else if (!is.null(edge_type) && !is.na(edge_type) && edge_type == "binary") {
+      "TERMINAL_LOH"
+    } else {
+      paste0("AMBIGUOUS(terminal_non_binary_peak:", edge_type %||% "NA", ")")
+    }
+
     ev <- .make_event(call, chain$chrom, list(m$f_tok),
                       evidence_peaks = list(m$peak),
-                      n_support = tract$n_support,
-                      notes = paste0("terminal; edge=", tract$reason))
+                      n_support = n_spanning,
+                      notes = paste0("terminal; edge=", edge_type %||% "NA"))
     list(event = ev, rewrite = NULL,
          claims = list(peak = m$peak, loh = m$f_tok))
   }
@@ -758,7 +803,7 @@ rule_tco_captured_tco <- list(
     if (!.is_non_fixed(htk) || ftk$type != "F" || fbar$type != "F") return(NULL)
     if (is.na(ftk$state) || is.na(fbar$state)) return(NULL)
     if (fbar$state != .opp_state(ftk$state)) return(NULL)
-    if (!.is_telomeric(fbar, chain$chr_len, params$tel_tol_bp)) return(NULL)
+    if (!.is_telomeric(fbar, chain, params)) return(NULL)
     pk_l <- ftk$peak_left  %||% htk$peak_right
     pk_r <- ftk$peak_right %||% fbar$peak_left
     if (is.null(pk_l) || is.null(pk_r)) return(NULL)
@@ -1000,16 +1045,168 @@ rule_subres_tract <- list(
   }
 )
 
-# The ordered rule set — priority highest to lowest
+# =============================================================================
+#  INTERSTITIAL RULES (new peak model)
+# =============================================================================
+
+# ── Helpers: skip G tokens to reach nearest non-fixed context ─────────────────
+
+# Walk left through G tokens to find the first non-fixed (H or G) token that
+# has meaningful content.  G tokens skip over because build_raw_chains never
+# calls .attach_peaks on them — peaks always land on H or F.  Stops (returns
+# NULL) when TEL or another F is reached before any H is found.
+.nearest_nonfixed_left <- function(tokens, i) {
+  j <- i - 1L
+  while (j >= 1L && tokens[[j]]$type == "G") j <- j - 1L
+  if (j >= 1L && .is_non_fixed(tokens[[j]])) j else NULL
+}
+
+.nearest_nonfixed_right <- function(tokens, i) {
+  n <- length(tokens)
+  j <- i + 1L
+  while (j <= n && tokens[[j]]$type == "G") j <- j + 1L
+  if (j <= n && .is_non_fixed(tokens[[j]])) j else NULL
+}
+
+# Left junction peak for an F token: the peak that marks the H→F transition.
+# Priority: F$peak_left > left_ctx$peak_right > left_ctx$peak_over (left of F)
+#           > F$peak_over (if its snp_pos is left of F.start)
+.left_junction_peak <- function(f_tok, left_ctx) {
+  if (!is.null(f_tok$peak_left)) return(f_tok$peak_left)
+  if (!is.null(left_ctx$peak_right)) return(left_ctx$peak_right)
+  pk <- left_ctx$peak_over
+  if (!is.null(pk)) {
+    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    if (!is.na(pos) && pos < f_tok$start) return(pk)
+  }
+  pk <- f_tok$peak_over
+  if (!is.null(pk)) {
+    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    if (!is.na(pos) && pos < f_tok$start) return(pk)
+  }
+  NULL
+}
+
+# Right junction peak for an F token: the peak that marks the F→H transition.
+# Priority: F$peak_right > F$peak_over (right of F.end) > right_ctx$peak_left
+#           > right_ctx$peak_over (right of F.end)
+.right_junction_peak <- function(f_tok, right_ctx) {
+  if (!is.null(f_tok$peak_right)) return(f_tok$peak_right)
+  pk <- f_tok$peak_over
+  if (!is.null(pk)) {
+    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    if (!is.na(pos) && pos > f_tok$end) return(pk)
+  }
+  if (!is.null(right_ctx$peak_left)) return(right_ctx$peak_left)
+  pk <- right_ctx$peak_over
+  if (!is.null(pk)) {
+    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    if (!is.na(pos) && pos > f_tok$end) return(pk)
+  }
+  NULL
+}
+
+# ── Rule R10: Direct classification from peak edge type ───────────────────────
+# Fires when an F token has a gene_conversion, crossover, or internal_crossover
+# peak directly associated with it.  These peak types are self-classifying:
+# gene_conversion → NCO_GC; crossover / internal_crossover → CO_GC.
+# Uses classify_tract() to preserve the min_span coverage gate.
+rule_peak_direct <- list(
+  id = "R10_peak_direct",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+    pk <- .best_peak(tok)
+    if (is.null(pk)) return(NULL)
+    et <- pk$best_edge_type %||% pk$edge_type
+    if (is.null(et) || is.na(et)) return(NULL)
+    if (!et %in% c("gene_conversion", "crossover", "internal_crossover")) return(NULL)
+    list(span = c(i, i), f_tok = tok, pk = pk)
+  },
+  fire_fn = function(m, chain, params) {
+    tract <- classify_tract(m$pk, params)
+    call  <- switch(tract$call,
+      NCO_GC = "NCO_GC",
+      CO_GC  = "CO_GC",
+      paste0("AMBIGUOUS(", tract$reason, ")")
+    )
+    ev <- .make_event(call, chain$chrom, list(m$f_tok),
+                      evidence_peaks = list(m$pk),
+                      n_support = tract$n_support,
+                      notes = paste0("peak_type=",
+                                     m$pk$best_edge_type %||% m$pk$edge_type))
+    list(event = ev, rewrite = NULL,
+         claims = list(peak = list(m$pk), loh = m$f_tok))
+  }
+)
+
+# ── Rule R11: Two binary flanking peaks (H-[F]-H, G-transparent) ──────────────
+# Fires when an interstitial F is bracketed by a binary peak at each junction.
+# G gaps between H and F are treated as transparent (the rule skips them).
+# The left/right binary pair is classified via classify_two_binary_junction(),
+# which reads pair_edge_type from compute_peak_pairs() to distinguish NCO/CO.
+rule_two_binary_flanking <- list(
+  id = "R11_two_binary_flanking",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+
+    li <- .nearest_nonfixed_left(tokens, i)
+    ri <- .nearest_nonfixed_right(tokens, i)
+    if (is.null(li) || is.null(ri)) return(NULL)
+
+    left_ctx  <- tokens[[li]]
+    right_ctx <- tokens[[ri]]
+
+    pk_l <- .left_junction_peak(tok, left_ctx)
+    pk_r <- .right_junction_peak(tok, right_ctx)
+    if (is.null(pk_l) || is.null(pk_r)) return(NULL)
+
+    # Both junction peaks must be binary
+    et_l <- pk_l$best_edge_type %||% pk_l$edge_type
+    et_r <- pk_r$best_edge_type %||% pk_r$edge_type
+    if (!isTRUE(et_l == "binary") || !isTRUE(et_r == "binary")) return(NULL)
+
+    # Guard: don't count the same peak twice
+    pos_l <- pk_l$fused_pos_bp %||% pk_l$snp_pos
+    pos_r <- pk_r$fused_pos_bp %||% pk_r$snp_pos
+    if (!is.na(pos_l) && !is.na(pos_r) && pos_l == pos_r) return(NULL)
+
+    list(span = c(i, ri), f_tok = tok, l_tok = left_ctx, r_tok = right_ctx,
+         pk_l = pk_l, pk_r = pk_r)
+  },
+  fire_fn = function(m, chain, params) {
+    tract <- classify_two_binary_junction(m$pk_l, m$pk_r, m$f_tok$state, params)
+    call  <- switch(tract$call,
+      NCO_GC       = "NCO_GC",
+      NCO_GC_LARGE = "NCO_GC",
+      CO_GC        = "CO_GC",
+      paste0("AMBIGUOUS(", tract$reason, ")")
+    )
+    ev <- .make_event(call, chain$chrom,
+                      list(m$l_tok, m$f_tok, m$r_tok),
+                      evidence_peaks = list(m$pk_l, m$pk_r),
+                      n_support = tract$n_support,
+                      notes = paste0("two_binary_flanking; state=", m$f_tok$state))
+    list(event = ev, rewrite = NULL,
+         claims = list(peak = list(m$pk_l, m$pk_r), loh = list(m$f_tok)))
+  }
+)
+
+# The ordered rule set — priority highest to lowest.
+# R10 and R11 are the new interstitial rules. Old R03-R09 remain disabled
+# pending further redesign (R06 opp_sandwich, R07 double_gc, R08/R09).
 MOTIF_RULES <- list(
-  rule_terminal_deletion,
-  rule_terminal_loh,
-  rule_tco_captured_tco,
-  rule_double_gc,
-  rule_opp_sandwich,
-  rule_het_bounded,
-  rule_crossover_no_tract,
-  rule_subres_tract
+  rule_terminal_deletion,       # R01
+  rule_terminal_loh,            # R02
+  rule_peak_direct,             # R10 — gene_conversion / crossover / internal_crossover
+  rule_two_binary_flanking      # R11 — two binary peaks flanking H-[F]-H
+  # rule_tco_captured_tco,      # R03 — disabled
+  # rule_het_bounded,           # R04 — disabled (replaced by R10/R11)
+  # rule_opp_sandwich,          # R06 — disabled
+  # rule_double_gc,             # R07 — disabled
+  # rule_crossover_no_tract,    # R08 — disabled
+  # rule_subres_tract           # R09 — disabled
 )
 
 # =============================================================================
@@ -1090,7 +1287,7 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
 # =============================================================================
 
 reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
-                      snp_peaks = NULL) {
+                      snp_peaks = NULL, params = default_chain_params()) {
 
   all_events <- unlist(lapply(scan_results, `[[`, "events"), recursive = FALSE)
 
@@ -1158,12 +1355,28 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     }
   }
 
-  # Emit UNCATEGORIZED events for anything left over
+  # Emit UNCATEGORIZED / POSSIBLE_GC events for anything left over.
+  # Fixed tokens with very few SNPs (< min_snps_for_peak) may be too short
+  # for chimeric reads to generate a detectable peak even when a real gene
+  # conversion occurred.  Flag these separately so the user knows to
+  # consider lowering the Minimum Run Length parameter.
   uncat_events <- lapply(unclaimed_loh, function(u) {
-    list(event_class = "UNCATEGORIZED_LOH", chrom = u$chrom,
-         start = u$start, end = u$end, length_bp = u$end - u$start,
-         n_support = NA_integer_, peak_edge_types = NA_character_,
-         notes = paste0("state=", u$state), tokens = list())
+    n <- u$n_snps %||% NA_integer_
+    is_small <- !is.na(n) && n < params$min_snps_for_peak
+    if (is_small) {
+      list(event_class = "POSSIBLE_GC", chrom = u$chrom,
+           start = u$start, end = u$end, length_bp = u$end - u$start,
+           n_support = NA_integer_, peak_edge_types = NA_character_,
+           notes = paste0("state=", u$state, "; n_snps=", n,
+                          " < min_snps_for_peak (", params$min_snps_for_peak,
+                          "); consider lowering the Minimum Run Length parameter"),
+           tokens = list())
+    } else {
+      list(event_class = "UNCATEGORIZED_LOH", chrom = u$chrom,
+           start = u$start, end = u$end, length_bp = u$end - u$start,
+           n_support = NA_integer_, peak_edge_types = NA_character_,
+           notes = paste0("state=", u$state), tokens = list())
+    }
   })
   uncat_peak_events <- lapply(unclaimed_peaks, function(u) {
     list(event_class = "UNCATEGORIZED_PEAK", chrom = u$chrom,
@@ -1194,11 +1407,9 @@ build_event_table <- function(events) {
     ))
 
   rows <- lapply(events, function(ev) {
-    confidence <- if (grepl("^AMBIGUOUS|^UNCATEGORIZED", ev$event_class))
-      "review"
-    else if (ev$event_class %in% c("NCO_GC", "CO_GC", "TERMINAL_LOH",
-                                    "CROSSOVER_NO_TRACT", "DOUBLE_GC",
-                                    "TCO_CAPTURED_TCO"))
+    confidence <- if (ev$event_class %in% c("NCO_GC", "CO_GC", "TERMINAL_LOH",
+                                             "CROSSOVER_NO_TRACT", "DOUBLE_GC",
+                                             "TCO_CAPTURED_TCO"))
       "high"
     else
       "review"
@@ -1268,7 +1479,8 @@ run_chain_analysis <- function(loh_segments,
   }
 
   message("  [chain] Reconciling unclaimed tokens ...")
-  rec <- reconcile(scan_results, chains, fused_peaks, peak_pairs, snp_peaks)
+  rec <- reconcile(scan_results, chains, fused_peaks, peak_pairs, snp_peaks,
+                   params = params)
 
   event_table <- build_event_table(rec$events)
 

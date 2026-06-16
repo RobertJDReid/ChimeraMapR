@@ -355,12 +355,15 @@ expect("chain starts and ends with TEL sentinels", {
   types[1] == "TEL" && types[length(types)] == "TEL"
 })
 
-expect("gap before first segment becomes a G token", {
+expect("left TEL absorbs leading unscored region (no G before first segment)", {
+  # TEL sentinels are now placed at min/max SNP positions so that the first
+  # and last called segments are directly adjacent to their sentinel.
   segs <- loh_rbind(make_loh_seg("chrI", 50000L, 150000L, "REF_fixed"))
   cs   <- make_chr_span("chrI", 500000L)
   ch   <- build_raw_chains(segs, cs, params)$chrI
-  types <- sapply(ch$tokens, `[[`, "type")
-  "G" %in% types
+  toks <- ch$tokens
+  toks[[1]]$type == "TEL" && toks[[1]]$end == 49999L &&
+  toks[[2]]$type == "F"   # F is directly adjacent, no G between them
 })
 
 expect("peak attached to overlapping F token as peak_over", {
@@ -524,9 +527,10 @@ section("Full pipeline: TERMINAL_LOH")
     make_loh_seg("chrI",      1L, 150000L, "REF_fixed", n_snps = 300L),
     make_loh_seg("chrI", 150001L, 500000L, "HET",       n_snps = 700L)
   )
+  # Terminal LOH boundary is a single haplotype switch -> "binary" peak
   pks <- make_peak("chrI", pos = 148000L,
                    start = 145000L, end = 151000L,
-                   edge_type = "gene_conversion")
+                   edge_type = "binary")
   cs  <- make_chr_span("chrI", 500000L)
 
   # Use a depth_drop threshold that the segment's normal depth won't trigger
@@ -538,6 +542,15 @@ section("Full pipeline: TERMINAL_LOH")
 
   expect("TERMINAL_LOH event is called", {
     "TERMINAL_LOH" %in% event_classes(res)
+  })
+
+  expect("gene_conversion peak at terminal position -> AMBIGUOUS", {
+    pks_gc <- make_peak("chrI", pos = 148000L,
+                        start = 145000L, end = 151000L,
+                        edge_type = "gene_conversion")
+    res_gc <- run_chain_analysis(loh_segments = loh, fused_peaks = pks_gc,
+                                 chr_span = cs, params = p2)
+    any(grepl("AMBIGUOUS", event_classes(res_gc)))
   })
 }
 
@@ -704,7 +717,7 @@ section("Multi-chromosome run")
   pks <- peaks_rbind(
     make_peak("chrI",  pos = 150000L, edge_type = "gene_conversion"),
     make_peak("chrII", pos = 148000L, start = 145000L, end = 151000L,
-              edge_type = "gene_conversion")
+              edge_type = "binary")   # terminal boundary -> binary peak
   )
   cs <- make_chr_span(c("chrI","chrII"), c(500000L, 600000L))
 
@@ -899,12 +912,17 @@ expect("CO_GC fires when F flanked by G tokens", {
   "CO_GC" %in% event_classes(res)
 })
 
-expect("TERMINAL_LOH fires when F starts near telomere with G on internal side", {
+expect("TERMINAL_LOH fires when F starts near telomere with non-fixed on internal side", {
+  # TEL sentinels are placed at min/max SNP positions, so a HET (or G) segment
+  # is needed on the non-terminal side to serve as the non-fixed context that
+  # distinguishes TERMINAL_LOH from a full-chromosome LOH.
   loh <- loh_rbind(
-    make_loh_seg("chrI", 1L, 150000L, "REF_fixed", n_snps = 300L)
+    make_loh_seg("chrI",      1L, 150000L, "REF_fixed", n_snps = 300L),
+    make_loh_seg("chrI", 155000L, 400000L, "HET",       n_snps = 500L)
   )
+  # Terminal boundary is a single haplotype switch -> binary peak
   pks <- make_peak("chrI", pos = 148000L, start = 145000L, end = 151000L,
-                   edge_type = "gene_conversion")
+                   edge_type = "binary")
   cs  <- make_chr_span("chrI", 500000L)
   p2  <- default_chain_params(); p2$depth_drop <- 0.3
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
@@ -938,6 +956,204 @@ expect("CROSSOVER_NO_TRACT fires on adjacent F tokens with no intervening HET", 
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
                              chr_span = cs, params = params)
   "CROSSOVER_NO_TRACT" %in% event_classes(res)
+})
+
+# =============================================================================
+#  SECTION 20 — R10: PEAK-DIRECT CLASSIFICATION
+#
+#  gene_conversion / crossover / internal_crossover peaks directly over F
+#  should classify it as NCO_GC or CO_GC without needing flanking context.
+# =============================================================================
+section("R10: peak-direct classification")
+
+expect("gene_conversion peak over F -> NCO_GC", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 150000L, edge_type = "gene_conversion")
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "NCO_GC" %in% event_classes(res)
+})
+
+expect("crossover peak over F -> CO_GC", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "ALT_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 150000L, edge_type = "crossover")
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "CO_GC" %in% event_classes(res)
+})
+
+expect("internal_crossover peak over F -> CO_GC", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 100000L, "REF_fixed", n_snps = 1L),
+    make_loh_seg("chrI", 100001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 100000L, start = 99800L, end = 100200L,
+                   edge_type = "internal_crossover")
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "CO_GC" %in% event_classes(res)
+})
+
+expect("binary peak over F does NOT trigger R10 (falls through to R11 or uncategorized)", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 150000L, edge_type = "binary")
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  # R10 should NOT fire; event should be UNCATEGORIZED or AMBIGUOUS, not NCO_GC/CO_GC
+  !any(c("NCO_GC","CO_GC") %in% event_classes(res))
+})
+
+expect("gene_conversion peak over small F (1 SNP) upgrades from POSSIBLE_GC to NCO_GC", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 100000L, "REF_fixed", n_snps = 1L),
+    make_loh_seg("chrI", 100001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 100000L, start = 99800L, end = 100200L,
+                   edge_type = "gene_conversion")
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "NCO_GC" %in% event_classes(res)
+})
+
+expect("gene_conversion peak with low spanning reads -> AMBIGUOUS (coverage gate preserved)", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 150000L, edge_type = "gene_conversion")
+  prs <- make_pair("chrI", pos_a = 100000L, pos_b = 200000L,
+                   edge_type = "gene_conversion", n_spanning = 1L)
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             peak_pairs = prs, chr_span = cs, params = params)
+  any(grepl("AMBIGUOUS", event_classes(res)))
+})
+
+# =============================================================================
+#  SECTION 21 — R11: TWO BINARY FLANKING PEAKS
+#
+#  An F token with binary peaks at both the H→F and F→H junctions, each
+#  found by scanning transparent G gaps.  pair_edge_type drives NCO/CO.
+# =============================================================================
+section("R11: two binary flanking peaks")
+
+expect("two binary flanking peaks + crossover pair -> CO_GC", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 95000L,  edge_type = "binary",
+              start = 92000L, end = 98000L, fusion_group = 1L),
+    make_peak("chrI", pos = 205000L, edge_type = "binary",
+              start = 202000L, end = 208000L, fusion_group = 2L)
+  )
+  prs <- make_pair("chrI", pos_a = 95000L, pos_b = 205000L,
+                   edge_type = "crossover", n_spanning = 6L)
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             peak_pairs = prs, chr_span = cs, params = params)
+  any(grepl("CO_GC", event_classes(res)))
+})
+
+expect("two binary flanking peaks + gene_conversion pair -> NCO_GC", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "ALT_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 95000L,  edge_type = "binary",
+              start = 92000L, end = 98000L, fusion_group = 1L),
+    make_peak("chrI", pos = 205000L, edge_type = "binary",
+              start = 202000L, end = 208000L, fusion_group = 2L)
+  )
+  prs <- make_pair("chrI", pos_a = 95000L, pos_b = 205000L,
+                   edge_type = "gene_conversion", n_spanning = 6L)
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             peak_pairs = prs, chr_span = cs, params = params)
+  any(grepl("NCO_GC", event_classes(res)))
+})
+
+expect("two binary peaks with no pair data -> AMBIGUOUS (not NCO/CO)", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 95000L,  edge_type = "binary",
+              start = 92000L, end = 98000L, fusion_group = 1L),
+    make_peak("chrI", pos = 205000L, edge_type = "binary",
+              start = 202000L, end = 208000L, fusion_group = 2L)
+  )
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)  # no peak_pairs
+  any(grepl("AMBIGUOUS", event_classes(res)))
+})
+
+expect("R11 finds junction peaks across G gaps (real-data layout)", {
+  # HET segments flank the F token with coordinate G gaps between them.
+  # Peaks attach to H (not G) because .attach_peaks is called on H/F tokens
+  # but not on gap tokens.  Peaks should be inside H but close to the H-G
+  # boundary so they are found as left/right junction peaks by R11.
+  loh <- loh_rbind(
+    make_loh_seg("chrI",  50000L,  89999L, "HET",       n_snps = 100L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 210001L, 500000L, "HET",       n_snps = 300L)
+  )
+  # Peaks near the H boundaries — inside H, reflecting the haplotype switch
+  # position at the H→F junction that real chimera reads detect.
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 85000L, edge_type = "binary",
+              start = 82000L, end = 88000L, fusion_group = 1L),   # inside H(50000-89999)
+    make_peak("chrI", pos = 215000L, edge_type = "binary",
+              start = 212000L, end = 218000L, fusion_group = 2L)  # inside H(210001-500000)
+  )
+  prs <- make_pair("chrI", pos_a = 85000L, pos_b = 215000L,
+                   edge_type = "gene_conversion", n_spanning = 5L)
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             peak_pairs = prs, chr_span = cs, params = params)
+  "NCO_GC" %in% event_classes(res)
+})
+
+expect("single binary peak (only left junction) does NOT trigger R11", {
+  # F with a peak on the left side but nothing on the right
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 95000L, edge_type = "binary",
+                   start = 92000L, end = 98000L)
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  !any(c("NCO_GC","CO_GC") %in% event_classes(res))
 })
 
 # =============================================================================
