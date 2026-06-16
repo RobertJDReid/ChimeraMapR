@@ -355,6 +355,13 @@ build_raw_chains <- function(loh_segments, chr_span, params,
 
 canonicalise <- function(chain, params) {
   tokens <- chain$tokens
+
+  # Zero-SNP gaps are pure coordinate fill (unscored space between adjacent
+  # segments). They carry no allele data and no peak attachments, so they can
+  # be dropped before the merge rules run.  This makes terminal F tokens
+  # directly adjacent to TEL sentinels, allowing R01/R02 to match.
+  tokens <- Filter(function(t) !(t$type == "G" && isTRUE(t$n_snps == 0L)), tokens)
+
   changed <- TRUE
 
   while (changed) {
