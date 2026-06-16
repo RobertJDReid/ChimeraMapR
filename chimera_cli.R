@@ -428,6 +428,48 @@ if (opts[["chain-all"]]) {
   cat(sprintf("  LOH SNP table    → %s (%d rows)\n",  step0_snp, nrow(loh_result$snp_table)))
   cat(sprintf("  LOH segments     → %s (%d segments)\n\n", step0_seg, nrow(loh_segs)))
 
+  # ── Step 0b: Haplotype labeling ───────────────────────────────────────────────
+  # classify_peak_haplotype() is defined in chimera_functions.R.
+  # The chain rules require haplotype_label on each snp_peaks row so that
+  # best_edge_type can be resolved; without this all events come out AMBIGUOUS.
+  cat("[chain] Step 0b: Labeling peak haplotypes ...\n")
+  sp <- results$snp_peaks
+  if (!is.null(sp) && nrow(sp) > 0 && !is.null(results$transition_pos)) {
+    sp[, .row_idx := .I]
+    hap_rows <- list()
+    for (chr_name in unique(as.character(sp$chrom))) {
+      chr_peaks <- sp[as.character(chrom) == chr_name & !is.na(snp_pos)][order(snp_pos)]
+      for (pk_i in seq_len(nrow(chr_peaks))) {
+        pk <- chr_peaks[pk_i]
+        touching_ids <- results$transition_pos[
+          as.character(chrom) == chr_name &
+            pos >= pk$peak_start & pos <= pk$peak_end,
+          unique(read_id)
+        ]
+        if (length(touching_ids) == 0) next
+        hap <- classify_peak_haplotype(
+          pk            = pk,
+          chr_name      = chr_name,
+          rt_df         = results$rt_df,
+          touching_ids  = touching_ids,
+          zone_min_snps = as.integer(opts[["min-run"]])
+        )
+        hap_rows[[length(hap_rows) + 1L]] <- data.table::data.table(
+          .row_idx        = pk$.row_idx,
+          haplotype_label = hap$label
+        )
+      }
+    }
+    if (length(hap_rows) > 0) {
+      hap_dt <- data.table::rbindlist(hap_rows)
+      sp <- merge(sp, hap_dt, by = ".row_idx", all.x = TRUE)
+    }
+    sp[, .row_idx := NULL]
+    results$snp_peaks <- sp
+    n_labeled <- if (length(hap_rows) > 0) nrow(data.table::rbindlist(hap_rows)) else 0L
+    cat(sprintf("  Labeled %d / %d peaks\n\n", n_labeled, nrow(sp)))
+  }
+
   # ── Step 1: Build raw chains ──────────────────────────────────────────────────
   cat("[chain] Step 1: Building raw chains ...\n")
   raw_chains <- build_raw_chains(
