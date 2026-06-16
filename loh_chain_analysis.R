@@ -1193,12 +1193,74 @@ rule_two_binary_flanking <- list(
   }
 )
 
+# ── Rule R12: LOH-crossover (large interstitial LOH flanked by chimeric peaks) ─
+# Fires when an F token with a large LOH is flanked by two junction peaks that
+# share a pair record with edge_type = "crossover" from the LOH-crossover probing
+# in compute_peak_pairs().  This is the fallback when R10 cannot fire because the
+# flanking peaks' windows do not overlap the F token directly.
+rule_loh_crossover <- list(
+  id = "R12_loh_crossover",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+
+    li <- .nearest_nonfixed_left(tokens, i)
+    ri <- .nearest_nonfixed_right(tokens, i)
+    if (is.null(li) || is.null(ri)) return(NULL)
+
+    left_ctx  <- tokens[[li]]
+    right_ctx <- tokens[[ri]]
+
+    pk_l <- .left_junction_peak(tok, left_ctx)
+    pk_r <- .right_junction_peak(tok, right_ctx)
+    if (is.null(pk_l) || is.null(pk_r)) return(NULL)
+
+    # Both junction peaks must share a pair_edge_type = "crossover" record.
+    pair_et_l <- pk_l$pair_edge_type
+    pair_et_r <- pk_r$pair_edge_type
+    if (!isTRUE(pair_et_l == "crossover") && !isTRUE(pair_et_r == "crossover"))
+      return(NULL)
+
+    # Guard: don't match the same peak on both sides.
+    pos_l <- pk_l$fused_pos_bp %||% pk_l$snp_pos
+    pos_r <- pk_r$fused_pos_bp %||% pk_r$snp_pos
+    if (!is.na(pos_l) && !is.na(pos_r) && pos_l == pos_r) return(NULL)
+
+    list(span = c(i, ri), f_tok = tok, l_tok = left_ctx, r_tok = right_ctx,
+         pk_l = pk_l, pk_r = pk_r)
+  },
+  fire_fn = function(m, chain, params) {
+    # n_spanning: both peaks share the same pair record, so avoid double-counting.
+    ns_raw <- m$pk_l$n_spanning %||% m$pk_r$n_spanning %||% NA_integer_
+    ns     <- if (is.null(ns_raw) || is.na(ns_raw)) NA_integer_ else as.integer(ns_raw)
+
+    # Spanning a large LOH requires exceptional read length; accept n >= 2
+    # (half of the default min_span floor of 3) because the fixed LOH allele
+    # on the far side supplies the complementary haplotype evidence.
+    loh_min_span <- max(2L, params$min_span - 1L)
+    has_count <- !is.na(ns) && ns > 0L
+    call <- if (has_count && ns < loh_min_span)
+      paste0("AMBIGUOUS(low_coverage)")
+    else
+      "CO_GC"
+
+    ev <- .make_event(call, chain$chrom,
+                      list(m$l_tok, m$f_tok, m$r_tok),
+                      evidence_peaks = list(m$pk_l, m$pk_r),
+                      n_support = ns,
+                      notes = paste0("loh_crossover; state=", m$f_tok$state))
+    list(event = ev, rewrite = NULL,
+         claims = list(peak = list(m$pk_l, m$pk_r), loh = list(m$f_tok)))
+  }
+)
+
 # The ordered rule set — priority highest to lowest.
-# R10 and R11 are the new interstitial rules. Old R03-R09 remain disabled
+# R10, R11, R12 are the interstitial rules. Old R03-R09 remain disabled
 # pending further redesign (R06 opp_sandwich, R07 double_gc, R08/R09).
 MOTIF_RULES <- list(
   rule_terminal_deletion,       # R01
   rule_terminal_loh,            # R02
+  rule_loh_crossover,           # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,             # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking      # R11 — two binary peaks flanking H-[F]-H
   # rule_tco_captured_tco,      # R03 — disabled

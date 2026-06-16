@@ -1266,6 +1266,67 @@ gap_has_loh <- function(loh_segments, chr_name, pos_start, pos_end) {
   )
 }
 
+# gap_loh_state()
+#   Returns the loh_state ("REF_fixed" or "ALT_fixed") of the first fixed
+#   segment that overlaps (pos_start, pos_end), or NA if none.
+# ---------------------------------------------------------------------------
+gap_loh_state <- function(loh_segments, chr_name, pos_start, pos_end) {
+  if (is.null(loh_segments) || nrow(loh_segments) == 0) return(NA_character_)
+  idx <- which(
+    as.character(loh_segments$chrom) == chr_name &
+    loh_segments$loh_state %in% c("REF_fixed", "ALT_fixed") &
+    loh_segments$start < pos_end &
+    loh_segments$end   > pos_start
+  )
+  if (length(idx) == 0) return(NA_character_)
+  loh_segments$loh_state[idx[1]]
+}
+
+# ---------------------------------------------------------------------------
+# classify_loh_crossover_edge()
+#   LOH-aware two-zone edge classifier for the LOH-crossover probing path.
+#
+#   state_list: data.frame with columns state_L and state_R (state_M is NA).
+#   loh_state:  "REF_fixed" or "ALT_fixed" — the fixed state of the LOH in gap.
+#
+#   Key difference from classify_edge_type(): a single consistent L-R direction
+#   (e.g., all ALT-REF with a REF_fixed LOH) is accepted as crossover evidence
+#   because the LOH state itself is the complementary observation.  When
+#   classify_edge_type() requires both ALT-REF and REF-ALT patterns, it misses
+#   cases where only one crossing direction is observed due to read-length limits.
+# ---------------------------------------------------------------------------
+classify_loh_crossover_edge <- function(state_list, loh_state) {
+  loh_allele <- if (isTRUE(loh_state == "REF_fixed")) "REF" else "ALT"
+  het_allele <- if (isTRUE(loh_state == "REF_fixed")) "ALT" else "REF"
+
+  classifiable <- state_list[
+    !is.na(state_list$state_L) & !is.na(state_list$state_R), ]
+  if (nrow(classifiable) == 0) return("unresolvable")
+
+  lr_patterns <- paste(classifiable$state_L, classifiable$state_R, sep = "-")
+  unique_pats <- unique(lr_patterns)
+
+  # Both crossing directions present
+  co_l_pat <- paste(het_allele, loh_allele, sep = "-")  # e.g. ALT-REF
+  co_r_pat <- paste(loh_allele, het_allele, sep = "-")  # e.g. REF-ALT
+  if (length(unique_pats) == 2 && all(sort(unique_pats) == sort(c(co_l_pat, co_r_pat))))
+    return("crossover")
+
+  # Only one crossing direction seen — accepted as CO because the LOH allele
+  # on the far side provides the complementary evidence.
+  if (length(unique_pats) == 1 &&
+      unique_pats[1] %in% c(co_l_pat, co_r_pat))
+    return("crossover")
+
+  # Same haplotype on both sides — consistent with gene conversion
+  same_pats <- c(paste(loh_allele, loh_allele, sep = "-"),
+                 paste(het_allele, het_allele, sep = "-"))
+  if (all(unique_pats %in% same_pats))
+    return("gene_conversion")
+
+  "ambiguous"
+}
+
 # ---------------------------------------------------------------------------
 # peak_is_fusion_eligible()
 # ---------------------------------------------------------------------------
@@ -1367,13 +1428,19 @@ compute_peak_pairs <- function(snp_peaks,
       if (is.na(pk_a$snp_pos) || is.na(pk_b$snp_pos)) next
 
       gap_bp <- pk_b$snp_pos - pk_a$snp_pos
-      if (is.na(gap_bp) || gap_bp > median_read_len) next
+      # Evaluate LOH in the gap before applying the read-length filter; the
+      # LOH-crossover path relaxes the filter and uses a different spanning strategy.
+      loh_in_gap <- if (!is.null(loh_segments)) {
+        gap_has_loh(loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
+      } else {
+        FALSE
+      }
 
-      n_shared <- length(intersect(reads_a, reads_b))
-      n_union  <- length(union(reads_a, reads_b))
-      jaccard  <- if (n_union > 0) n_shared / n_union else 0
+      if (!loh_in_gap && (is.na(gap_bp) || gap_bp > median_read_len)) next
 
-      spanning_ids <- intersect(reads_a, reads_b)
+      # TRUE only when the gap is genuinely too wide for the standard spanning
+      # strategy — activates the LOH-crossover probing logic.
+      is_loh_crossover_mode <- loh_in_gap && !is.na(gap_bp) && gap_bp > median_read_len
 
       zone_l_start <- -Inf
       zone_l_end   <- pk_a$snp_pos
@@ -1384,38 +1451,90 @@ compute_peak_pairs <- function(snp_peaks,
 
       n_spanning <- 0L
       edge_type  <- "unresolvable"
+      n_shared   <- 0L
+      jaccard    <- 0
 
-      if (length(spanning_ids) > 0) {
-        span_df <- rt_df[read_id %in% spanning_ids &
-                           as.character(chrom) == chr_name]
+      if (is_loh_crossover_mode) {
+        # Reads are chimeric on ONE side of the LOH only (they cross at a
+        # boundary) so intersect(reads_a, reads_b) is always empty here.
+        # Find reads from each set that physically reach the opposite zone.
+        chr_rt <- rt_df[as.character(chrom) == chr_name]
 
+        left_crossers <- if (length(reads_a) > 0)
+          chr_rt[read_id %in% reads_a,
+                 .(reaches_right = any(pos >= zone_r_start)), by = read_id
+          ][reaches_right == TRUE, read_id]
+        else character(0)
+
+        right_crossers <- if (length(reads_b) > 0)
+          chr_rt[read_id %in% reads_b,
+                 .(reaches_left = any(pos <= zone_l_end)), by = read_id
+          ][reaches_left == TRUE, read_id]
+        else character(0)
+
+        spanning_ids <- unique(c(left_crossers, right_crossers))
+        if (length(spanning_ids) == 0) next
+
+        span_df <- chr_rt[read_id %in% spanning_ids]
         if (nrow(span_df) > 0) {
           state_list <- span_df[, {
             sL <- classify_zone_state(pos, IS_REF, zone_l_start, zone_l_end, zone_min_snps)
-            sM <- classify_zone_state(pos, IS_REF, zone_m_start, zone_m_end, zone_min_snps)
             sR <- classify_zone_state(pos, IS_REF, zone_r_start, zone_r_end, zone_min_snps)
-            .(state_L = sL, state_M = sM, state_R = sR)
+            .(state_L = sL, state_M = NA_character_, state_R = sR)
           }, by = read_id]
-
           n_spanning <- nrow(state_list)
-          edge_type  <- classify_edge_type(as.data.frame(state_list))
+          # Use the LOH-aware classifier: a single consistent crossing direction
+          # is accepted as crossover evidence when the LOH allele is the
+          # complementary observation (classify_edge_type requires both).
+          loh_state_in_gap <- gap_loh_state(
+            loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
+          edge_type <- if (!is.na(loh_state_in_gap)) {
+            classify_loh_crossover_edge(as.data.frame(state_list), loh_state_in_gap)
+          } else {
+            classify_edge_type(as.data.frame(state_list))
+          }
         }
-      }
 
-      loh_in_gap <- if (!is.null(loh_segments)) {
-        gap_has_loh(loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
       } else {
-        FALSE
+        # Standard path: reads chimeric at both peaks span the gap naturally.
+        n_shared <- length(intersect(reads_a, reads_b))
+        n_union  <- length(union(reads_a, reads_b))
+        jaccard  <- if (n_union > 0) n_shared / n_union else 0
+
+        spanning_ids <- intersect(reads_a, reads_b)
+
+        if (length(spanning_ids) > 0) {
+          span_df <- rt_df[read_id %in% spanning_ids &
+                             as.character(chrom) == chr_name]
+
+          if (nrow(span_df) > 0) {
+            state_list <- span_df[, {
+              sL <- classify_zone_state(pos, IS_REF, zone_l_start, zone_l_end, zone_min_snps)
+              sM <- classify_zone_state(pos, IS_REF, zone_m_start, zone_m_end, zone_min_snps)
+              sR <- classify_zone_state(pos, IS_REF, zone_r_start, zone_r_end, zone_min_snps)
+              .(state_L = sL, state_M = sM, state_R = sR)
+            }, by = read_id]
+
+            n_spanning <- nrow(state_list)
+            edge_type  <- classify_edge_type(as.data.frame(state_list))
+          }
+        }
       }
 
       pair_key <- paste0(chr_name, "_", pk_a$peak_id, "_", pk_b$peak_id)
 
-      fusion_mode <- decide_fusion_mode(
-        edge_type         = edge_type,
-        jaccard           = jaccard,
-        jaccard_threshold = jaccard_threshold,
-        loh_in_gap        = loh_in_gap
-      )
+      # LOH-crossover boundary peaks mark the opposite ends of a CO event and
+      # must not be fused into a single peak record.
+      fusion_mode <- if (is_loh_crossover_mode) {
+        "none"
+      } else {
+        decide_fusion_mode(
+          edge_type         = edge_type,
+          jaccard           = jaccard,
+          jaccard_threshold = jaccard_threshold,
+          loh_in_gap        = loh_in_gap
+        )
+      }
 
       if (!is.null(supervised_override) && pair_key %in% supervised_override) {
         if (fusion_mode == "supervised") fusion_mode <- "automatic"
