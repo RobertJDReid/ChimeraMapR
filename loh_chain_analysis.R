@@ -1038,21 +1038,51 @@ rule_opp_sandwich <- list(
   id = "R06_opp_sandwich",
   match_fn = function(tokens, i, chain, params) {
     n <- length(tokens)
-    if (i + 2L > n) return(NULL)
-    l <- tokens[[i]]; ftk <- tokens[[i + 1L]]; r <- tokens[[i + 2L]]
-    if (l$type != "F" || ftk$type != "F" || r$type != "F") return(NULL)
+    l <- tokens[[i]]
+    if (l$type != "F") return(NULL)
+
+    # G-transparent: real loh_segments data almost never tiles a chromosome
+    # with zero gaps, so the fragment and its flanks are usually separated by
+    # small unscored G tokens rather than being strictly adjacent list
+    # entries. Skip over them to find the actual fixed neighbours.
+    fi <- .nearest_fixed_right(tokens, i)
+    if (is.null(fi)) return(NULL)
+    ri <- .nearest_fixed_right(tokens, fi)
+    if (is.null(ri)) return(NULL)
+
+    ftk <- tokens[[fi]]; r <- tokens[[ri]]
     if (is.na(l$state) || is.na(ftk$state) || is.na(r$state)) return(NULL)
     if (ftk$state == l$state || l$state != r$state) return(NULL)
     if (ftk$state != .opp_state(l$state)) return(NULL)
     # Check "small" criterion
     combined_flank <- (l$length_bp %||% 0L) + (r$length_bp %||% 0L)
     if ((ftk$length_bp %||% Inf) >= params$small_frac * combined_flank) return(NULL)
-    pk_l <- ftk$peak_left  %||% l$peak_right  %||% l$peak_over
-    pk_r <- ftk$peak_right %||% r$peak_left   %||% r$peak_over
-    pk   <- ftk$peak_over  %||% pk_l %||% pk_r
-    if (is.null(pk)) return(NULL)
-    list(span = c(i, i + 2L), f_tok = ftk, l_tok = l, r_tok = r,
-         pk = pk, pk_l = pk_l, pk_r = pk_r)
+
+    # Peak evidence must be ftk's OWN attachment, not borrowed from l/r.
+    # l/r can be large (or, after an earlier R06 rewrite, already a
+    # cumulative merge of several prior segments) — falling back to their
+    # peak_over/peak_left/peak_right grabs a peak that really belongs to
+    # l's or r's OWN far boundary (an unrelated, earlier event), not the
+    # junction adjacent to ftk. A wide fused peak window can legitimately
+    # overlap (and so get attached as peak_over to) both ftk and its
+    # immediate neighbour; trusting only ftk's own fields means that peak
+    # is claimed by ftk's event, not stolen by the flank's merge — which
+    # would otherwise starve ftk of the evidence it needs to ever fire.
+    pk_l <- ftk$peak_left
+    pk_r <- ftk$peak_right
+    pk   <- .best_peak(ftk)
+
+    # Fragments with too few SNPs to ever generate a chimeric-read peak
+    # (the same floor reconcile() already uses for POSSIBLE_GC) are still
+    # eligible to be absorbed — with no peak, there's nothing to mis-claim,
+    # and leaving a single-SNP noise blip unmerged would otherwise block
+    # the cascade from ever reaching the far telomere.
+    too_small_for_peak <- !is.na(ftk$n_snps) && ftk$n_snps < params$min_snps_for_peak
+    if (is.null(pk) && !too_small_for_peak) return(NULL)
+
+    list(span = c(i, ri), f_tok = ftk, l_tok = l, r_tok = r,
+         pk = pk, pk_l = pk_l, pk_r = pk_r,
+         too_small_for_peak = too_small_for_peak)
   },
   fire_fn = function(m, chain, params) {
     centered <- .is_roughly_centered(m$f_tok, params$center_tol) ||
@@ -1060,7 +1090,9 @@ rule_opp_sandwich <- list(
                   make_token("F", start = m$f_tok$start, end = m$f_tok$end,
                              peak_over = m$pk_l), params$center_tol)
 
-    tract <- if (!is.null(m$pk_l) && !is.null(m$pk_r))
+    tract <- if (m$too_small_for_peak && is.null(m$pk))
+      list(call = "POSSIBLE_GC", reason = "too_small_for_peak", n_support = 0L)
+    else if (!is.null(m$pk_l) && !is.null(m$pk_r))
       classify_two_binary_junction(m$pk_l, m$pk_r, m$f_tok$state, params)
     else
       classify_tract(m$pk, params)
@@ -1069,6 +1101,7 @@ rule_opp_sandwich <- list(
       NCO_GC       = "NCO_GC_in_terminal",
       NCO_GC_LARGE = "NCO_GC_in_terminal",
       CO_GC        = "CO_GC",
+      POSSIBLE_GC  = "POSSIBLE_GC",
       paste0("AMBIGUOUS(", tract$reason, ")")
     )
 
@@ -1087,10 +1120,16 @@ rule_opp_sandwich <- list(
       meta        = c(m$l_tok$meta, m$r_tok$meta)
     )
 
-    # Record the merged token in the event so reconcile() can match it in
-    # the post-rewrite chain (the originals no longer exist after the rewrite)
+    # Report only the small fragment's own span, not the merged flank's —
+    # the merged flank is a structural rewrite for later rules (R02/R02b etc)
+    # to evaluate as one unit, not part of this event. When several of these
+    # fragments are embedded in the same long run, each successive merge's
+    # l_tok is already the cumulative result of prior merges; including it
+    # here would make each fragment's reported span balloon to cover all the
+    # unrelated territory peeled before it, and would duplicate whatever
+    # event later claims the fully-merged flank.
     ev <- .make_event(call, chain$chrom,
-                      list(merged_flank, m$f_tok),
+                      list(m$f_tok),
                       evidence_peaks = Filter(Negate(is.null),
                                               list(m$pk, m$pk_l, m$pk_r)),
                       n_support = tract$n_support,
@@ -1221,6 +1260,25 @@ rule_subres_tract <- list(
   j <- i + 1L
   while (j <= n && tokens[[j]]$type == "G") j <- j + 1L
   if (j <= n && .is_non_fixed(tokens[[j]])) j else NULL
+}
+
+# Same skip-over-G traversal as .nearest_nonfixed_left/right, but looking for
+# the next FIXED (F) token instead — used by R06 (opp_sandwich) so a small
+# embedded fragment separated from its flanks by an unscored gap (the normal
+# case in real data; loh_segments rarely tiles a chromosome with zero gaps)
+# is still recognised as adjacent. Stops (returns NULL) if H or TEL is
+# reached before any F is found.
+.nearest_fixed_left <- function(tokens, i) {
+  j <- i - 1L
+  while (j >= 1L && tokens[[j]]$type == "G") j <- j - 1L
+  if (j >= 1L && tokens[[j]]$type == "F") j else NULL
+}
+
+.nearest_fixed_right <- function(tokens, i) {
+  n <- length(tokens)
+  j <- i + 1L
+  while (j <= n && tokens[[j]]$type == "G") j <- j + 1L
+  if (j <= n && tokens[[j]]$type == "F") j else NULL
 }
 
 # Left junction peak for an F token: the peak that marks the H→F transition.
@@ -1410,21 +1468,36 @@ rule_loh_crossover <- list(
 )
 
 # The ordered rule set — priority highest to lowest.
-# R10, R11, R12 are the interstitial rules. Old R03-R09 remain disabled
-# pending further redesign (R06 opp_sandwich, R07 double_gc, R08/R09).
+# R06 goes first: it matches three consecutive F tokens (small opposite-state
+# fragment sandwiched between two same-state flanks) and rewrites the chain by
+# merging the flanks into one token. Its match pattern requires tokens[[i]] to
+# be type F, which never overlaps the TEL-anchored patterns R01/R02/R02b need
+# at that position — but it DOES overlap R10/R12, which can also match a long
+# flank directly via a junction peak shared with the small fragment it
+# borders. Without R06 running first, R10 claims that junction peak for the
+# long flank itself (mislabeling it as a small NCO_GC), which both produces a
+# wrong call AND starves R06 of the peak it needs to ever fire. Putting R06
+# first lets it claim and peel the small fragment, merging the flanks; the
+# scanner backs up and re-canonicalises after every rewrite (see
+# scan_chain()), so a chain of several such fragments (e.g. a long terminal
+# CO interrupted by multiple short embedded GCs) gets peeled one at a time
+# until what remains touching the telomere is a single unified token, letting
+# R02/R02b correctly fire on the full span.
+# R10, R11, R12 are the interstitial rules. Old R03/R04/R07-R09 remain
+# disabled pending further redesign.
 MOTIF_RULES <- list(
-  rule_terminal_deletion,       # R01
-  rule_terminal_loh,            # R02
-  rule_terminal_no_peak,        # R02b — terminal F with no peak: depth decides CO_TERM vs deletion
-  rule_loh_crossover,           # R12 — crossover through large interstitial LOH (before R10)
-  rule_peak_direct,             # R10 — gene_conversion / crossover / internal_crossover
-  rule_two_binary_flanking      # R11 — two binary peaks flanking H-[F]-H
-  # rule_tco_captured_tco,      # R03 — disabled
-  # rule_het_bounded,           # R04 — disabled (replaced by R10/R11)
-  # rule_opp_sandwich,          # R06 — disabled
-  # rule_double_gc,             # R07 — disabled
-  # rule_crossover_no_tract,    # R08 — disabled
-  # rule_subres_tract           # R09 — disabled
+  rule_opp_sandwich,             # R06 — small opposite-state fragment nested in a same-state run
+  rule_terminal_deletion,        # R01
+  rule_terminal_loh,             # R02
+  rule_terminal_no_peak,         # R02b — terminal F with no peak: depth decides CO_TERM vs deletion
+  rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
+  rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
+  rule_two_binary_flanking       # R11 — two binary peaks flanking H-[F]-H
+  # rule_tco_captured_tco,       # R03 — disabled
+  # rule_het_bounded,            # R04 — disabled (replaced by R10/R11)
+  # rule_double_gc,              # R07 — disabled
+  # rule_crossover_no_tract,     # R08 — disabled
+  # rule_subres_tract            # R09 — disabled
 )
 
 # =============================================================================
