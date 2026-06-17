@@ -1013,7 +1013,8 @@ server <- function(input, output, session) {
         loh_segments       = results$loh_segments,
         jaccard_threshold  = input$jaccard_threshold,
         zone_min_snps      = zone_min_snps,
-        supervised_override = supervised_approved()
+        supervised_override = supervised_approved(),
+        homog_frac         = input$homog_frac
       )
 
       results$peak_pairs  <- fusion_res$peak_pairs
@@ -1108,7 +1109,8 @@ server <- function(input, output, session) {
         loh_segments        = results$loh_segments,
         jaccard_threshold   = input$jaccard_threshold,
         zone_min_snps       = zone_min_snps,
-        supervised_override = supervised_approved()
+        supervised_override = supervised_approved(),
+        homog_frac          = input$homog_frac
       )
       results$peak_pairs  <- fusion_res$peak_pairs
       results$fused_peaks <- fusion_res$fused_peaks

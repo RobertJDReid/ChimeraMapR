@@ -1288,6 +1288,16 @@ gap_loh_state <- function(loh_segments, chr_name, pos_start, pos_end) {
 #
 #   state_list: data.frame with columns state_L and state_R (state_M is NA).
 #   loh_state:  "REF_fixed" or "ALT_fixed" — the fixed state of the LOH in gap.
+#   homog_frac: fraction of classifiable reads that must agree on a crossing
+#               or same-state pattern to call CO / GC (default 0.80, matching
+#               default_chain_params()$homog_frac). The "left_crossers" /
+#               "right_crossers" read sets only test physical reach past the
+#               far peak, not allele state along the way — a minority of
+#               reads can have already reverted (e.g. a short, independent
+#               conversion tract within the gap) before physically reaching
+#               the far side. Requiring unanimous agreement among ALL
+#               spanning reads let that minority noise flip real CO/GC
+#               evidence to "ambiguous"; a majority-vote threshold tolerates it.
 #
 #   Key difference from classify_edge_type(): a single consistent L-R direction
 #   (e.g., all ALT-REF with a REF_fixed LOH) is accepted as crossover evidence
@@ -1295,34 +1305,27 @@ gap_loh_state <- function(loh_segments, chr_name, pos_start, pos_end) {
 #   classify_edge_type() requires both ALT-REF and REF-ALT patterns, it misses
 #   cases where only one crossing direction is observed due to read-length limits.
 # ---------------------------------------------------------------------------
-classify_loh_crossover_edge <- function(state_list, loh_state) {
+classify_loh_crossover_edge <- function(state_list, loh_state, homog_frac = 0.80) {
   loh_allele <- if (isTRUE(loh_state == "REF_fixed")) "REF" else "ALT"
   het_allele <- if (isTRUE(loh_state == "REF_fixed")) "ALT" else "REF"
 
   classifiable <- state_list[
     !is.na(state_list$state_L) & !is.na(state_list$state_R), ]
-  if (nrow(classifiable) == 0) return("unresolvable")
+  n <- nrow(classifiable)
+  if (n == 0) return("unresolvable")
 
   lr_patterns <- paste(classifiable$state_L, classifiable$state_R, sep = "-")
-  unique_pats <- unique(lr_patterns)
 
-  # Both crossing directions present
-  co_l_pat <- paste(het_allele, loh_allele, sep = "-")  # e.g. ALT-REF
-  co_r_pat <- paste(loh_allele, het_allele, sep = "-")  # e.g. REF-ALT
-  if (length(unique_pats) == 2 && all(sort(unique_pats) == sort(c(co_l_pat, co_r_pat))))
-    return("crossover")
+  co_l_pat   <- paste(het_allele, loh_allele, sep = "-")  # e.g. ALT-REF
+  co_r_pat   <- paste(loh_allele, het_allele, sep = "-")  # e.g. REF-ALT
+  same_pats  <- c(paste(loh_allele, loh_allele, sep = "-"),
+                  paste(het_allele, het_allele, sep = "-"))
 
-  # Only one crossing direction seen — accepted as CO because the LOH allele
-  # on the far side provides the complementary evidence.
-  if (length(unique_pats) == 1 &&
-      unique_pats[1] %in% c(co_l_pat, co_r_pat))
-    return("crossover")
+  n_crossing <- sum(lr_patterns %in% c(co_l_pat, co_r_pat))
+  n_same     <- sum(lr_patterns %in% same_pats)
 
-  # Same haplotype on both sides — consistent with gene conversion
-  same_pats <- c(paste(loh_allele, loh_allele, sep = "-"),
-                 paste(het_allele, het_allele, sep = "-"))
-  if (all(unique_pats %in% same_pats))
-    return("gene_conversion")
+  if (n_crossing / n >= homog_frac) return("crossover")
+  if (n_same     / n >= homog_frac) return("gene_conversion")
 
   "ambiguous"
 }
@@ -1374,7 +1377,8 @@ compute_peak_pairs <- function(snp_peaks,
                                loh_segments       = NULL,
                                jaccard_threshold  = 0.20,
                                zone_min_snps      = 2L,
-                               supervised_override = NULL) {
+                               supervised_override = NULL,
+                               homog_frac          = 0.80) {
 
   if (is.null(snp_peaks) || nrow(snp_peaks) == 0)
     return(list(peak_pairs = NULL, fused_peaks = NULL))
@@ -1409,6 +1413,16 @@ compute_peak_pairs <- function(snp_peaks,
       pk_a <- chr_peaks[j]
       pk_b <- chr_peaks[j + 1L]
 
+      # Peaks immediately flanking this pair on either side, if any. Reads can
+      # be longer than the HET-FIX-HET (or HET-FIX) span being evaluated and
+      # carry on into the NEXT recombination domain (e.g. chrI's adjacent
+      # 91.3-96.5kb and 101.6-103.7kb LOH tracts, or an independent crossover
+      # further out) — without a bound, classify_zone_state's majority vote
+      # over an unbounded zone mixes that unrelated downstream signal into
+      # this pair's haplotype call.
+      prev_pk <- if (j >= 2L) chr_peaks[j - 1L] else NULL
+      next_pk <- if (j + 2L <= nrow(chr_peaks)) chr_peaks[j + 2L] else NULL
+
       label_a <- if ("haplotype_label" %in% names(pk_a)) pk_a$haplotype_label else NA_character_
       label_b <- if ("haplotype_label" %in% names(pk_b)) pk_b$haplotype_label else NA_character_
 
@@ -1438,25 +1452,40 @@ compute_peak_pairs <- function(snp_peaks,
 
       if (!loh_in_gap && (is.na(gap_bp) || gap_bp > median_read_len)) next
 
-      # TRUE only when the gap is genuinely too wide for the standard spanning
-      # strategy — activates the LOH-crossover probing logic.
-      is_loh_crossover_mode <- loh_in_gap && !is.na(gap_bp) && gap_bp > median_read_len
+      shared_reads <- intersect(reads_a, reads_b)
 
-      zone_l_start <- -Inf
+      # Activates whenever the LOH bridges the gap and no read is chimeric at
+      # both flanking peaks at once. A read that crosses the LOH boundary only
+      # once (the expected pattern for a true crossover) can never land in
+      # both reads_a and reads_b, so intersect() is empty by construction for
+      # that read population. Gating on gap_bp > median_read_len was
+      # self-defeating: median_read_len is measured from the very reads that
+      # might cross the gap, so good long crossing reads inflate the
+      # threshold and prevent this branch from ever firing.
+      is_loh_crossover_mode <- loh_in_gap && length(shared_reads) == 0
+
+      # Clip the outer zones to the next peak on either side (exclusive of
+      # that peak's own anchor position, which belongs to its own pair's
+      # evaluation) so a long read's allele calls beyond this HET-FIX-HET
+      # span never leak into this pair's classification.
+      zone_l_start <- if (!is.null(prev_pk) && !is.na(prev_pk$snp_pos))
+        prev_pk$snp_pos + 1 else -Inf
       zone_l_end   <- pk_a$snp_pos
       zone_m_start <- pk_a$snp_pos
       zone_m_end   <- pk_b$snp_pos
       zone_r_start <- pk_b$snp_pos
-      zone_r_end   <- Inf
+      zone_r_end   <- if (!is.null(next_pk) && !is.na(next_pk$snp_pos))
+        next_pk$snp_pos - 1 else Inf
 
       n_spanning <- 0L
       edge_type  <- "unresolvable"
-      n_shared   <- 0L
+      n_shared   <- length(shared_reads)
       jaccard    <- 0
 
       if (is_loh_crossover_mode) {
         # Reads are chimeric on ONE side of the LOH only (they cross at a
-        # boundary) so intersect(reads_a, reads_b) is always empty here.
+        # boundary) so shared_reads (intersect(reads_a, reads_b)) is empty —
+        # that's the condition that put us in this branch.
         # Find reads from each set that physically reach the opposite zone.
         chr_rt <- rt_df[as.character(chrom) == chr_name]
 
@@ -1489,7 +1518,8 @@ compute_peak_pairs <- function(snp_peaks,
           loh_state_in_gap <- gap_loh_state(
             loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
           edge_type <- if (!is.na(loh_state_in_gap)) {
-            classify_loh_crossover_edge(as.data.frame(state_list), loh_state_in_gap)
+            classify_loh_crossover_edge(as.data.frame(state_list), loh_state_in_gap,
+                                        homog_frac = homog_frac)
           } else {
             classify_edge_type(as.data.frame(state_list))
           }
@@ -1497,11 +1527,10 @@ compute_peak_pairs <- function(snp_peaks,
 
       } else {
         # Standard path: reads chimeric at both peaks span the gap naturally.
-        n_shared <- length(intersect(reads_a, reads_b))
         n_union  <- length(union(reads_a, reads_b))
         jaccard  <- if (n_union > 0) n_shared / n_union else 0
 
-        spanning_ids <- intersect(reads_a, reads_b)
+        spanning_ids <- shared_reads
 
         if (length(spanning_ids) > 0) {
           span_df <- rt_df[read_id %in% spanning_ids &

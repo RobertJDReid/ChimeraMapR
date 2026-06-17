@@ -488,7 +488,8 @@ if (opts[["chain-all"]]) {
     rt_df          = results$rt_df,
     transition_pos = results$transition_pos,
     loh_segments   = loh_segs,
-    zone_min_snps  = as.integer(opts[["min-run"]])
+    zone_min_snps  = as.integer(opts[["min-run"]]),
+    homog_frac     = cp$homog_frac
   )
   n_pairs <- if (!is.null(fusion_res$peak_pairs)) nrow(fusion_res$peak_pairs) else 0L
   cat(sprintf("  Peak pairs: %d candidate pairs evaluated\n\n", n_pairs))

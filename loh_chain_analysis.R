@@ -1391,7 +1391,17 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     fp <- copy(fused_peaks)
     fp[, chrom := as.character(chrom)]
     fp[, pos_col := fused_pos_bp]
-    fp[, et_col  := if ("best_edge_type" %in% names(fp)) best_edge_type else NA_character_]
+    # best_edge_type is NA for peak classes excluded from pairing entirely
+    # (e.g. "internal_crossover" — see FUSION_HEURISTICS$excluded_peak_classes
+    # in compute_peak_pairs()), since get_peak_edge_info() never finds a pair
+    # record for them. Fall back to haplotype_label, the per-peak read
+    # classification, which IS the ground truth for these peaks — mirrors
+    # the same fallback .get_chr_peaks() applies when building chains.
+    fp[, et_col  := {
+      bet <- if ("best_edge_type"  %in% names(fp)) best_edge_type else NA_character_
+      hal <- if ("haplotype_label" %in% names(fp)) haplotype_label else NA_character_
+      ifelse(is.na(bet) | bet == "singleton", hal, bet)
+    }]
     fp[, .(chrom, pos_col, et_col)]
   } else if (!is.null(snp_peaks) && nrow(snp_peaks) > 0) {
     sp <- copy(snp_peaks)
@@ -1440,12 +1450,31 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
            notes = paste0("state=", u$state), tokens = list())
     }
   })
+  # Peaks whose own edge_type is self-classifying (gene_conversion /
+  # crossover / internal_crossover) but that never attached to any token —
+  # e.g. an internal_crossover sitting in a SNP-desert with no flanking LOH
+  # to anchor a motif rule on — are promoted here using the same
+  # classify_tract() logic the motif rules use, rather than left as an
+  # unclassified UNCATEGORIZED_PEAK. They carry no spanning-pair count (such
+  # peaks are excluded from compute_peak_pairs()'s pairing step) and no
+  # flanking-LOH corroboration, so they're named "_subres" (sub-resolution)
+  # and fall to "review" confidence in build_event_table(), distinguishing
+  # them from the better-supported CO_GC/NCO_GC calls fired by the motif rules.
   uncat_peak_events <- lapply(unclaimed_peaks, function(u) {
-    list(event_class = "UNCATEGORIZED_PEAK", chrom = u$chrom,
-         start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
-         length_bp = 0L, n_support = NA_integer_,
-         peak_edge_types = u$edge_type %||% NA_character_,
-         notes = "", tokens = list())
+    tract <- classify_tract(list(best_edge_type = u$edge_type), params)
+    if (tract$call %in% c("NCO_GC", "CO_GC")) {
+      list(event_class = paste0(tract$call, "_subres"), chrom = u$chrom,
+           start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
+           length_bp = 0L, n_support = tract$n_support,
+           peak_edge_types = u$edge_type %||% NA_character_,
+           notes = "no_fixed_tract; peak_only", tokens = list())
+    } else {
+      list(event_class = "UNCATEGORIZED_PEAK", chrom = u$chrom,
+           start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
+           length_bp = 0L, n_support = NA_integer_,
+           peak_edge_types = u$edge_type %||% NA_character_,
+           notes = "", tokens = list())
+    }
   })
 
   list(
