@@ -55,8 +55,11 @@ default_chain_params <- function() {
     # when length < small_frac * sum(flank lengths)
     small_frac      = 0.10,
 
-    # Distal / chromosome-median depth ratio below which a terminal region
-    # is flagged as a possible deletion rather than copy-neutral LOH
+    # Depth ratio (real coverage / baseline, from compute_coverage_map();
+    # falls back to an SNP-density proxy if no coverage map is supplied)
+    # below which a terminal region is called TERMINAL_DELETION (R01) rather
+    # than CO_TERM/TERMINAL_LOH. ~0.5 is expected for loss of one parental
+    # homolog; 0.60 leaves margin above that for noise.
     depth_drop      = 0.60,
 
     # Fixed-LOH tokens with fewer SNPs than this threshold may be too short
@@ -141,9 +144,34 @@ print.loh_token <- function(x, ...) {
 #  One chain per chromosome; NA gaps and telomere sentinels are inserted.
 # =============================================================================
 
+# Length-weighted average depth_ratio from compute_coverage_map()'s
+# coverage_segments overlapping [seg_start, seg_end] on chr_name. Returns NA
+# when no coverage map was supplied, or it has no segment for this span.
+.lookup_depth_ratio <- function(coverage_segments, chr_name, seg_start, seg_end) {
+  if (is.null(coverage_segments) || nrow(coverage_segments) == 0) return(NA_real_)
+  cs <- coverage_segments[as.character(chrom) == chr_name]
+  cs <- cs[end >= seg_start & start <= seg_end]
+  if (nrow(cs) == 0) return(NA_real_)
+  ov_len <- pmax(pmin(cs$end, seg_end) - pmax(cs$start, seg_start) + 1L, 1L)
+  sum(cs$depth_ratio * ov_len) / sum(ov_len)
+}
+
+# Mean real read depth (n_total) over [seg_start, seg_end] on chr_name, read
+# directly from compute_coverage_map()$coverage_table. Returns NA if no
+# coverage table was supplied or no position falls in range (e.g. a "G" gap
+# token with no defined SNPs at all).
+.lookup_mean_depth <- function(coverage_table, chr_name, seg_start, seg_end) {
+  if (is.null(coverage_table) || nrow(coverage_table) == 0) return(NA_real_)
+  vals <- coverage_table[as.character(chrom) == chr_name &
+                          pos >= seg_start & pos <= seg_end, n_total]
+  if (length(vals) == 0) return(NA_real_)
+  mean(vals)
+}
+
 build_raw_chains <- function(loh_segments, chr_span, params,
                              fused_peaks = NULL, peak_pairs = NULL,
-                             snp_peaks   = NULL) {
+                             snp_peaks   = NULL, coverage_segments = NULL,
+                             coverage_table = NULL) {
 
   if (is.null(loh_segments) || nrow(loh_segments) == 0)
     return(list())
@@ -238,9 +266,21 @@ build_raw_chains <- function(loh_segments, chr_span, params,
         tokens[[length(tokens) + 1L]] <- gap_tok
       }
 
-      # Depth ratio proxy: SNP density relative to chromosome median
+      # Depth ratio: prefer the real coverage-derived ratio from
+      # compute_coverage_map() (passed in as `coverage_segments`) — it reads
+      # actual per-position read depth, modelled with the same EM+HMM
+      # approach as compute_loh_map() but on total depth instead of allele
+      # balance.  Fall back to the SNP-density proxy below only when no
+      # coverage map is supplied (e.g. tests that build chains by hand):
+      # n_snps/length_bp tracks local SNP-definition density, not real
+      # depth, and can be high or low in a deleted region purely by chance
+      # of where the VCF happens to define SNPs.
+      real_dr <- .lookup_depth_ratio(coverage_segments, chr_name, seg$start, seg$end)
+
       seg_density <- if (seg$length_bp > 0)
         (seg$n_snps / seg$length_bp * 1000) / med_d else NA_real_
+
+      tok_depth_ratio <- if (!is.na(real_dr)) real_dr else seg_density
 
       tok_type <- if (seg$loh_state %in% c("REF_fixed", "ALT_fixed")) "F"
                   else if (seg$loh_state == "HET") "H"
@@ -252,7 +292,7 @@ build_raw_chains <- function(loh_segments, chr_span, params,
         start       = as.integer(seg$start),
         end         = as.integer(seg$end),
         n_snps      = as.integer(seg$n_snps),
-        depth_ratio = seg_density
+        depth_ratio = tok_depth_ratio
       )
 
       # Attach any peaks associated with this token
@@ -267,6 +307,39 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     tokens[[length(tokens) + 1L]] <- make_token(
       "TEL", state = NA, start = right_tel_start, end = chr_len, n_snps = 0L
     )
+
+    # ── Local terminal depth-ratio: F segment vs. its own adjacent flank ──────
+    # A single chromosome-wide depth baseline doesn't separate a true
+    # terminal/arm deletion from an ordinary region that simply sequences a
+    # bit shallower for reasons unrelated to copy number — this chromosome's
+    # depth varies by ~2x at large scale even outside any deletion. Comparing
+    # a terminal F token to the H/G flank immediately bordering it controls
+    # for that: ratio near 1 means depth is consistent across the junction
+    # (the rule R02b path); ratio well below 1 means a real drop (R01).
+    # Stored in meta (not the general depth_ratio field) so it's only used
+    # by the terminal rules and never disturbs the chromosome-wide proxy
+    # used elsewhere. G-typed flanks (no defined SNPs) are skipped in favor
+    # of the nearest H, via .nearest_nonfixed_right()/.nearest_nonfixed_left().
+    real_idx <- which(vapply(tokens, `[[`, character(1), "type") != "TEL")
+    if (length(real_idx) > 0) {
+      first_i <- real_idx[1]
+      last_i  <- real_idx[length(real_idx)]
+
+      annotate_terminal <- function(idx, nb_idx) {
+        if (is.null(nb_idx) || tokens[[idx]]$type != "F") return(invisible(NULL))
+        d_f  <- .lookup_mean_depth(coverage_table, chr_name,
+                                   tokens[[idx]]$start, tokens[[idx]]$end)
+        d_nb <- .lookup_mean_depth(coverage_table, chr_name,
+                                   tokens[[nb_idx]]$start, tokens[[nb_idx]]$end)
+        if (!is.na(d_f) && !is.na(d_nb) && d_nb > 0)
+          tokens[[idx]]$meta$terminal_depth_ratio <<- d_f / d_nb
+        invisible(NULL)
+      }
+
+      annotate_terminal(first_i, .nearest_nonfixed_right(tokens, first_i))
+      if (last_i != first_i)
+        annotate_terminal(last_i, .nearest_nonfixed_left(tokens, last_i))
+    }
 
     make_chain(tokens, chr_name, chr_len,
                snp_start = first_pos, snp_end = last_pos)
@@ -644,6 +717,19 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   !is.null(token$peak_over) || !is.null(token$peak_left) || !is.null(token$peak_right)
 }
 
+# Depth ratio used by the terminal-event rules (R01/R02/R02b): the local
+# ratio vs. the token's own adjacent flank (set by build_raw_chains() from a
+# coverage_table, comparing the F token to its nearest H neighbor) when
+# available, else the token's general depth_ratio (chromosome-wide real
+# ratio, or the SNP-density proxy if no coverage map was supplied). A
+# single chromosome-wide baseline doesn't separate a true terminal/arm
+# deletion from a region that is merely low-depth for reasons unrelated to
+# copy number when regional depth varies a lot across the chromosome —
+# comparing a terminal segment to its own neighbor controls for that.
+.terminal_depth_ratio <- function(tok) {
+  tok$meta$terminal_depth_ratio %||% tok$depth_ratio
+}
+
 # TRUE for any token that is not fixed LOH — H (called HET) and G (unscored
 # gap) are both treated as non-fixed context for motif matching.  In real data,
 # loh_segments only contains SNP-position rows; the coordinate stretches between
@@ -721,8 +807,8 @@ rule_terminal_deletion <- list(
     if (i + 1L <= n &&
         tokens[[i]]$type == "TEL" &&
         tokens[[i + 1L]]$type == "F" &&
-        !is.na(tokens[[i + 1L]]$depth_ratio) &&
-        tokens[[i + 1L]]$depth_ratio < params$depth_drop)
+        !is.na(.terminal_depth_ratio(tokens[[i + 1L]])) &&
+        .terminal_depth_ratio(tokens[[i + 1L]]) < params$depth_drop)
       return(list(span = c(i, i + 1L), direction = "fwd",
                   f_tok = tokens[[i + 1L]]))
 
@@ -730,8 +816,8 @@ rule_terminal_deletion <- list(
     if (i >= 2L &&
         tokens[[i]]$type == "F" &&
         tokens[[i + 1L]]$type == "TEL" &&
-        !is.na(tokens[[i]]$depth_ratio) &&
-        tokens[[i]]$depth_ratio < params$depth_drop)
+        !is.na(.terminal_depth_ratio(tokens[[i]])) &&
+        .terminal_depth_ratio(tokens[[i]]) < params$depth_drop)
       return(list(span = c(i, i + 1L), direction = "rev",
                   f_tok = tokens[[i]]))
 
@@ -741,7 +827,7 @@ rule_terminal_deletion <- list(
     ev <- .make_event("TERMINAL_DELETION", chain$chrom,
                       list(m$f_tok),
                       notes = sprintf("depth_ratio=%.2f < %.2f",
-                                      m$f_tok$depth_ratio, params$depth_drop))
+                                      .terminal_depth_ratio(m$f_tok), params$depth_drop))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
   }
 )
@@ -757,8 +843,8 @@ rule_terminal_loh <- list(
       ftk <- tokens[[f_i]]
       htk <- tokens[[h_i]]
       if (tel$type != "TEL" || ftk$type != "F" || !.is_non_fixed(htk)) return(NULL)
-      if (is.na(ftk$depth_ratio) ||
-          ftk$depth_ratio < params$depth_drop) return(NULL)   # depth ok check
+      if (is.na(.terminal_depth_ratio(ftk)) ||
+          .terminal_depth_ratio(ftk) < params$depth_drop) return(NULL)   # depth ok check
       pk <- ftk$peak_right %||% ftk$peak_left %||% ftk$peak_over
       if (is.null(pk)) return(NULL)
       list(span = c(tel_i, f_i, h_i), f_tok = ftk, peak = pk,
@@ -800,6 +886,60 @@ rule_terminal_loh <- list(
                       notes = paste0("terminal; edge=", edge_type %||% "NA"))
     list(event = ev, rewrite = NULL,
          claims = list(peak = m$peak, loh = m$f_tok))
+  }
+)
+
+# Rule 2b: Terminal, no peak — secondary depth-based assessment.
+#
+# A chimeric-read peak can only form where a read carries BOTH alleles in
+# cis and switches between them. A true terminal/arm deletion removes the
+# second haplotype's sequence entirely beyond the breakpoint, so no read can
+# ever show that switch there — R02 (rule_terminal_loh) is structurally
+# unable to fire for a genuine deletion, peak or no peak. When a terminal F
+# token has no peak at all, the only remaining evidence is depth: a real
+# drop (e.g. ~50% from losing one parental homolog) means a true
+# TERMINAL_DELETION; depth that is consistent with the rest of the
+# chromosome means the peak is simply missing — most likely a gap in SNP
+# coverage swallowed the junction — and this is a terminal LOH/crossover
+# (CO_TERM) that should go to manual review rather than being silently
+# reported as a deletion or dropped as UNCATEGORIZED_LOH.
+rule_terminal_no_peak <- list(
+  id = "R02b_terminal_no_peak",
+  match_fn = function(tokens, i, chain, params) {
+    n <- length(tokens)
+
+    check_tnp <- function(tel_i, f_i, h_i, direction) {
+      tel <- tokens[[tel_i]]
+      ftk <- tokens[[f_i]]
+      htk <- tokens[[h_i]]
+      if (tel$type != "TEL" || ftk$type != "F" || !.is_non_fixed(htk)) return(NULL)
+      if (.has_peak(ftk)) return(NULL)                                       # R02 handles this case
+      if (is.na(.terminal_depth_ratio(ftk))) return(NULL)                     # no depth evidence at all
+      if (.terminal_depth_ratio(ftk) < params$depth_drop) return(NULL)        # R01 handles real deletions
+      list(span = c(tel_i, f_i, h_i), f_tok = ftk, direction = direction)
+    }
+
+    # Forward: TEL [F] H
+    if (i + 2L <= n) {
+      m <- check_tnp(i, i + 1L, i + 2L, "fwd")
+      if (!is.null(m)) return(m)
+    }
+    # Reverse: H [F] TEL
+    if (i + 2L <= n) {
+      m <- check_tnp(i + 2L, i + 1L, i, "rev")
+      if (!is.null(m)) return(m)
+    }
+    NULL
+  },
+  fire_fn = function(m, chain, params) {
+    ev <- .make_event("CO_TERM", chain$chrom, list(m$f_tok),
+                      notes = sprintf(
+                        paste0("no_chimera_peak; depth_ratio=%.2f >= %.2f; ",
+                               "terminal LOH/crossover inferred from depth ",
+                               "consistent with its adjacent flank ",
+                               "(likely a SNP-coverage gap masking the junction peak)"),
+                        .terminal_depth_ratio(m$f_tok), params$depth_drop))
+    list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
   }
 )
 
@@ -1275,6 +1415,7 @@ rule_loh_crossover <- list(
 MOTIF_RULES <- list(
   rule_terminal_deletion,       # R01
   rule_terminal_loh,            # R02
+  rule_terminal_no_peak,        # R02b — terminal F with no peak: depth decides CO_TERM vs deletion
   rule_loh_crossover,           # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,             # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking      # R11 — two binary peaks flanking H-[F]-H
@@ -1556,6 +1697,15 @@ build_event_table <- function(events) {
 #' @param peak_pairs     data.table from compute_peak_pairs()$peak_pairs
 #' @param rt_df          chimeric read table from run_chimera_analysis()
 #' @param chr_span       data.table from run_chimera_analysis()$chr_span
+#' @param coverage_segments data.table from compute_coverage_map()$coverage_segments;
+#'                       chromosome-wide depth_ratio (general-purpose fallback).
+#' @param coverage_table data.table from compute_coverage_map()$coverage_table;
+#'                       per-position real depth, used to compute each
+#'                       terminal F token's depth ratio against its own
+#'                       adjacent flank — what R01/R02b use to tell a true
+#'                       terminal deletion apart from a terminal LOH/
+#'                       crossover that is simply missing its junction peak.
+#'                       NULL falls back to coverage_segments/SNP-density.
 #' @param params         named list; defaults from default_chain_params()
 #'
 #' @return named list:
@@ -1571,11 +1721,14 @@ run_chain_analysis <- function(loh_segments,
                                 snp_peaks    = NULL,
                                 rt_df        = NULL,
                                 chr_span,
+                                coverage_segments = NULL,
+                                coverage_table     = NULL,
                                 params       = default_chain_params()) {
 
   message("  [chain] Building raw chains ...")
   chains <- build_raw_chains(loh_segments, chr_span, params,
-                              fused_peaks, peak_pairs, snp_peaks)
+                              fused_peaks, peak_pairs, snp_peaks,
+                              coverage_segments, coverage_table)
 
   message("  [chain] Canonicalising chains ...")
   chains <- lapply(chains, canonicalise, params = params)

@@ -693,6 +693,198 @@ compute_loh_map <- function(full_read_loh,
 
 
 # -----------------------------------------------------------------------------
+#  compute_coverage_map()
+#
+#  Models per-position total read depth (NOT allele balance) to tell a
+#  genuine sequencing-depth drop (e.g. a hemizygous terminal/arm deletion,
+#  where one parental homolog's reads are simply absent) apart from depth
+#  that is merely consistent with the rest of the chromosome.
+#
+#  This is deliberately a separate model from compute_loh_map(): n_total at
+#  a SNP position carries no REF/ALT signal, so there's nothing to gain from
+#  a balance-aware mixture here.  Architecture mirrors compute_loh_map() —
+#  EM mixture fit genome-wide, then per-chromosome Viterbi segmentation —
+#  but with a 2-state Gaussian mixture on log(depth) in place of the
+#  3-state beta-binomial mixture on allele counts.
+#
+#  Arguments
+#    full_read_loh : data.table from run_chimera_analysis()$full_read_loh
+#                    (MAPQ-only filtered; NO base-quality filter — the same
+#                    read population compute_loh_map() uses, so the two
+#                    depth signals come from the same pileup)
+#    min_depth     : hard minimum reads per position; positions below this
+#                    are excluded before fitting (default 5)
+#    trans_stay    : HMM self-transition probability (default 0.995; a true
+#                    deletion boundary is a single sharp step, not a
+#                    recombination tract, so this is less sticky than
+#                    compute_loh_map()'s 0.999)
+#
+#  Returns a named list:
+#    $coverage_table    : per-position data.table
+#                         (chrom, pos, n_total, depth_state, depth_ratio)
+#    $coverage_segments : collapsed contiguous-run table
+#                         (chrom, start, end, length_bp, n_snps, depth_state,
+#                          depth_mean, depth_ratio)
+#    $baseline_depth    : median depth among NORMAL_DEPTH-called positions,
+#                         genome-wide — the denominator for depth_ratio
+# -----------------------------------------------------------------------------
+compute_coverage_map <- function(full_read_loh,
+                                 min_depth  = 5L,
+                                 trans_stay = 0.995,
+                                 warn_fn    = function(msg) message("WARNING: ", msg)) {
+
+  # ── Internal model functions ───────────────────────────────────────────────
+
+  fit_depth_mixture <- function(x, max_iter = 200, tol = 1e-6) {
+    qs    <- quantile(x, c(0.10, 0.90), na.rm = TRUE)
+    mu    <- c(qs[1], qs[2])
+    sigma <- rep(max(sd(x) / 2, 0.05), 2)
+    pi    <- c(0.5, 0.5)
+    r     <- matrix(0, length(x), 2)
+    for (iter in seq_len(max_iter)) {
+      old    <- c(mu, sigma, pi)
+      r[, 1] <- pi[1] * dnorm(x, mu[1], sigma[1])
+      r[, 2] <- pi[2] * dnorm(x, mu[2], sigma[2])
+      rs     <- rowSums(r); rs[rs == 0] <- 1e-300
+      r      <- r / rs
+      pi     <- colMeans(r)
+      for (j in 1:2) {
+        w  <- r[, j]
+        sw <- sum(w)
+        if (sw > 0) {
+          mu[j]    <- sum(w * x) / sw
+          sigma[j] <- sqrt(pmax(sum(w * (x - mu[j])^2) / sw, 1e-6))
+        }
+      }
+      if (mu[1] > mu[2]) {     # keep state 1 = LOW, state 2 = NORMAL
+        mu <- rev(mu); sigma <- rev(sigma); pi <- rev(pi); r <- r[, 2:1]
+      }
+      if (max(abs(c(mu, sigma, pi) - old) / (abs(old) + 1)) < tol) break
+    }
+    list(mu = mu, sigma = sigma, pi = pi,
+        labels = c("LOW_DEPTH", "NORMAL_DEPTH"))
+  }
+
+  viterbi_segment_depth <- function(x, chrom, fit, trans_stay) {
+    n_states  <- 2L
+    trans_off <- (1 - trans_stay) / (n_states - 1)
+    A_log     <- matrix(log(trans_off), n_states, n_states)
+    diag(A_log) <- log(trans_stay)
+    log_emit  <- cbind(
+      dnorm(x, fit$mu[1], fit$sigma[1], log = TRUE),
+      dnorm(x, fit$mu[2], fit$sigma[2], log = TRUE)
+    )
+    log_pi      <- log(fit$pi)
+    labels      <- fit$labels
+    assignments <- character(length(x))
+    for (chr in unique(chrom)) {
+      idx <- which(chrom == chr)
+      T_  <- length(idx)
+      E   <- log_emit[idx, , drop = FALSE]
+      delta      <- matrix(-Inf, T_, n_states)
+      psi        <- matrix(0L,   T_, n_states)
+      delta[1, ] <- log_pi + E[1, ]
+      if (T_ > 1L) {
+        for (t in 2L:T_) {
+          scores     <- matrix(delta[t - 1L, ], n_states, n_states) + A_log
+          psi[t, ]   <- apply(scores, 2, which.max)
+          delta[t, ] <- apply(scores, 2, max) + E[t, ]
+        }
+        path     <- integer(T_)
+        path[T_] <- which.max(delta[T_, ])
+        for (t in (T_ - 1L):1L)
+          path[t] <- psi[t + 1L, path[t + 1L]]
+        assignments[idx] <- labels[path]
+      } else {
+        assignments[idx] <- labels[which.max(delta[1L, ])]
+      }
+    }
+    assignments
+  }
+
+  # ── 1. Aggregate to per-position total read depth ──────────────────────────
+  cov_dt <- full_read_loh[, .(n_total = .N), by = .(chrom, pos)]
+  setorder(cov_dt, chrom, pos)
+
+  # Adaptive depth floor, same approach as compute_loh_map()'s depth_cutoff.
+  depth_cutoff <- max(min_depth,
+                      floor(median(cov_dt$n_total) - 3 * IQR(cov_dt$n_total)),
+                      na.rm = TRUE)
+  cov_dt <- cov_dt[n_total >= depth_cutoff]
+
+  empty_segs <- data.table(
+    chrom = character(), start = integer(), end = integer(),
+    length_bp = integer(), n_snps = integer(),
+    depth_state = character(), depth_mean = numeric(), depth_ratio = numeric()
+  )
+
+  if (nrow(cov_dt) < 10L) {
+    warn_fn("Too few positions with sufficient depth for coverage modeling; returning NA.")
+    cov_dt[, `:=`(depth_state = NA_character_, depth_ratio = NA_real_)]
+    return(list(coverage_table = cov_dt, coverage_segments = empty_segs,
+               baseline_depth = NA_real_))
+  }
+
+  # ── 2. Fit 2-state EM mixture on log(depth) ─────────────────────────────────
+  fit <- tryCatch(
+    fit_depth_mixture(log(cov_dt$n_total)),
+    error = function(e) {
+      warn_fn(paste0("Depth EM fit error: ", e$message))
+      NULL
+    }
+  )
+  if (is.null(fit)) {
+    warn_fn("Depth EM fit failed; coverage map will contain no called regions.")
+    cov_dt[, `:=`(depth_state = NA_character_, depth_ratio = NA_real_)]
+    return(list(coverage_table = cov_dt, coverage_segments = empty_segs,
+               baseline_depth = NA_real_))
+  }
+
+  # ── 3. Viterbi HMM segmentation (per chromosome) ────────────────────────────
+  hmm_states <- tryCatch(
+    viterbi_segment_depth(log(cov_dt$n_total), as.character(cov_dt$chrom),
+                          fit, trans_stay),
+    error = function(e) {
+      warn_fn(paste0("Depth Viterbi segmentation error: ", e$message))
+      NULL
+    }
+  )
+  if (is.null(hmm_states)) {
+    cov_dt[, `:=`(depth_state = NA_character_, depth_ratio = NA_real_)]
+    return(list(coverage_table = cov_dt, coverage_segments = empty_segs,
+               baseline_depth = NA_real_))
+  }
+  cov_dt[, depth_state := hmm_states]
+
+  # Baseline = median depth among NORMAL_DEPTH-called positions, genome-wide.
+  baseline <- cov_dt[depth_state == "NORMAL_DEPTH", median(n_total)]
+  if (length(baseline) == 0 || is.na(baseline)) baseline <- median(cov_dt$n_total)
+  cov_dt[, depth_ratio := round(n_total / baseline, 3)]
+
+  # ── 4. Collapse into contiguous coverage segments ───────────────────────────
+  setorder(cov_dt, chrom, pos)
+  cov_dt[, COV_factor := rleid(depth_state), by = chrom]
+
+  coverage_segments <- cov_dt[, .(
+    start       = min(pos),
+    end         = max(pos),
+    length_bp   = max(pos) - min(pos) + 1L,
+    n_snps      = .N,
+    depth_state = unique(depth_state),
+    depth_mean  = round(mean(n_total), 1),
+    depth_ratio = round(mean(n_total) / baseline, 3)
+  ), by = .(chrom, COV_factor)]
+  coverage_segments[, COV_factor := NULL]
+
+  list(
+    coverage_table     = cov_dt[, .(chrom, pos, n_total, depth_state, depth_ratio)],
+    coverage_segments  = coverage_segments,
+    baseline_depth     = baseline
+  )
+}
+
+
+# -----------------------------------------------------------------------------
 #  Overview plot builder
 #
 #  Expressed as a plain function that returns a single ggplot object.
@@ -1307,6 +1499,39 @@ gap_loh_state <- function(loh_segments, chr_name, pos_start, pos_end) {
 }
 
 # ---------------------------------------------------------------------------
+# peaks_bridge_independent_tracts()
+#   TRUE when pk_a already marks the EXIT boundary of an existing fixed LOH
+#   segment lying to its own left (away from pk_b), AND pk_b already marks
+#   the ENTRY boundary of an existing fixed LOH segment lying to its own
+#   right (away from pk_a) -- i.e. both peaks already belong to their own,
+#   separately-bounded tracts before this pair is even considered.
+#
+#   This matters because classify_edge_type()'s 3-zone classifier can't
+#   tell "one continuous excursion away and back" (a single GC tract) apart
+#   from "two independent same-direction excursions sitting close together"
+#   (two separate GC tracts with a short recovery in between): both produce
+#   the same state_L == state_R != state_M pattern (e.g. ALT-REF-ALT) and
+#   so both get edge_type = "gene_conversion". When that happens between
+#   two peaks that each already terminate their own complete tract, fusing
+#   them via jaccard/edge_type alone (decide_fusion_mode()'s "automatic"
+#   path) would transitively merge two independent LOH events into one
+#   fusion group through igraph::components() -- direct LOH evidence
+#   bridging the gap itself (loh_in_gap) is required instead.
+# ---------------------------------------------------------------------------
+peaks_bridge_independent_tracts <- function(loh_segments, chr_name,
+                                            pos_a, pos_b, pad_bp = 200L) {
+  if (is.null(loh_segments) || nrow(loh_segments) == 0) return(FALSE)
+  if (is.na(pos_a) || is.na(pos_b)) return(FALSE)
+  segs <- loh_segments[
+    as.character(chrom) == chr_name & loh_state %in% c("REF_fixed", "ALT_fixed")
+  ]
+  if (nrow(segs) == 0) return(FALSE)
+  a_exits  <- any(abs(segs$end   - pos_a) <= pad_bp & segs$end   < pos_b)
+  b_enters <- any(abs(segs$start - pos_b) <= pad_bp & segs$start > pos_a)
+  a_exits && b_enters
+}
+
+# ---------------------------------------------------------------------------
 # classify_loh_crossover_edge()
 #   LOH-aware two-zone edge classifier for the LOH-crossover probing path.
 #
@@ -1366,10 +1591,20 @@ peak_is_fusion_eligible <- function(lbl) {
 # decide_fusion_mode()
 # ---------------------------------------------------------------------------
 decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
-                               loh_in_gap = FALSE) {
+                               loh_in_gap = FALSE,
+                               bridges_independent_tracts = FALSE) {
 
   if (edge_type %in% FUSION_HEURISTICS$unfusable_edge_types)
     return("none")
+
+  # Both peaks already terminate their OWN separate fixed tract, and no LOH
+  # bridges this particular gap: jaccard/edge_type alone are not enough
+  # evidence to fuse them into one group (see peaks_bridge_independent_tracts()).
+  # Falls to "supervised" rather than "none" so a human can still review and
+  # approve it — it just can't fuse silently/automatically.
+  if (bridges_independent_tracts && !loh_in_gap &&
+      edge_type %in% FUSION_HEURISTICS$auto_edge_types)
+    return(if (jaccard > 0) "supervised" else "none")
 
   if (jaccard >= jaccard_threshold &&
       edge_type %in% FUSION_HEURISTICS$auto_edge_types)
@@ -1470,6 +1705,17 @@ compute_peak_pairs <- function(snp_peaks,
       # LOH-crossover path relaxes the filter and uses a different spanning strategy.
       loh_in_gap <- if (!is.null(loh_segments)) {
         gap_has_loh(loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos)
+      } else {
+        FALSE
+      }
+
+      # Do both peaks already terminate their OWN separate fixed tract (one
+      # exiting tract A, the other entering tract B), with no LOH bridging
+      # THIS gap? See peaks_bridge_independent_tracts() for why that
+      # combination blocks automatic fusion further down.
+      bridges_independent_tracts <- if (!is.null(loh_segments)) {
+        peaks_bridge_independent_tracts(loh_segments, chr_name,
+                                        pk_a$snp_pos, pk_b$snp_pos)
       } else {
         FALSE
       }
@@ -1582,10 +1828,11 @@ compute_peak_pairs <- function(snp_peaks,
         "none"
       } else {
         decide_fusion_mode(
-          edge_type         = edge_type,
-          jaccard           = jaccard,
-          jaccard_threshold = jaccard_threshold,
-          loh_in_gap        = loh_in_gap
+          edge_type                  = edge_type,
+          jaccard                    = jaccard,
+          jaccard_threshold          = jaccard_threshold,
+          loh_in_gap                 = loh_in_gap,
+          bridges_independent_tracts = bridges_independent_tracts
         )
       }
 
@@ -1608,6 +1855,7 @@ compute_peak_pairs <- function(snp_peaks,
         n_spanning   = n_spanning,
         jaccard      = round(jaccard, 4),
         loh_in_gap   = loh_in_gap,
+        bridges_independent_tracts = bridges_independent_tracts,
         edge_type    = edge_type,
         fusion_mode  = fusion_mode
       )
@@ -1625,6 +1873,7 @@ compute_peak_pairs <- function(snp_peaks,
       n_reads_a          = integer(),   n_reads_b    = integer(),
       n_shared           = integer(),   n_spanning   = integer(),
       jaccard            = numeric(),   loh_in_gap   = logical(),
+      bridges_independent_tracts = logical(),
       edge_type          = character(), fusion_mode  = character()
     )
   }

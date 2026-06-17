@@ -680,6 +680,8 @@ server <- function(input, output, session) {
     fused_hap_labels        = NULL,  # data.table: fusion_group, chrom, fused_classification
     loh_map                 = NULL,   # snp_table from compute_loh_map()$snp_table; per-SNP; used by gap_has_loh()
     loh_segments            = NULL,   # loh_segments from compute_loh_map()$loh_segments; used by plots
+    coverage_segments       = NULL,   # coverage_segments from compute_coverage_map(); chromosome-wide depth_ratio
+    coverage_table          = NULL,   # coverage_table from compute_coverage_map(); per-position depth for terminal-event rules
     strain_ref              = "",     # display name for REF haplotype (from UI input)
     strain_alt              = "",      # display name for ALT haplotype (from UI input)
     chain_result   = NULL,   # full output of run_chain_analysis()
@@ -783,6 +785,19 @@ server <- function(input, output, session) {
       )
       results$loh_map      <- loh_out$snp_table    # per-SNP; used by gap_has_loh()
       results$loh_segments <- loh_out$loh_segments # pre-collapsed runs; used by plots
+
+      # Build a real per-position coverage map (same EM+HMM architecture as
+      # the LOH map, but modeling total depth instead of allele balance).
+      # Used by the chain analysis's terminal-event rules to tell a true
+      # deletion (real depth drop) apart from a terminal LOH/crossover that
+      # is simply missing its junction peak.
+      incProgress(0.88, detail = "Computing coverage map (HMM)")
+      coverage_out <- compute_coverage_map(
+        res$full_read_loh,
+        warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)
+      )
+      results$coverage_segments <- coverage_out$coverage_segments
+      results$coverage_table    <- coverage_out$coverage_table
 
       incProgress(0.9, detail = "Creating individual peak plots")
 
@@ -1060,13 +1075,15 @@ server <- function(input, output, session) {
     withProgress(message = "Running chain event caller...", value = 0.2, {
       
       chain_res <- run_chain_analysis(
-        loh_segments = results$loh_segments,
-        fused_peaks  = results$fused_peaks, # NULL if fusion not run
-        peak_pairs   = results$peak_pairs,
-        snp_peaks    = results$snp_peaks,     # fallback when fused_peaks is NULL
-        rt_df        = results$rt_df,
-        chr_span     = results$chr_span,
-        params       = cp
+        loh_segments      = results$loh_segments,
+        fused_peaks       = results$fused_peaks, # NULL if fusion not run
+        peak_pairs        = results$peak_pairs,
+        snp_peaks         = results$snp_peaks,     # fallback when fused_peaks is NULL
+        rt_df             = results$rt_df,
+        chr_span          = results$chr_span,
+        coverage_segments = results$coverage_segments,
+        coverage_table    = results$coverage_table,
+        params            = cp
       )
       
       incProgress(0.8, detail = "Storing event table")

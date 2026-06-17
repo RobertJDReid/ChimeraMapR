@@ -439,6 +439,21 @@ if (opts[["chain-all"]]) {
   cat(sprintf("  LOH SNP table    → %s (%d rows)\n",  step0_snp, nrow(loh_result$snp_table)))
   cat(sprintf("  LOH segments     → %s (%d segments)\n\n", step0_seg, nrow(loh_segs)))
 
+  # ── Step 0a: Coverage map ────────────────────────────────────────────────────
+  # Real per-position read depth, modeled with the same EM+HMM approach as
+  # the LOH map above but on total depth instead of allele balance. Used by
+  # R01/R02b to tell a true terminal/arm deletion (real depth drop) apart
+  # from a terminal LOH/crossover that is simply missing its junction peak
+  # (depth consistent with the rest of the chromosome).
+  cat("[chain] Step 0a: Computing coverage map ...\n")
+  coverage_result <- compute_coverage_map(results$full_read_loh)
+  coverage_segs    <- coverage_result$coverage_segments
+
+  step0a_cov <- paste0(stem, "_step0a_coverage_segments.csv")
+  data.table::fwrite(coverage_segs, step0a_cov)
+  cat(sprintf("  Coverage segments → %s (%d segments; baseline depth = %.1f)\n\n",
+              step0a_cov, nrow(coverage_segs), coverage_result$baseline_depth))
+
   # ── Step 0b: Haplotype labeling ───────────────────────────────────────────────
   # classify_peak_haplotype() is defined in chimera_functions.R.
   # The chain rules require haplotype_label on each snp_peaks row so that
@@ -498,12 +513,14 @@ if (opts[["chain-all"]]) {
   # ── Step 1: Build raw chains ──────────────────────────────────────────────────
   cat("[chain] Step 1: Building raw chains ...\n")
   raw_chains <- build_raw_chains(
-    loh_segments = loh_segs,
-    chr_span     = results$chr_span,
-    params       = cp,
-    fused_peaks  = fusion_res$fused_peaks,
-    peak_pairs   = fusion_res$peak_pairs,
-    snp_peaks    = results$snp_peaks
+    loh_segments      = loh_segs,
+    chr_span          = results$chr_span,
+    params            = cp,
+    fused_peaks       = fusion_res$fused_peaks,
+    peak_pairs        = fusion_res$peak_pairs,
+    snp_peaks         = results$snp_peaks,
+    coverage_segments = coverage_segs,
+    coverage_table    = coverage_result$coverage_table
   )
 
   step1_out  <- paste0(stem, "_step1_raw_tokens.csv")
