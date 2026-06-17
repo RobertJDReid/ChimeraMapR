@@ -336,7 +336,14 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     haplotype_label = if ("haplotype_label" %in% names(chr_fp)) haplotype_label[1] else NA_character_,
     n_spanning      = 0L,
     jaccard         = NA_real_,
-    pair_edge_type  = NA_character_
+    pair_edge_type  = NA_character_,
+    # Per-read switch count from classify_peak_haplotype(), computed at
+    # Run Analysis time for "binary"/"internal_crossover" labelled peaks —
+    # the only direct read evidence available for peaks that never get a
+    # peak_pairs row (e.g. a terminal binary peak with no eligible partner
+    # within range, or an internal_crossover peak excluded from pairing
+    # entirely). Used below as a fallback for n_spanning.
+    n_read_support  = if ("n_read_support" %in% names(chr_fp)) n_read_support[1] else NA_integer_
   ), by = fusion_group]
 
   # Overlay spanning reads, jaccard, and pair_edge_type from peak_pairs.
@@ -363,6 +370,14 @@ build_raw_chains <- function(loh_segments, chr_span, params,
       }
     }
   }
+
+  # Peaks with no peak_pairs evidence at all (n_spanning still at the 0L
+  # default — no eligible partner found, or excluded from pairing entirely)
+  # fall back to their own per-read switch count so a real terminal binary
+  # peak or standalone internal_crossover peak isn't reported as 0 support
+  # just because it never formed a pair.
+  no_pair_evidence <- grp_rep$n_spanning == 0L & !is.na(grp_rep$n_read_support)
+  grp_rep$n_spanning[no_pair_evidence] <- grp_rep$n_read_support[no_pair_evidence]
 
   lapply(seq_len(nrow(grp_rep)), function(i) as.list(grp_rep[i]))
 }
@@ -1402,13 +1417,15 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
       hal <- if ("haplotype_label" %in% names(fp)) haplotype_label else NA_character_
       ifelse(is.na(bet) | bet == "singleton", hal, bet)
     }]
-    fp[, .(chrom, pos_col, et_col)]
+    fp[, ns_col := if ("n_read_support" %in% names(fp)) n_read_support else NA_integer_]
+    fp[, .(chrom, pos_col, et_col, ns_col)]
   } else if (!is.null(snp_peaks) && nrow(snp_peaks) > 0) {
     sp <- copy(snp_peaks)
     sp[, chrom := as.character(chrom)]
     sp[, pos_col := as.integer(snp_pos)]
     sp[, et_col  := if ("haplotype_label" %in% names(sp)) haplotype_label else NA_character_]
-    sp[, .(chrom, pos_col, et_col)]
+    sp[, ns_col  := if ("n_read_support" %in% names(sp)) n_read_support else NA_integer_]
+    sp[, .(chrom, pos_col, et_col, ns_col)]
   } else {
     NULL
   }
@@ -1419,9 +1436,10 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
       pos <- peak_source_for_reconcile$pos_col[ri]
       if (!is.na(pos) && !pos %in% all_claimed_pos) {
         unclaimed_peaks <- c(unclaimed_peaks, list(list(
-          chrom     = peak_source_for_reconcile$chrom[ri],
-          snp_pos   = pos,
-          edge_type = peak_source_for_reconcile$et_col[ri]
+          chrom          = peak_source_for_reconcile$chrom[ri],
+          snp_pos        = pos,
+          edge_type      = peak_source_for_reconcile$et_col[ri],
+          n_read_support = peak_source_for_reconcile$ns_col[ri]
         )))
       }
     }
@@ -1455,13 +1473,17 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   # e.g. an internal_crossover sitting in a SNP-desert with no flanking LOH
   # to anchor a motif rule on — are promoted here using the same
   # classify_tract() logic the motif rules use, rather than left as an
-  # unclassified UNCATEGORIZED_PEAK. They carry no spanning-pair count (such
-  # peaks are excluded from compute_peak_pairs()'s pairing step) and no
-  # flanking-LOH corroboration, so they're named "_subres" (sub-resolution)
-  # and fall to "review" confidence in build_event_table(), distinguishing
-  # them from the better-supported CO_GC/NCO_GC calls fired by the motif rules.
+  # unclassified UNCATEGORIZED_PEAK. Such peaks are excluded from
+  # compute_peak_pairs()'s pairing step entirely (no peak_pairs row, so no
+  # pairwise n_spanning) and have no flanking-LOH corroboration, so their
+  # only direct read evidence is the per-read switch count computed at
+  # classification time (n_read_support, from classify_peak_haplotype()).
+  # They're named "_subres" (sub-resolution) and fall to "review" confidence
+  # in build_event_table(), distinguishing them from the better-supported
+  # CO_GC/NCO_GC calls fired by the motif rules.
   uncat_peak_events <- lapply(unclaimed_peaks, function(u) {
-    tract <- classify_tract(list(best_edge_type = u$edge_type), params)
+    tract <- classify_tract(list(best_edge_type = u$edge_type,
+                                 n_spanning = u$n_read_support), params)
     if (tract$call %in% c("NCO_GC", "CO_GC")) {
       list(event_class = paste0(tract$call, "_subres"), chrom = u$chrom,
            start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),

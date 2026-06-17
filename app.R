@@ -834,7 +834,8 @@ server <- function(input, output, session) {
             haplotype_label  = hap$label,
             hap_win_start    = hap$win_start,
             hap_win_end      = hap$win_end,
-            hap_win_expanded = hap$expanded
+            hap_win_expanded = hap$expanded,
+            n_read_support   = hap$n_support
           )
 
           # seg_data now comes from the classifier (window may be expanded)

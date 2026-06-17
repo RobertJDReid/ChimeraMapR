@@ -467,7 +467,8 @@ if (opts[["chain-all"]]) {
         )
         hap_rows[[length(hap_rows) + 1L]] <- data.table::data.table(
           .row_idx        = pk$.row_idx,
-          haplotype_label = hap$label
+          haplotype_label = hap$label,
+          n_read_support  = hap$n_support
         )
       }
     }

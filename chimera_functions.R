@@ -896,7 +896,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
 
   if (length(avail_pos) == 0)
     return(list(label = "undefined", seg_data = NULL,
-                win_start = pk_start, win_end = pk_end, expanded = FALSE))
+                win_start = pk_start, win_end = pk_end, expanded = FALSE,
+                n_support = NA_integer_))
 
   # Median read length for the expansion upper limit
   read_lengths <- rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name,
@@ -949,7 +950,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   n_right <- sum(win_pos >  snp_p)
   if (n_left < min_each || n_right < min_each) {
     return(list(label = "undefined", seg_data = NULL,
-                win_start = win_start, win_end = win_end, expanded = expanded))
+                win_start = win_start, win_end = win_end, expanded = expanded,
+                n_support = NA_integer_))
   }
 
   # Aggregate IS_REF by position within the window to get SNP_call
@@ -960,7 +962,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   ]
   if (nrow(read_win_df) == 0)
     return(list(label = "undefined", seg_data = NULL,
-                win_start = win_start, win_end = win_end, expanded = expanded))
+                win_start = win_start, win_end = win_end, expanded = expanded,
+                n_support = NA_integer_))
 
   peak_summary <- read_win_df[, .(
     REF = sum(IS_REF),
@@ -1005,12 +1008,33 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     "undefined"
   }
 
+  # ── Count reads individually showing the switch pattern ─────────────────
+  # The run pattern above pools all touching reads by position and derives
+  # one consensus sequence — it never checks whether any single read itself
+  # crosses the junction. For "binary" (one real boundary) and
+  # "internal_crossover" (a narrow consensus run inside an otherwise
+  # heterozygous, unphased flank) labels, count touching reads whose own
+  # zone_L (win_start..snp_p) and zone_R (snp_p..win_end) allele calls
+  # differ — i.e. reads that are themselves chimeric across this peak,
+  # rather than just population-level noise.
+  n_support <- NA_integer_
+  if (label %in% c("binary", "internal_crossover")) {
+    read_states <- read_win_df[, {
+      sL <- classify_zone_state(pos, IS_REF, win_start, snp_p, zone_min_snps)
+      sR <- classify_zone_state(pos, IS_REF, snp_p, win_end, zone_min_snps)
+      .(state_L = sL, state_R = sR)
+    }, by = read_id]
+    n_support <- sum(!is.na(read_states$state_L) & !is.na(read_states$state_R) &
+                     read_states$state_L != read_states$state_R)
+  }
+
   list(
     label     = label,
     seg_data  = seg_data,
     win_start = win_start,
     win_end   = win_end,
-    expanded  = expanded
+    expanded  = expanded,
+    n_support = n_support
   )
 }
 
