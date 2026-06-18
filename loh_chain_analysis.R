@@ -745,6 +745,18 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   if (is.na(v)) 0L else as.integer(v)
 }
 
+.edge_peak <- function(tok, side) {
+  direct <- if (side == "left") tok$peak_left else tok$peak_right
+  if (!is.null(direct)) return(direct)
+  pk <- tok$peak_over
+  if (is.null(pk)) return(NULL)
+  pos <- pk$fused_pos_bp %||% pk$snp_pos
+  if (is.na(pos)) return(NULL)
+  if (side == "left"  && pos <= tok$start) return(pk)
+  if (side == "right" && pos >= tok$end)   return(pk)
+  NULL
+}
+
 .best_peak <- function(token) {
   # Return the peak with the most spanning reads, or peak_over if all equal
   candidates <- Filter(Negate(is.null),
@@ -948,32 +960,67 @@ rule_terminal_no_peak <- list(
 rule_tco_captured_tco <- list(
   id = "R03_tco_captured_tco",
   match_fn = function(tokens, i, chain, params) {
-    n <- length(tokens)
-    # Pattern: H [F] F̄{tel}  (with peaks on both junctions of F)
-    # Positions:  i  i+1  i+2 (i+2 reaches telomere)
-    if (i + 2L > n) return(NULL)
-    htk  <- tokens[[i]]
-    ftk  <- tokens[[i + 1L]]
-    fbar <- tokens[[i + 2L]]
-    if (!.is_non_fixed(htk) || ftk$type != "F" || fbar$type != "F") return(NULL)
-    if (is.na(ftk$state) || is.na(fbar$state)) return(NULL)
-    if (fbar$state != .opp_state(ftk$state)) return(NULL)
-    if (!.is_telomeric(fbar, chain, params)) return(NULL)
-    pk_l <- ftk$peak_left  %||% htk$peak_right
-    pk_r <- ftk$peak_right %||% fbar$peak_left
-    if (is.null(pk_l) || is.null(pk_r)) return(NULL)
-    list(span = c(i, i + 2L), f_tok = ftk, fbar_tok = fbar,
-         h_tok = htk, pk_l = pk_l, pk_r = pk_r)
+    # Pattern: H [F] F̄{tel}  (with peaks on both junctions of F).
+    # G-transparent like R06/R10/R11: real loh_segments data rarely tiles a
+    # chromosome with zero gaps, so ftk/fbar are usually separated from H and
+    # each other by small unscored G tokens rather than sitting at literal
+    # i, i+1, i+2 offsets.
+    check <- function(h_idx, f_idx, fb_idx) {
+      htk <- tokens[[h_idx]]; ftk <- tokens[[f_idx]]; fbar <- tokens[[fb_idx]]
+      if (!.is_non_fixed(htk)) return(NULL)
+      if (is.na(ftk$state) || is.na(fbar$state)) return(NULL)
+      if (fbar$state != .opp_state(ftk$state)) return(NULL)
+      if (!.is_telomeric(fbar, chain, params)) return(NULL)
+      # .left_junction_peak/.right_junction_peak fall back to a neighbour's
+      # peak_over (position-checked), not just peak_left/peak_right — real
+      # junction peaks land there far more often than directly on the token.
+      pk_l <- .left_junction_peak(ftk, htk)
+      pk_r <- .right_junction_peak(ftk, fbar)
+      if (is.null(pk_l) || is.null(pk_r)) return(NULL)
+      list(f_tok = ftk, fbar_tok = fbar, h_tok = htk, pk_l = pk_l, pk_r = pk_r)
+    }
+
+    if (!.is_non_fixed(tokens[[i]])) return(NULL)
+
+    # Early: anchor on htk itself, walk outward toward the telomere. Fires
+    # on the scanner's first pass through htk's position — only works if
+    # fbar is already at its final extent by then.
+    fi  <- .nearest_fixed_right(tokens, i)
+    fbi <- if (!is.null(fi)) .nearest_fixed_right(tokens, fi) else NULL
+    if (!is.null(fi) && !is.null(fbi)) {
+      m <- check(i, fi, fbi)
+      if (!is.null(m)) return(c(m, list(span = c(i, fbi))))
+    }
+
+    # Late: anchor on the non-fixed gap between ftk and fbar. fbar is very
+    # often the product of one or more R06 (opp_sandwich) merges that
+    # haven't happened yet on the scanner's first pass through htk's
+    # position — but scan_chain() backs up to just before each merge's
+    # span after every rewrite, so this gap position gets re-checked every
+    # time, with fbar's fully-merged, telomere-reaching extent by the last
+    # one. Tried second so the early form (cheaper, no merge required)
+    # still wins outright when it's already sufficient.
+    fi <- .nearest_fixed_left(tokens, i)
+    if (!is.null(fi)) {
+      hi  <- .nearest_nonfixed_left(tokens, fi)
+      fbi <- .nearest_fixed_right(tokens, i)
+      if (!is.null(hi) && !is.null(fbi)) {
+        m <- check(hi, fi, fbi)
+        if (!is.null(m)) return(c(m, list(span = c(hi, fbi))))
+      }
+    }
+
+    NULL
   },
   fire_fn = function(m, chain, params) {
     ev <- .make_event("TCO_CAPTURED_TCO", chain$chrom,
-                      list(m$h_tok, m$f_tok, m$fbar_tok),
+                      list(m$f_tok, m$fbar_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = as.integer(.ns(m$pk_l) + .ns(m$pk_r)),
                       notes = "terminal CO over earlier terminal CO")
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk_l, m$pk_r),
-                       loh  = list(m$f_tok)))
+                       loh  = list(m$f_tok, m$fbar_tok)))
   }
 )
 
@@ -1106,7 +1153,11 @@ rule_opp_sandwich <- list(
     )
 
     # Rewrite: combine flanking F tokens into one (they become adjacent after
-    # consuming the tiny F̄ fragment)
+    # consuming the tiny F̄ fragment). l_tok/r_tok's own outer-edge peak can
+    # be attached as peak_over rather than peak_left/peak_right (the G gap
+    # to the next segment is often wider than peak_pad_bp) — .edge_peak()
+    # recovers it by position so a terminal rule downstream (R02/R02b/R03)
+    # doesn't see a peakless token where a real junction peak exists.
     merged_flank <- make_token(
       type        = "F",
       state       = m$l_tok$state,
@@ -1114,8 +1165,8 @@ rule_opp_sandwich <- list(
       end         = m$r_tok$end,
       n_snps      = as.integer(sum(c(m$l_tok$n_snps, m$r_tok$n_snps), na.rm = TRUE)),
       depth_ratio = mean(c(m$l_tok$depth_ratio, m$r_tok$depth_ratio), na.rm = TRUE),
-      peak_left   = m$l_tok$peak_left,
-      peak_right  = m$r_tok$peak_right,
+      peak_left   = .edge_peak(m$l_tok, "left"),
+      peak_right  = .edge_peak(m$r_tok, "right"),
       bridged_gap = FALSE,
       meta        = c(m$l_tok$meta, m$r_tok$meta)
     )
@@ -1290,12 +1341,14 @@ rule_subres_tract <- list(
   pk <- left_ctx$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
-    if (!is.na(pos) && pos < f_tok$start) return(pk)
+    # <=, not <: a junction peak commonly lands exactly at the boundary
+    # (that's where the allele switch is), not strictly inside the gap.
+    if (!is.na(pos) && pos <= f_tok$start) return(pk)
   }
   pk <- f_tok$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
-    if (!is.na(pos) && pos < f_tok$start) return(pk)
+    if (!is.na(pos) && pos <= f_tok$start) return(pk)
   }
   NULL
 }
@@ -1308,13 +1361,14 @@ rule_subres_tract <- list(
   pk <- f_tok$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
-    if (!is.na(pos) && pos > f_tok$end) return(pk)
+    # >=, not >: see .left_junction_peak — boundary-exact peaks are normal.
+    if (!is.na(pos) && pos >= f_tok$end) return(pk)
   }
   if (!is.null(right_ctx$peak_left)) return(right_ctx$peak_left)
   pk <- right_ctx$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
-    if (!is.na(pos) && pos > f_tok$end) return(pk)
+    if (!is.na(pos) && pos >= f_tok$end) return(pk)
   }
   NULL
 }
@@ -1397,7 +1451,7 @@ rule_two_binary_flanking <- list(
       paste0("AMBIGUOUS(", tract$reason, ")")
     )
     ev <- .make_event(call, chain$chrom,
-                      list(m$l_tok, m$f_tok, m$r_tok),
+                      list(m$f_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = tract$n_support,
                       notes = paste0("two_binary_flanking; state=", m$f_tok$state))
@@ -1458,7 +1512,7 @@ rule_loh_crossover <- list(
       "CO_GC"
 
     ev <- .make_event(call, chain$chrom,
-                      list(m$l_tok, m$f_tok, m$r_tok),
+                      list(m$f_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = ns,
                       notes = paste0("loh_crossover; state=", m$f_tok$state))
@@ -1483,17 +1537,23 @@ rule_loh_crossover <- list(
 # CO interrupted by multiple short embedded GCs) gets peeled one at a time
 # until what remains touching the telomere is a single unified token, letting
 # R02/R02b correctly fire on the full span.
-# R10, R11, R12 are the interstitial rules. Old R03/R04/R07-R09 remain
-# disabled pending further redesign.
+# R10, R11, R12 are the interstitial rules. R03 is re-enabled below; old
+# R04/R07-R09 remain disabled pending further redesign.
+# R03 goes before R02/R02b: its match pattern (H [F] F-bar->TEL) shares its
+# right-hand junction peak with R02/R02b's single-F terminal pattern — both
+# can fire on the same boundary once an earlier R06 merge has extended the
+# outer F all the way to the telomere. R03 is the more complete call (it
+# also accounts for the inner, now-captured F instead of leaving it an
+# orphaned UNCATEGORIZED_LOH), so it must claim that peak first.
 MOTIF_RULES <- list(
   rule_opp_sandwich,             # R06 — small opposite-state fragment nested in a same-state run
   rule_terminal_deletion,        # R01
+  rule_tco_captured_tco,         # R03 — terminal CO over an earlier terminal CO
   rule_terminal_loh,             # R02
   rule_terminal_no_peak,         # R02b — terminal F with no peak: depth decides CO_TERM vs deletion
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking       # R11 — two binary peaks flanking H-[F]-H
-  # rule_tco_captured_tco,       # R03 — disabled
   # rule_het_bounded,            # R04 — disabled (replaced by R10/R11)
   # rule_double_gc,              # R07 — disabled
   # rule_crossover_no_tract,     # R08 — disabled

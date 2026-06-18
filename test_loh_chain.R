@@ -1157,6 +1157,78 @@ expect("single binary peak (only left junction) does NOT trigger R11", {
 })
 
 # =============================================================================
+#  SECTION 22 — R03: TCO_CAPTURED_TCO
+#
+#  Layout: H [F] F̄→TEL  — a terminal crossover (ALT_fixed, reaching the
+#  chromosome end) that itself captured an earlier terminal crossover
+#  (REF_fixed), with a chimeric-read peak at each junction.
+#
+#    1────300k:    HET
+#    300k─400k:    REF_fixed  (first, now-buried, terminal CO)
+#    400k─500k:    ALT_fixed  (second, capturing terminal CO; reaches TEL)
+# =============================================================================
+section("R03: TCO_CAPTURED_TCO")
+
+expect("TCO_CAPTURED_TCO fires for H-F-F-bar(telomeric) with peaks at both junctions", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L, 300000L, "HET",       n_snps = 300L),
+    make_loh_seg("chrI", 300001L, 400000L, "REF_fixed", n_snps = 50L),
+    make_loh_seg("chrI", 400001L, 500000L, "ALT_fixed", n_snps = 50L)
+  )
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 300000L, start = 298000L, end = 302000L,
+              edge_type = "binary", fusion_group = 1L),
+    make_peak("chrI", pos = 400000L, start = 398000L, end = 402000L,
+              edge_type = "binary", fusion_group = 2L)
+  )
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "TCO_CAPTURED_TCO" %in% event_classes(res)
+})
+
+expect("ordinary single terminal F (no captured TCO) still calls CO_TERM/TERMINAL_LOH, not TCO_CAPTURED_TCO", {
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L, 300000L, "HET",       n_snps = 300L),
+    make_loh_seg("chrI", 300001L, 500000L, "ALT_fixed", n_snps = 100L)
+  )
+  pks <- make_peak("chrI", pos = 300000L, start = 298000L, end = 302000L,
+                   edge_type = "binary")
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  !("TCO_CAPTURED_TCO" %in% event_classes(res))
+})
+
+expect("TCO_CAPTURED_TCO fires once the outer F is extended to the telomere by an R06 merge (real-data layout: G gaps + boundary-exact peaks)", {
+  # Mirrors a real chrXV chain: H, then a captured REF_fixed island, then an
+  # ALT_fixed run that only reaches the telomere after R06 (opp_sandwich)
+  # peels a tiny embedded REF fragment further out and merges its flanks.
+  # Both junction peaks sit exactly AT a segment boundary (not within
+  # peak_pad_bp of it) and are separated from their nearest token by a G
+  # gap wider than peak_pad_bp, so they only ever attach as peak_over —
+  # exercising both the R06 peak_over-preservation fix and the
+  # boundary-inclusive (<=/>=) junction-peak fix.
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L, 300000L, "HET",       n_snps = 300L),
+    make_loh_seg("chrI", 301001L, 400000L, "REF_fixed", n_snps = 50L),
+    make_loh_seg("chrI", 401001L, 500000L, "ALT_fixed", n_snps = 50L),
+    make_loh_seg("chrI", 501001L, 501001L, "REF_fixed", n_snps = 1L),
+    make_loh_seg("chrI", 502001L, 600000L, "ALT_fixed", n_snps = 50L)
+  )
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 301001L, start = 296000L, end = 306000L,
+              edge_type = "binary", fusion_group = 1L),
+    make_peak("chrI", pos = 400000L, start = 397000L, end = 403000L,
+              edge_type = "binary", fusion_group = 2L)
+  )
+  cs  <- make_chr_span("chrI", 600000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "TCO_CAPTURED_TCO" %in% event_classes(res)
+})
+
+# =============================================================================
 #  SUMMARY
 # =============================================================================
 cat(sprintf(
