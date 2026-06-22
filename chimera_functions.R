@@ -885,6 +885,60 @@ compute_coverage_map <- function(full_read_loh,
 
 
 # -----------------------------------------------------------------------------
+#  Recombination event symbols, overlaid on the LOH band at the bp midpoint
+#  of each event's recorded start/end span. One symbol per event_class
+#  recognised in EVENT_SYMBOL_MAP; event classes not listed are skipped.
+# -----------------------------------------------------------------------------
+EVENT_SYMBOL_MAP <- c(
+  CO_GC              = "✖", # HEAVY MULTIPLICATION X
+  CO_GC_subres       = "✖", # HEAVY MULTIPLICATION X
+  NCO_GC             = "𝝤", # CAPTIAL OMICRON
+  NCO_GC_in_terminal = "𝝤", # CAPTIAL OMICRON
+  TERMINAL_LOH       = "TCO",
+  CO_TERM            = "TCO",
+  TCO_CAPTURED_TCO   = "TCO",
+  TERMINAL_DELETION  = "Δ"  # GREEK CAPITAL LETTER DELTA
+)
+
+#' add_event_symbols()
+#'   Adds a bold, centered symbol layer for recombination events to an
+#'   existing chromosome-coverage plot. Symbols are centered horizontally on
+#'   the event's bp midpoint (start/end from event_tbl, converted to Kb) and
+#'   vertically in the middle of the LOH band, so they sit on the same line
+#'   as the LOH region rectangles.
+#'
+#' @param p            ggplot to add the layer to
+#' @param event_tbl    data.table with columns event_class, chrom, start, end
+#'                      (e.g. results$event_table); NULL/empty is a no-op
+#' @param band_ymin    numeric ymin of the LOH band (data units)
+#' @param band_ymax    numeric ymax of the LOH band (data units)
+#' @param chrom_filter optional chromosome to restrict to (character); NULL
+#'                      keeps all rows, relying on facetting (overview plot)
+#' @param size         text size passed to geom_text
+add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
+                               chrom_filter = NULL, size = 5) {
+  if (is.null(event_tbl) || nrow(event_tbl) == 0) return(p)
+
+  ev <- copy(event_tbl)
+  ev[, chrom := as.character(chrom)]
+  if (!is.null(chrom_filter)) ev <- ev[chrom == chrom_filter]
+  ev <- ev[event_class %in% names(EVENT_SYMBOL_MAP)]
+  if (nrow(ev) == 0) return(p)
+
+  ev[, x     := (start + end) / 2 / 1000]
+  ev[, y     := (band_ymin + band_ymax) / 2]
+  ev[, label := EVENT_SYMBOL_MAP[event_class]]
+
+  p + geom_text(
+    data        = ev,
+    aes(x = x, y = y, label = label),
+    fontface    = "bold",
+    size        = size,
+    inherit.aes = FALSE
+  )
+}
+
+# -----------------------------------------------------------------------------
 #  Overview plot builder
 #
 #  Expressed as a plain function that returns a single ggplot object.
@@ -903,6 +957,10 @@ compute_coverage_map <- function(full_read_loh,
 #  chromosome facet panel via geom_rect(), ensuring perfect per-chromosome
 #  alignment regardless of the number of chromosomes.  When no loh_map is
 #  available the function returns the plain overview plot unchanged.
+#
+#  When results$event_table is present (set after the chain event caller has
+#  run), recombination events are overlaid as bold symbols centered on the
+#  LOH band — see add_event_symbols() / EVENT_SYMBOL_MAP above.
 # -----------------------------------------------------------------------------
 build_overview_plot <- function(results) {
 
@@ -911,6 +969,7 @@ build_overview_plot <- function(results) {
   peaks     <- results$peaks_genomic
   snp_peaks <- results$snp_peaks
   loh_segs_all <- results$loh_segments   # pre-built segment table; NULL if not yet run
+  event_tbl    <- results$event_table    # from run_chain_analysis(); NULL if not yet run
 
   # Strain display names (set by UI inputs; fall back to generic labels)
   strain_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
@@ -1016,8 +1075,8 @@ build_overview_plot <- function(results) {
   loh_band_h <- y_ceiling * -0.10 # negative to put it below number line
 
   loh_labels <- c(
-    REF_fixed = paste0(strain_ref, " (blue)"),
-    ALT_fixed = paste0(strain_alt, " (red)")
+    REF_fixed = paste0(strain_ref), # will fix later
+    ALT_fixed = paste0(strain_alt)
   )
   loh_caption <- paste0(
     "LOH band (bottom of each panel): blue\u202f=\u202f", strain_ref,
@@ -1046,6 +1105,8 @@ build_overview_plot <- function(results) {
       legend.title     = element_text(size = rel(1), face = "bold"),
       legend.text      = element_text(size = rel(1))
     )
+
+  p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h)
 
   p_main
 }

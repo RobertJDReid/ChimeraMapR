@@ -703,6 +703,7 @@ server <- function(input, output, session) {
   output$chr_plot <- renderPlot({
     req(results$snp_coverage, results$chromosome_fits)
     results$loh_segments   # explicit reactive dep — triggers re-render after LOH finishes
+    results$event_table    # explicit reactive dep — triggers re-render after chain caller finishes
     build_overview_plot(results)
   }, height = function() {
     req(results$snp_coverage)
@@ -1685,6 +1686,10 @@ server <- function(input, output, session) {
             segs[chrom == .chr & loh_state %in% c("REF_fixed", "ALT_fixed")]
           } else NULL
 
+          # Read events fresh each render — set after the chain event caller
+          # (input$run_chain) completes; NULL beforehand.
+          .events_chr <- results$event_table
+
           p <- ggplot(.snp, aes(x = pos_kb, y = n)) +
             geom_line(
               data  = .fits,
@@ -1774,6 +1779,9 @@ server <- function(input, output, session) {
                 legend.title    = element_text(size = rel(1.1), face = "bold"),
                 legend.text     = element_text(size = rel(1.1))
               )
+
+            p <- add_event_symbols(p, .events_chr, band_ymin = 0, band_ymax = loh_band_h,
+                                    chrom_filter = .chr)
           }
 
           p

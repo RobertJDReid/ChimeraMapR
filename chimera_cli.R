@@ -19,6 +19,9 @@
 #    # Overview plot saved as an RDS object (for re-plotting in R)
 #    Rscript chimera_cli.R --overview-rds reads.csv.gz snps.vcf.gz genome.fa.fai
 #
+#    # Per-position coverage table + collapsed coverage segments as CSV
+#    Rscript chimera_cli.R --coverage-map reads.csv.gz snps.vcf.gz genome.fa.fai
+#
 #    # Full parameter set
 #    Rscript chimera_cli.R \
 #      --sample-name My_Sample \
@@ -130,6 +133,14 @@ option_list <- list(
               action  = "store_true",
               default = FALSE,
               help    = "Save the overview plot as an RDS object for re-plotting in R"),
+
+  # Coverage map (sequencing depth)
+  make_option("--coverage-map",
+              action  = "store_true",
+              default = FALSE,
+              help    = paste("Also write the per-position coverage table and collapsed",
+                              "coverage segments from compute_coverage_map() as CSVs",
+                              "(in addition to the primary output mode)")),
 
   # Chain-based LOH event calling
   make_option("--chain-all",
@@ -244,6 +255,16 @@ resolve_output <- function(opts_output, sample_name, mode) {
   opts_output
 }
 
+# Resolve a directory for "extra" per-run outputs (coverage map, chain CSVs)
+# that sit alongside the main --output, independent of its mode/extension.
+resolve_extra_dir <- function(opts_output, out_path) {
+  if (!is.null(opts_output) && (dir.exists(opts_output) || grepl("/$", opts_output))) {
+    opts_output
+  } else {
+    dirname(normalizePath(out_path, mustWork = FALSE))
+  }
+}
+
 output_mode <- if (opts[["peak-list"]])    "csv" else
                if (opts[["overview-rds"]]) "rds" else
                                            "png"
@@ -265,6 +286,7 @@ cat("  Min run         :", opts[["min-run"]],         "\n")
 cat("  Min peak height :", opts[["min-peak-height"]], "\n")
 cat("  Lambda (λ)      :", opts[["lambda"]],          "\n")
 cat("Output mode       :", output_mode, "→", out_path, "\n")
+if (opts[["coverage-map"]]) cat("Coverage map      : enabled\n")
 if (opts[["chain-all"]]) {
   cat("Chain analysis    : enabled\n")
   cat("  Telomere tol.   :", opts[["tel-tol"]],   "kb\n")
@@ -342,6 +364,38 @@ if (output_mode == "csv") {
 cat("Done.\n")
 
 
+# ── Coverage map (sequencing depth) ─────────────────────────────────────────────
+# Real per-position read depth, modeled with the same EM + Viterbi HMM approach
+# as the LOH map but on total depth instead of allele balance
+# (compute_coverage_map() in chimera_functions.R). Computed here whenever either
+# --coverage-map or --chain-all is requested, since chain analysis's Step 0a
+# needs the same result and would otherwise recompute it.
+coverage_result <- NULL
+if (opts[["coverage-map"]] || opts[["chain-all"]]) {
+  message("Computing coverage map ...")
+  coverage_result <- compute_coverage_map(results$full_read_loh)
+}
+
+if (opts[["coverage-map"]]) {
+  cov_dir  <- resolve_extra_dir(opts[["output"]], out_path)
+  dir.create(cov_dir, recursive = TRUE, showWarnings = FALSE)
+  cov_stem <- file.path(cov_dir, paste0(opts[["sample-name"]], "_", Sys.Date()))
+  cov_table_path <- paste0(cov_stem, "_coverage_table.csv")
+  cov_segs_path  <- paste0(cov_stem, "_coverage_segments.csv")
+
+  message("Writing coverage table → ", cov_table_path)
+  data.table::fwrite(coverage_result$coverage_table, cov_table_path)
+  message("Writing coverage segments → ", cov_segs_path)
+  data.table::fwrite(coverage_result$coverage_segments, cov_segs_path)
+
+  cat(sprintf("Coverage table     → %s (%d positions)\n",
+              cov_table_path, nrow(coverage_result$coverage_table)))
+  cat(sprintf("Coverage segments  → %s (%d segments; baseline depth = %.1f)\n",
+              cov_segs_path, nrow(coverage_result$coverage_segments),
+              coverage_result$baseline_depth))
+}
+
+
 # ── Chain-based LOH event calling (--chain-all) ───────────────────────────────
 if (opts[["chain-all"]]) {
 
@@ -407,12 +461,7 @@ if (opts[["chain-all"]]) {
   }
 
   # Resolve the output directory — place chain CSVs alongside the main output
-  out_dir <- if (!is.null(opts[["output"]]) &&
-                 (dir.exists(opts[["output"]]) || grepl("/$", opts[["output"]]))) {
-    opts[["output"]]
-  } else {
-    dirname(normalizePath(out_path, mustWork = FALSE))
-  }
+  out_dir <- resolve_extra_dir(opts[["output"]], out_path)
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   stem <- file.path(out_dir,
                     paste0(opts[["sample-name"]], "_", Sys.Date(), "_chain"))
@@ -444,9 +493,10 @@ if (opts[["chain-all"]]) {
   # the LOH map above but on total depth instead of allele balance. Used by
   # R01/R02b to tell a true terminal/arm deletion (real depth drop) apart
   # from a terminal LOH/crossover that is simply missing its junction peak
-  # (depth consistent with the rest of the chromosome).
+  # (depth consistent with the rest of the chromosome). Already computed above
+  # if --coverage-map was also requested; otherwise computed here on demand.
   cat("[chain] Step 0a: Computing coverage map ...\n")
-  coverage_result <- compute_coverage_map(results$full_read_loh)
+  if (is.null(coverage_result)) coverage_result <- compute_coverage_map(results$full_read_loh)
   coverage_segs    <- coverage_result$coverage_segments
 
   step0a_cov <- paste0(stem, "_step0a_coverage_segments.csv")
