@@ -19,7 +19,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.6.0"
+APP_VERSION <- "0.6.1"
 
 
 # -----------------------------------------------------------------------------
@@ -896,7 +896,7 @@ EVENT_SYMBOL_MAP <- c(
   NCO_GC_in_terminal = "𝝤", # CAPTIAL OMICRON
   TERMINAL_LOH       = "TCO",
   CO_TERM            = "TCO",
-  TCO_CAPTURED_TCO   = "TCO",
+  TCO_CAPTURED_TCO   = "2 X TCO",
   TERMINAL_DELETION  = "Δ"  # GREEK CAPITAL LETTER DELTA
 )
 
