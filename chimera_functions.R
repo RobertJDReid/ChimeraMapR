@@ -837,14 +837,15 @@ compute_coverage_map <- function(full_read_loh,
 #  recognised in EVENT_SYMBOL_MAP; event classes not listed are skipped.
 # -----------------------------------------------------------------------------
 EVENT_SYMBOL_MAP <- c(
-  CO_GC              = "✖", # HEAVY MULTIPLICATION X
-  CO_GC_subres       = "✖", # HEAVY MULTIPLICATION X
-  NCO_GC             = "𝝤", # CAPTIAL OMICRON
-  NCO_GC_in_terminal = "𝝤", # CAPTIAL OMICRON
-  TERMINAL_LOH       = "TCO",
-  CO_TERM            = "TCO",
-  TCO_CAPTURED_TCO   = "2 X TCO",
-  TERMINAL_DELETION  = "Δ"  # GREEK CAPITAL LETTER DELTA
+  CO_GC                    = "✖", # HEAVY MULTIPLICATION X
+  CO_GC_subres             = "✖", # HEAVY MULTIPLICATION X
+  NCO_GC                   = "𝝤", # CAPTIAL OMICRON
+  NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
+  TERMINAL_LOH             = "TCO",
+  CO_TERM                  = "TCO",
+  TCO_CAPTURED_TCO         = "2 X TCO",
+  TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA
+  `AMBIGUOUS(low_coverage)` = "?"  # low spanning reads; shown as review marker
 )
 
 #' add_event_symbols()

@@ -407,9 +407,10 @@ build_raw_chains <- function(loh_segments, chr_span, params,
       if (is.na(bet) || bet == "singleton") hal else bet
     },
     haplotype_label = if ("haplotype_label" %in% names(chr_fp)) haplotype_label[1] else NA_character_,
-    n_spanning      = 0L,
-    jaccard         = NA_real_,
-    pair_edge_type  = NA_character_,
+    n_spanning        = 0L,
+    jaccard           = NA_real_,
+    pair_edge_type    = NA_character_,
+    pair_fusion_mode  = NA_character_,
     # Per-read switch count from classify_peak_haplotype(), computed at
     # Run Analysis time for "binary"/"internal_crossover" labelled peaks —
     # the only direct read evidence available for peaks that never get a
@@ -434,9 +435,11 @@ build_raw_chains <- function(loh_segments, chr_span, params,
         matching <- chr_pp[snp_pos_a <= pos & snp_pos_b >= pos]
         if (nrow(matching) > 0) {
           best_pair <- matching[which.max(n_spanning)]
-          grp_rep$n_spanning[ri]     <- best_pair$n_spanning
-          grp_rep$jaccard[ri]        <- best_pair$jaccard
-          grp_rep$pair_edge_type[ri] <- best_pair$edge_type   # always write
+          grp_rep$n_spanning[ri]       <- best_pair$n_spanning
+          grp_rep$jaccard[ri]          <- best_pair$jaccard
+          grp_rep$pair_edge_type[ri]   <- best_pair$edge_type
+          grp_rep$pair_fusion_mode[ri] <- if ("fusion_mode" %in% names(best_pair))
+                                            best_pair$fusion_mode else NA_character_
           if (is.na(grp_rep$best_edge_type[ri]))
             grp_rep$best_edge_type[ri] <- best_pair$edge_type
         }
@@ -611,8 +614,15 @@ classify_tract <- function(peak, params) {
   # was found for this peak — the edge_type was set by the app's per-peak read
   # classifier and is itself sufficient evidence.  A genuinely low-count
   # situation has n_spanning > 0 but below the threshold.
+  #
+  # Exception: automatic pair classifications (LOH-based crossovers/GCs where
+  # fusion_mode = "automatic") use LOH pattern evidence, not chimeric-read
+  # spanning evidence.  n_spanning for these reflects incidental spanning reads
+  # over the LOH tract, not the primary evidence, so don't gate on it.
+  auto_pair <- isTRUE(peak$pair_fusion_mode == "automatic") &&
+               isTRUE(peak$pair_edge_type %in% c("crossover", "gene_conversion"))
   has_count <- !is.na(n_spanning) && n_spanning > 0L
-  if (has_count && n_spanning < params$min_span)
+  if (has_count && n_spanning < params$min_span && !auto_pair)
     return(list(call = "AMBIGUOUS", reason = "low_coverage",
                 n_support = n_spanning))
 
@@ -662,9 +672,12 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     return(classify_tract(best_pk, params))
   }
 
-  # Only gate on coverage when we actually have a real count
+  # Only gate on coverage when we actually have a real count.
+  # Bypass if either flanking peak was auto-classified from LOH evidence.
+  auto_pair <- isTRUE(left_peak$pair_fusion_mode  == "automatic") ||
+               isTRUE(right_peak$pair_fusion_mode == "automatic")
   has_count <- !is.na(ns) && ns > 0L
-  if (has_count && ns < params$min_span)
+  if (has_count && ns < params$min_span && !auto_pair)
     return(list(call = "AMBIGUOUS", reason = "low_coverage",
                 n_support = ns))
 
