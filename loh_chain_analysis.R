@@ -1563,7 +1563,9 @@ MOTIF_RULES <- list(
   rule_terminal_deletion,        # R01
   rule_tco_captured_tco,         # R03 — terminal CO over an earlier terminal CO
   rule_terminal_loh,             # R02
-  rule_terminal_no_peak,         # R02b — terminal F with no peak: depth decides CO_TERM vs deletion
+  # rule_terminal_no_peak disabled: without a chimeric peak at the TEL boundary
+  # there is no positive evidence for a crossover mechanism.  Leave unclaimed →
+  # UNCATEGORIZED_LOH → no symbol on the overview map.
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking       # R11 — two binary peaks flanking H-[F]-H
