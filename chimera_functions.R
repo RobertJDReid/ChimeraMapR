@@ -1525,17 +1525,24 @@ gap_loh_state <- function(loh_segments, chr_name, pos_start, pos_end) {
 #   path) would transitively merge two independent LOH events into one
 #   fusion group through igraph::components() -- direct LOH evidence
 #   bridging the gap itself (loh_in_gap) is required instead.
+#
+#   win_start_a/win_end_a: peak A's read window (defaults to pos_a for both,
+#     giving an exact-match check). Using the full window avoids false
+#     negatives when the LOH segment boundary sits a few hundred bp inside
+#     the peak window rather than exactly at the SNP anchor.
 # ---------------------------------------------------------------------------
 peaks_bridge_independent_tracts <- function(loh_segments, chr_name,
-                                            pos_a, pos_b, pad_bp = 200L) {
+                                            pos_a, pos_b,
+                                            win_start_a = pos_a, win_end_a = pos_a,
+                                            win_start_b = pos_b, win_end_b = pos_b) {
   if (is.null(loh_segments) || nrow(loh_segments) == 0) return(FALSE)
   if (is.na(pos_a) || is.na(pos_b)) return(FALSE)
   segs <- loh_segments[
     as.character(chrom) == chr_name & loh_state %in% c("REF_fixed", "ALT_fixed")
   ]
   if (nrow(segs) == 0) return(FALSE)
-  a_exits  <- any(abs(segs$end   - pos_a) <= pad_bp & segs$end   < pos_b)
-  b_enters <- any(abs(segs$start - pos_b) <= pad_bp & segs$start > pos_a)
+  a_exits  <- any(segs$end   >= win_start_a & segs$end   <= win_end_a & segs$end   < pos_b)
+  b_enters <- any(segs$start >= win_start_b & segs$start <= win_end_b & segs$start > pos_a)
   a_exits && b_enters
 }
 
@@ -1723,7 +1730,11 @@ compute_peak_pairs <- function(snp_peaks,
       # combination blocks automatic fusion further down.
       bridges_independent_tracts <- if (!is.null(loh_segments)) {
         peaks_bridge_independent_tracts(loh_segments, chr_name,
-                                        pk_a$snp_pos, pk_b$snp_pos)
+                                        pk_a$snp_pos,    pk_b$snp_pos,
+                                        win_start_a = pk_a$peak_start,
+                                        win_end_a   = pk_a$peak_end,
+                                        win_start_b = pk_b$peak_start,
+                                        win_end_b   = pk_b$peak_end)
       } else {
         FALSE
       }
