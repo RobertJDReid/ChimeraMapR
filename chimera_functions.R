@@ -841,7 +841,7 @@ EVENT_SYMBOL_MAP <- c(
   CO_GC_subres             = "✖", # HEAVY MULTIPLICATION X
   NCO_GC                   = "𝝤", # CAPTIAL OMICRON
   NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
-  TERMINAL_LOH             = "TCO",
+#  TERMINAL_LOH             = "TCO", # Terminal LOH should remain unlabeled unless it can be categorized
   CO_TERM                  = "TCO",
   TCO_CAPTURED_TCO         = "2 X TCO",
   TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA
