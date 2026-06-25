@@ -1655,14 +1655,38 @@ compute_peak_pairs <- function(snp_peaks,
                                homog_frac          = 0.80) {
 
   if (is.null(snp_peaks) || nrow(snp_peaks) == 0)
-    return(list(peak_pairs = NULL, fused_peaks = NULL))
+    return(list(peak_pairs = NULL, fused_peaks = NULL, snp_peaks = snp_peaks))
 
   peaks_dt <- copy(snp_peaks)
   peaks_dt <- peaks_dt[!is.na(snp_pos)]
   if (nrow(peaks_dt) == 0)
-    return(list(peak_pairs = NULL, fused_peaks = NULL))
+    return(list(peak_pairs = NULL, fused_peaks = NULL, snp_peaks = snp_peaks))
   peaks_dt[, peak_id := .I]
   peaks_dt[, chrom   := as.character(chrom)]
+
+  # ── 0. Label any unlabeled peaks ─────────────────────────────────────────
+  # classify_peak_haplotype() is called here for any peak that doesn't already
+  # carry a haplotype_label (e.g. from the app's plot-building loop or the CLI's
+  # prior step). Pre-labeled peaks are skipped at zero cost, so callers that
+  # do their own labeling first don't pay twice.
+  if (!"haplotype_label" %in% names(peaks_dt))
+    peaks_dt[, haplotype_label := NA_character_]
+
+  for (.chr in unique(peaks_dt$chrom)) {
+    .chr_p <- peaks_dt[chrom == .chr & !is.na(snp_pos)][order(snp_pos)]
+    for (.pi in seq_len(nrow(.chr_p))) {
+      .pk <- .chr_p[.pi]
+      if (!is.na(.pk$haplotype_label)) next
+      .touching <- transition_pos[
+        as.character(chrom) == .chr &
+          pos >= .pk$peak_start & pos <= .pk$peak_end,
+        unique(read_id)
+      ]
+      if (length(.touching) == 0) next
+      .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps)
+      peaks_dt[peak_id == .pk$peak_id, haplotype_label := .hap$label]
+    }
+  }
 
   all_pairs <- list()
 
@@ -1697,8 +1721,8 @@ compute_peak_pairs <- function(snp_peaks,
       prev_pk <- if (j >= 2L) chr_peaks[j - 1L] else NULL
       next_pk <- if (j + 2L <= nrow(chr_peaks)) chr_peaks[j + 2L] else NULL
 
-      label_a <- if ("haplotype_label" %in% names(pk_a)) pk_a$haplotype_label else NA_character_
-      label_b <- if ("haplotype_label" %in% names(pk_b)) pk_b$haplotype_label else NA_character_
+      label_a <- pk_a$haplotype_label
+      label_b <- pk_b$haplotype_label
 
       if (!peak_is_fusion_eligible(label_a) || !peak_is_fusion_eligible(label_b)) next
 
@@ -1943,8 +1967,18 @@ compute_peak_pairs <- function(snp_peaks,
   edge_info <- rbindlist(lapply(peaks_dt$peak_id, get_peak_edge_info))
   peaks_dt  <- merge(peaks_dt, edge_info, by = "peak_id", all.x = TRUE)
 
+  # Write haplotype labels back to a clean copy of snp_peaks so callers don't
+  # need to re-run classify_peak_haplotype and the CLI can drop its standalone
+  # labeling step.
+  snp_peaks_out <- copy(snp_peaks)
+  if (!"haplotype_label" %in% names(snp_peaks_out))
+    snp_peaks_out[, haplotype_label := NA_character_]
+  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label)]
+  snp_peaks_out[label_map, on = .(snp_pos, chrom), haplotype_label := i.haplotype_label]
+
   list(
     peak_pairs  = pairs_dt,
-    fused_peaks = peaks_dt
+    fused_peaks = peaks_dt,
+    snp_peaks   = snp_peaks_out
   )
 }
