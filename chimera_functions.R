@@ -16,11 +16,27 @@ suppressPackageStartupMessages({
   library(pracma)
   library(ggplot2)
   library(Matrix)
+  library(Rcpp)
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
 APP_VERSION <- "0.6.1"
 
+# -----------------------------------------------------------------------------
+#  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
+#  compute_loh_map() below. Located relative to this file — not getwd() —
+#  so this works whether sourced from app.R (cwd = app dir), chimera_cli.R
+#  (may run via a PATH symlink from any directory), or an Rmd.
+# -----------------------------------------------------------------------------
+.chimera_script_dir <- local({
+  for (i in rev(seq_len(sys.nframe()))) {
+    of <- sys.frame(i)$ofile
+    if (!is.null(of)) return(dirname(normalizePath(of, mustWork = FALSE)))
+  }
+  getwd()
+})
+sourceCpp(file.path(.chimera_script_dir, "src", "loh_hmm.cpp"),
+          cacheDir = file.path(.chimera_script_dir, "src", ".rcpp_cache"))
 
 # -----------------------------------------------------------------------------
 #  Whittaker smoother
@@ -489,96 +505,27 @@ compute_loh_map <- function(full_read_loh,
                             warn_fn      = function(msg) message("WARNING: ", msg)) {
 
   # ── Internal model functions ───────────────────────────────────────────────
+  # EM fit + Viterbi decoding are implemented in src/loh_hmm.cpp (compiled at
+  # source-time, see top of this file) — these are thin wrappers that keep
+  # the same call signatures used below.
 
-  dbinom_err <- function(k, N, p)
-    dbinom(k, N, pmax(pmin(p, 1 - 1e-9), 1e-9))
-
-  dbetabinom <- function(k, N, mu, theta) {
-    alpha <- mu * theta
-    beta_ <- (1 - mu) * theta
-    out   <- exp(lchoose(N, k) + lbeta(k + alpha, N - k + beta_) - lbeta(alpha, beta_))
-    out[!is.finite(out)] <- 0
-    out
-  }
-
-  wll_theta <- function(theta, k, N, mu, w) {
-    ll <- dbetabinom(k, N, mu, theta)
-    ll[ll <= 0] <- 1e-300
-    sum(w * log(ll))
-  }
+  loh_labels <- c("HOM_REF", "DIP_HET_0.5", "HOM_ALT")
 
   fit_ab_mixture <- function(k, N, theta_init = 80, eps_init = 0.02,
                              max_iter = 200, tol = 1e-5) {
-    labels <- c("HOM_REF", "DIP_HET_0.5", "HOM_ALT")
-    pi     <- rep(1/3, 3)
-    eps    <- eps_init
-    theta  <- theta_init
-    r      <- matrix(0, length(k), 3)
-    for (iter in seq_len(max_iter)) {
-      old    <- c(pi, eps, theta)
-      r[, 1] <- pi[1] * dbinom_err(k, N, eps)
-      r[, 2] <- pi[2] * dbetabinom(k, N, 0.5, theta)
-      r[, 3] <- pi[3] * dbinom_err(k, N, 1 - eps)
-      rs     <- rowSums(r); rs[rs == 0] <- 1e-300
-      r      <- r / rs
-      pi     <- colMeans(r)
-      w_ref  <- r[, 1]; w_alt <- r[, 3]
-      num    <- sum(w_ref * k / N) + sum(w_alt * (1 - k / N))
-      den    <- sum(w_ref) + sum(w_alt)
-      if (den > 0) eps <- pmax(pmin(num / den, 0.15), 1e-4)
-      wj <- r[, 2]
-      if (sum(wj) >= 1)
-        theta <- optimize(wll_theta, c(5, 5000),
-                          k = k, N = N, mu = 0.5, w = wj,
-                          maximum = TRUE)$maximum
-      if (max(abs(c(pi, eps, theta) - old) / (abs(old) + 1)) < tol) break
-    }
+    fit <- fit_ab_mixture_cpp(as.double(k), as.double(N),
+                              theta_init, eps_init, max_iter, tol)
     list(
-      mixing_proportions = setNames(pi, labels),
-      error_rate         = eps,
-      theta              = theta,
-      posterior          = `colnames<-`(r, labels),
-      assignments        = labels[max.col(r)]
+      mixing_proportions = setNames(fit$mixing_proportions, loh_labels),
+      error_rate         = fit$error_rate,
+      theta              = fit$theta
     )
   }
 
   viterbi_segment <- function(k, N, chrom, fit, trans_stay) {
-    n_states  <- 3L
-    trans_off <- (1 - trans_stay) / (n_states - 1)
-    A_log     <- matrix(log(trans_off), n_states, n_states)
-    diag(A_log) <- log(trans_stay)
-    eps           <- fit$error_rate
-    theta         <- fit$theta
-    labels        <- names(fit$mixing_proportions)
-    log_emit      <- matrix(0, length(k), n_states)
-    log_emit[, 1] <- log(pmax(dbinom_err(k, N, eps),          1e-300))
-    log_emit[, 2] <- log(pmax(dbetabinom(k, N, 0.5, theta),   1e-300))
-    log_emit[, 3] <- log(pmax(dbinom_err(k, N, 1 - eps),      1e-300))
-    log_pi        <- log(fit$mixing_proportions)
-    assignments   <- character(length(k))
-    for (chr in unique(chrom)) {
-      idx <- which(chrom == chr)
-      T_  <- length(idx)
-      E   <- log_emit[idx, , drop = FALSE]
-      delta      <- matrix(-Inf, T_, n_states)
-      psi        <- matrix(0L,   T_, n_states)
-      delta[1, ] <- log_pi + E[1, ]
-      if (T_ > 1L) {
-        for (t in 2L:T_) {
-          scores     <- matrix(delta[t - 1L, ], n_states, n_states) + A_log
-          psi[t, ]   <- apply(scores, 2, which.max)
-          delta[t, ] <- apply(scores, 2, max) + E[t, ]
-        }
-        path     <- integer(T_)
-        path[T_] <- which.max(delta[T_, ])
-        for (t in (T_ - 1L):1L)
-          path[t] <- psi[t + 1L, path[t + 1L]]
-        assignments[idx] <- labels[path]
-      } else {
-        assignments[idx] <- labels[which.max(delta[1L, ])]
-      }
-    }
-    assignments
+    viterbi_segment_cpp(as.double(k), as.double(N), as.character(chrom),
+                        as.double(fit$mixing_proportions), fit$error_rate, fit$theta,
+                        trans_stay)
   }
 
   # ── 1. Aggregate to per-position allele balance ────────────────────────────

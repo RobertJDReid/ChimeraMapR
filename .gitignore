@@ -5,3 +5,4 @@ archive
 .Rhistory
 .Rapp.history
 .claude
+src/.rcpp_cache
