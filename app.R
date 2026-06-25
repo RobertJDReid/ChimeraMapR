@@ -36,8 +36,12 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
     fused_end_bp    = fused_end_bp[1],
     n_sub_peaks     = n_sub_peaks[1],
     constituent_ids = constituent_ids[1],
-    best_edge_type  = ifelse(n_sub_peaks[1] == 1L, "singleton",
-                             ifelse(is.na(best_edge_type[1]), "—", best_edge_type[1])),
+    best_edge_type  = if (n_sub_peaks[1] == 1L) {
+                        lbl <- best_edge_type[1]
+                        ifelse(is.na(lbl), "singleton", gsub("_", " ", lbl))
+                      } else {
+                        ifelse(is.na(best_edge_type[1]), "—", best_edge_type[1])
+                      },
     best_fusion_mode = ifelse(n_sub_peaks[1] == 1L, "—",
                               ifelse(is.na(best_fusion_mode[1]), "—", best_fusion_mode[1])),
     # Collect all constituent peak_ids as integer vector for read lookup
@@ -1278,8 +1282,15 @@ server <- function(input, output, session) {
       `Fused End (Kb)`    = round(fused_end_bp[1]   / 1000, 2),
       `Sub-peaks`         = n_sub_peaks[1],
       `Constituent IDs`   = constituent_ids[1],
-      `Edge Type`         = ifelse(n_sub_peaks[1] == 1L, "singleton",
-                                   ifelse(is.na(best_edge_type[1]), "—", best_edge_type[1])),
+      `Edge Type`         = if (n_sub_peaks[1] == 1L) {
+                              # Singleton: show the peak's own haplotype label
+                              # (stored in best_edge_type by get_peak_edge_info),
+                              # falling back to "singleton" when no label exists.
+                              lbl <- best_edge_type[1]
+                              ifelse(is.na(lbl), "singleton", gsub("_", " ", lbl))
+                            } else {
+                              ifelse(is.na(best_edge_type[1]), "—", best_edge_type[1])
+                            },
       `Fusion Mode`       = ifelse(n_sub_peaks[1] == 1L, "—",
                                    ifelse(is.na(best_fusion_mode[1]), "—", best_fusion_mode[1]))
     ), by = fusion_group]

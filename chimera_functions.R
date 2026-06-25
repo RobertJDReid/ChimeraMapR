@@ -1959,12 +1959,25 @@ compute_peak_pairs <- function(snp_peaks,
 
   get_peak_edge_info <- function(pid) {
     rel_pairs <- pairs_dt[peak_id_a == pid | peak_id_b == pid]
-    if (nrow(rel_pairs) == 0)
-      return(data.table(peak_id = pid, best_edge_type = NA_character_,
-                        best_fusion_mode = NA_character_,
+    if (nrow(rel_pairs) == 0) {
+      # Singleton — no pairs evaluated.  Use the peak's own haplotype_label so
+      # callers can show something informative (e.g. "internal_crossover") instead
+      # of NA.
+      lbl <- peaks_dt[peak_id == pid, haplotype_label]
+      return(data.table(peak_id            = pid,
+                        best_edge_type     = if (length(lbl) && !is.na(lbl)) lbl
+                                             else NA_character_,
+                        best_fusion_mode   = NA_character_,
                         adjacent_pair_keys = NA_character_))
-    rel_pairs[, priority := FUSION_HEURISTICS$edge_priority[edge_type]]
-    best <- rel_pairs[which.min(priority)]
+    }
+    # Prefer auto-fusion pairs over supervised/none pairs.  Without this, a
+    # supervised gene_conversion pair (edge_priority=1) can outrank an automatic
+    # crossover pair (edge_priority=2), making the peak appear supervised even
+    # though it is already committed to an auto-fusion group.
+    auto_rel <- rel_pairs[fusion_mode == "automatic"]
+    pool     <- if (nrow(auto_rel) > 0) auto_rel else rel_pairs
+    pool[, priority := FUSION_HEURISTICS$edge_priority[edge_type]]
+    best <- pool[which.min(priority)]
     data.table(
       peak_id            = pid,
       best_edge_type     = best$edge_type,
