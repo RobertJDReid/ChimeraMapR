@@ -1865,9 +1865,18 @@ compute_peak_pairs <- function(snp_peaks,
 
       pair_key <- paste0(chr_name, "_", pk_a$peak_id, "_", pk_b$peak_id)
 
-      # LOH-crossover boundary peaks mark the opposite ends of a CO event and
-      # must not be fused into a single peak record.
-      fusion_mode <- if (is_loh_crossover_mode) {
+      # Determine fusion_mode for this pair.
+      # is_loh_crossover_mode fires when LOH fills the gap AND no read is
+      # chimeric at both peaks (expected: each read crosses the boundary once).
+      # That description fits two very different situations:
+      #   (a) !bridges_independent_tracts: the two peaks are the entry/exit
+      #       boundaries of the SAME LOH tract — fuse them automatically.
+      #   (b)  bridges_independent_tracts: each peak already exits its own
+      #       independent LOH tract into this gap — these are the two flanks of
+      #       a crossover point and must not be merged.
+      fusion_mode <- if (is_loh_crossover_mode && !bridges_independent_tracts) {
+        "automatic"
+      } else if (is_loh_crossover_mode) {
         "none"
       } else {
         decide_fusion_mode(
