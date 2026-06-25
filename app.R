@@ -456,9 +456,10 @@ ui <- fluidPage(
 
         tabPanel("Overview Plot",
                  helpText("Genome-wide overview of chimeric read coverage and Whittaker-smoothed signal across chromosomes."),
+				# set height to NULL to avoid floating buttons
                  plotOutput(
                    "chr_plot",
-                   height = "1200px"
+                   height = NULL
                  ),
                  fluidRow(
                    column(3, downloadButton("download_plot",     "Download Plot (.png)")),
@@ -722,14 +723,19 @@ server <- function(input, output, session) {
     req(input$read_data_file, input$snp_data_file, input$chr_size_file)
 
     # Reset outputs on re-run
-    results$selected_region      <- NULL
-    results$selected_region_plot <- NULL
-    results$selected_region_data <- NULL
-    results$peak_pairs           <- NULL
-    results$fused_peaks          <- NULL
-    results$fused_hap_labels     <- NULL
-    results$loh_map              <- NULL
-    results$loh_segments         <- NULL
+    results$selected_region        <- NULL
+    results$selected_region_plot   <- NULL
+    results$selected_region_data   <- NULL
+    results$selected_regions       <- list()
+    results$peak_pairs             <- NULL
+    results$fused_peaks            <- NULL
+    results$fused_peak_plots_by_chr <- NULL
+    results$fused_hap_labels       <- NULL
+    results$loh_map                <- NULL
+    results$loh_segments           <- NULL
+    results$chain_result           <- NULL
+    results$event_table            <- NULL
+    results$chain_params           <- NULL
     supervised_approved(character(0))
 
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
