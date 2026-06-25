@@ -1,4 +1,6 @@
 *.DS_store
+full-genome-coverage
+single-chr-I
 test_data
 test_output
 archive
