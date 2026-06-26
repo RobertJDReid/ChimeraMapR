@@ -2261,7 +2261,7 @@ server <- function(input, output, session) {
       tags$span("NCO_GC_subres",      style = "background:#b8daff; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("CO_GC",              style = "background:#ffeeba; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("CROSSOVER_NO_TRACT", style = "background:#ffe8a1; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("TERMINAL_LOH",       style = "background:#d6d8db; padding:2px 6px; border-radius:3px; margin-right:4px;"),
+      tags$span("CO_TERM",             style = "background:#d6d8db; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("TERMINAL_DELETION",  style = "background:#f5c6cb; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("TCO_CAPTURED_TCO",   style = "background:#e2d9f3; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("DOUBLE_GC",          style = "background:#bee5eb; padding:2px 6px; border-radius:3px; margin-right:4px;"),

@@ -305,12 +305,23 @@ run_chimera_analysis <- function(
       region_peaks_df <- NULL
     }
 
-    # (C) Deduplicate — keep fallback peaks not already found by findpeaks
+    # (C) Deduplicate — keep fallback peaks not already found by findpeaks.
+    # Use the findpeaks valley-to-valley extent (raw_peaks columns 3–4) to test
+    # coverage: a fallback peak is redundant if its SNP position falls inside
+    # any findpeaks peak's own extent.  The old approach used the fallback's
+    # narrow ±5-step window to test for findpeaks *positions*, which failed when
+    # the smoother placed its maximum >1 000 bp away from the raw-SNP cluster.
     if (!is.null(region_peaks_df) && nrow(region_peaks_df) > 0) {
+      if (!is.null(raw_peaks) && nrow(raw_peaks) > 0) {
+        fp_left  <- uniform_pos[raw_peaks[, 3]]
+        fp_right <- uniform_pos[raw_peaks[, 4]]
+      } else {
+        fp_left  <- numeric(0)
+        fp_right <- numeric(0)
+      }
       region_peaks_df$is_new <- vapply(seq_len(nrow(region_peaks_df)), function(i) {
-        rstart <- uniform_pos[region_peaks_df$peak_start[i]]
-        rend   <- uniform_pos[region_peaks_df$peak_end[i]]
-        !any(findpeaks_positions >= rstart & findpeaks_positions <= rend)
+        fb_pos <- uniform_pos[region_peaks_df$peak_index[i]]
+        !any(fp_left <= fb_pos & fb_pos <= fp_right)
       }, logical(1))
       novel_region_peaks <- region_peaks_df[region_peaks_df$is_new, , drop = FALSE]
     } else {
@@ -841,7 +852,6 @@ EVENT_SYMBOL_MAP <- c(
   CO_GC_subres             = "✖", # HEAVY MULTIPLICATION X
   NCO_GC                   = "𝝤", # CAPTIAL OMICRON
   NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
-#  TERMINAL_LOH             = "TCO", # Terminal LOH should remain unlabeled unless it can be categorized
   CO_TERM                  = "TCO",
   TCO_CAPTURED_TCO         = "2 X TCO",
   TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA

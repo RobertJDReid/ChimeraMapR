@@ -484,6 +484,39 @@ canonicalise <- function(chain, params) {
 
     while (i <= length(tokens)) {
 
+      # Rule 0: G H_tiny G -> G
+      # A single-observation HET island (n_snps <= min_snps_for_peak) sandwiched
+      # between two gap tokens is a segmentation artifact — the HMM assigned one
+      # ambiguous SNP as HET in what is otherwise a fixed LOH block.  Absorbing it
+      # into a plain gap lets the F-G-F rule below consolidate same-state fixed
+      # segments that would otherwise be permanently split, which in turn lets
+      # terminal rules (R03) see the correct telomere-reaching extent.
+      if (i <= length(tokens) - 2L) {
+        a <- tokens[[i]]
+        h <- tokens[[i + 1L]]
+        b <- tokens[[i + 2L]]
+
+        if (a$type == "G" && h$type == "H" && b$type == "G" &&
+            !is.na(h$n_snps) && h$n_snps <= params$min_snps_for_peak &&
+            (b$end - a$start) < params$merge_gap_bp) {
+
+          merged <- make_token(
+            type        = "G",
+            state       = NA_character_,
+            start       = a$start,
+            end         = b$end,
+            n_snps      = 0L,
+            depth_ratio = NA_real_,
+            bridged_gap = TRUE
+          )
+          tokens <- c(tokens[seq_len(i - 1L)],
+                      list(merged),
+                      tokens[seq.int(i + 3L, length(tokens))])
+          changed <- TRUE
+          next
+        }
+      }
+
       # Rule 1: F G F (same state, gap < merge_gap) -> merge into single F
       if (i <= length(tokens) - 2L) {
         a <- tokens[[i]]
@@ -900,7 +933,7 @@ rule_terminal_loh <- list(
     call <- if (has_count && n_spanning < params$min_span) {
       "AMBIGUOUS(low_coverage)"
     } else if (!is.null(edge_type) && !is.na(edge_type) && edge_type == "binary") {
-      "TERMINAL_LOH"
+      "CO_TERM"
     } else {
       paste0("AMBIGUOUS(terminal_non_binary_peak:", edge_type %||% "NA", ")")
     }
@@ -983,14 +1016,35 @@ rule_tco_captured_tco <- list(
       if (!.is_non_fixed(htk)) return(NULL)
       if (is.na(ftk$state) || is.na(fbar$state)) return(NULL)
       if (fbar$state != .opp_state(ftk$state)) return(NULL)
-      if (!.is_telomeric(fbar, chain, params)) return(NULL)
+
+      # fbar_pk_ctx: the token whose left boundary carries the junction peak.
+      # This is always the FIRST fbar token (the one immediately adjacent to
+      # the small-LOH ftk).  When the terminal LOH is segmented into multiple
+      # same-state F tokens by a tiny HET island (e.g. a single ambiguous SNP
+      # in the full-genome HMM), the first segment still holds peak_left while
+      # the telomere-reaching continuation has no peak.
+      fbar_pk_ctx  <- fbar
+      fbar_extra   <- list()   # intermediate same-state F tokens (if any)
+      fb_tel_idx   <- fb_idx
+
+      if (!.is_telomeric(fbar, chain, params)) {
+        cont <- .find_telomeric_continuation(tokens, fb_idx, fbar$state, chain, params)
+        if (is.null(cont)) return(NULL)
+        # intermediate tokens between fbar and the telomeric end (usually empty)
+        fbar_extra <- lapply(cont[-length(cont)], `[[`, "tok")
+        fb_tel_idx <- cont[[length(cont)]]$idx
+        fbar       <- cont[[length(cont)]]$tok   # telomere-reaching token
+      }
+
       # .left_junction_peak/.right_junction_peak fall back to a neighbour's
       # peak_over (position-checked), not just peak_left/peak_right — real
       # junction peaks land there far more often than directly on the token.
       pk_l <- .left_junction_peak(ftk, htk)
-      pk_r <- .right_junction_peak(ftk, fbar)
+      pk_r <- .right_junction_peak(ftk, fbar_pk_ctx)  # peak on original boundary
       if (is.null(pk_l) || is.null(pk_r)) return(NULL)
-      list(f_tok = ftk, fbar_tok = fbar, h_tok = htk, pk_l = pk_l, pk_r = pk_r)
+      list(f_tok = ftk, fbar_tok = fbar, fbar_pk_ctx = fbar_pk_ctx,
+           fbar_extra = fbar_extra, fb_tel_idx = fb_tel_idx,
+           h_tok = htk, pk_l = pk_l, pk_r = pk_r)
     }
 
     if (!.is_non_fixed(tokens[[i]])) return(NULL)
@@ -1002,7 +1056,7 @@ rule_tco_captured_tco <- list(
     fbi <- if (!is.null(fi)) .nearest_fixed_right(tokens, fi) else NULL
     if (!is.null(fi) && !is.null(fbi)) {
       m <- check(i, fi, fbi)
-      if (!is.null(m)) return(c(m, list(span = c(i, fbi))))
+      if (!is.null(m)) return(c(m, list(span = c(i, m$fb_tel_idx))))
     }
 
     # Late: anchor on the non-fixed gap between ftk and fbar. fbar is very
@@ -1019,21 +1073,30 @@ rule_tco_captured_tco <- list(
       fbi <- .nearest_fixed_right(tokens, i)
       if (!is.null(hi) && !is.null(fbi)) {
         m <- check(hi, fi, fbi)
-        if (!is.null(m)) return(c(m, list(span = c(hi, fbi))))
+        if (!is.null(m)) return(c(m, list(span = c(hi, m$fb_tel_idx))))
       }
     }
 
     NULL
   },
   fire_fn = function(m, chain, params) {
+    # Build the full list of LOH tokens covering f_tok through the telomeric end,
+    # including any intermediate same-state F tokens produced by HET-island splits.
+    has_cont  <- !identical(m$fbar_pk_ctx$start, m$fbar_tok$start)
+    fbar_toks <- if (has_cont) {
+      c(list(m$fbar_pk_ctx), m$fbar_extra, list(m$fbar_tok))
+    } else {
+      list(m$fbar_tok)
+    }
+    all_loh <- c(list(m$f_tok), fbar_toks)
     ev <- .make_event("TCO_CAPTURED_TCO", chain$chrom,
-                      list(m$f_tok, m$fbar_tok),
+                      all_loh,
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = as.integer(.ns(m$pk_l) + .ns(m$pk_r)),
                       notes = "terminal CO over earlier terminal CO")
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk_l, m$pk_r),
-                       loh  = list(m$f_tok, m$fbar_tok)))
+                       loh  = all_loh))
   }
 )
 
@@ -1343,6 +1406,32 @@ rule_subres_tract <- list(
   j <- i + 1L
   while (j <= n && tokens[[j]]$type == "G") j <- j + 1L
   if (j <= n && tokens[[j]]$type == "F") j else NULL
+}
+
+# Walk right from tokens[[start_i+1]], skipping G tokens and tiny H tokens
+# (n_snps <= min_snps_for_peak), collecting consecutive same-state F tokens.
+# Returns a list of {tok, idx} pairs ending with the last F of `state` that
+# is telomeric, or NULL if no telomeric same-state F is reachable.
+# Used by R03 to bridge a single-SNP HET island that splits what is logically
+# one terminal LOH block into two same-state F tokens.
+.find_telomeric_continuation <- function(tokens, start_i, state, chain, params) {
+  n         <- length(tokens)
+  j         <- start_i + 1L
+  collected <- list()
+  while (j <= n) {
+    tk <- tokens[[j]]
+    if (tk$type == "G") { j <- j + 1L; next }
+    if (tk$type == "H" && !is.na(tk$n_snps) &&
+        tk$n_snps <= params$min_snps_for_peak) { j <- j + 1L; next }
+    if (tk$type == "F" && identical(tk$state, state)) {
+      collected[[length(collected) + 1L]] <- list(tok = tk, idx = j)
+      j <- j + 1L; next
+    }
+    break
+  }
+  if (length(collected) == 0) return(NULL)
+  if (!.is_telomeric(collected[[length(collected)]]$tok, chain, params)) return(NULL)
+  collected
 }
 
 # Left junction peak for an F token: the peak that marks the H→F transition.
@@ -1809,7 +1898,7 @@ build_event_table <- function(events) {
     ))
 
   rows <- lapply(events, function(ev) {
-    confidence <- if (ev$event_class %in% c("NCO_GC", "CO_GC", "TERMINAL_LOH",
+    confidence <- if (ev$event_class %in% c("NCO_GC", "CO_GC", "CO_TERM",
                                              "CROSSOVER_NO_TRACT", "DOUBLE_GC",
                                              "TCO_CAPTURED_TCO"))
       "high"
