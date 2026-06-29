@@ -851,7 +851,10 @@ EVENT_SYMBOL_MAP <- c(
   CO_GC                    = "✖", # HEAVY MULTIPLICATION X
   CO_GC_subres             = "✖", # HEAVY MULTIPLICATION X
   NCO_GC                   = "𝝤", # CAPTIAL OMICRON
+  NCO_GC_subres            = "𝝤", # CAPTIAL OMICRON (no flanking LOH tract)
   NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
+  CROSSOVER_NO_TRACT       = "✖", # HEAVY MULTIPLICATION X (crossover, tract below LOH resolution)
+  DOUBLE_GC                = "𝝤𝝤", # two NCO gene conversions in one token
   CO_TERM                  = "TCO",
   TCO_CAPTURED_TCO         = "2 X TCO",
   TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA

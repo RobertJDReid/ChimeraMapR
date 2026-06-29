@@ -648,14 +648,22 @@ classify_tract <- function(peak, params) {
   # classifier and is itself sufficient evidence.  A genuinely low-count
   # situation has n_spanning > 0 but below the threshold.
   #
-  # Exception: automatic pair classifications (LOH-based crossovers/GCs where
+  # Exception 1: automatic pair classifications (LOH-based crossovers/GCs where
   # fusion_mode = "automatic") use LOH pattern evidence, not chimeric-read
   # spanning evidence.  n_spanning for these reflects incidental spanning reads
   # over the LOH tract, not the primary evidence, so don't gate on it.
-  auto_pair <- isTRUE(peak$pair_fusion_mode == "automatic") &&
-               isTRUE(peak$pair_edge_type %in% c("crossover", "gene_conversion"))
+  #
+  # Exception 2: gene_conversion and internal_crossover peaks are excluded from
+  # compute_peak_pairs() entirely (FUSION_HEURISTICS$excluded_peak_classes).
+  # Any n_spanning they carry was copied from an unrelated flanking pair whose
+  # span happens to cover this peak's position — not evidence for or against
+  # this peak.  The per-read haplotype pattern from classify_peak_haplotype()
+  # is the authoritative call for these types, so bypass the coverage gate.
+  auto_pair      <- isTRUE(peak$pair_fusion_mode == "automatic") &&
+                    isTRUE(peak$pair_edge_type %in% c("crossover", "gene_conversion"))
+  self_classifying <- isTRUE(edge_type %in% c("gene_conversion", "internal_crossover"))
   has_count <- !is.na(n_spanning) && n_spanning > 0L
-  if (has_count && n_spanning < params$min_span && !auto_pair)
+  if (has_count && n_spanning < params$min_span && !auto_pair && !self_classifying)
     return(list(call = "AMBIGUOUS", reason = "low_coverage",
                 n_support = n_spanning))
 
