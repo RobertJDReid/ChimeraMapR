@@ -903,7 +903,25 @@ rule_terminal_loh <- list(
       if (tel$type != "TEL" || ftk$type != "F" || !.is_non_fixed(htk)) return(NULL)
       if (is.na(.terminal_depth_ratio(ftk)) ||
           .terminal_depth_ratio(ftk) < params$depth_drop) return(NULL)   # depth ok check
-      pk <- ftk$peak_right %||% ftk$peak_left %||% ftk$peak_over
+      # Use junction-peak helpers so we catch peaks that land inside the
+      # adjacent non-fixed token rather than directly on F.
+      pk <- if (direction == "rev")
+        .left_junction_peak(ftk, htk)    # H [●F] TEL: junction at H→F boundary
+      else
+        .right_junction_peak(ftk, htk)   # TEL [F●] H: junction at F→H boundary
+      # If htk is an unscored G gap (no peaks), look one position further to
+      # the H token that carries the junction peak.  This handles the common
+      # subtelomeric case: H ends at the last SNP, an unscored gap follows,
+      # then the terminal F starts — the peak lives on H, not on G.
+      if (is.null(pk) && htk$type == "G") {
+        neighbor_i <- if (direction == "rev") h_i - 1L else h_i + 1L
+        if (neighbor_i >= 1L && neighbor_i <= n && tokens[[neighbor_i]]$type == "H") {
+          pk <- if (direction == "rev")
+            .left_junction_peak(ftk, tokens[[neighbor_i]])
+          else
+            .right_junction_peak(ftk, tokens[[neighbor_i]])
+        }
+      }
       if (is.null(pk)) return(NULL)
       list(span = c(tel_i, f_i, h_i), f_tok = ftk, peak = pk,
            direction = direction)
