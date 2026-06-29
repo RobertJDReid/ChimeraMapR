@@ -1304,6 +1304,7 @@ server <- function(input, output, session) {
   output$peaks_table <- renderTable({
     req(results$peaks_genomic)
     out <- copy(results$snp_peaks)
+    out <- out[!is.na(snp_pos)]
     out[, `:=`(
       peak_pos_kb   = round(peak_pos   / 1000, 2),
       peak_start_kb = round(peak_start / 1000, 2),
@@ -2024,6 +2025,7 @@ server <- function(input, output, session) {
     req(results$snp_peaks)
 
     peaks <- copy(results$snp_peaks)
+    peaks <- peaks[!is.na(snp_pos)]
     peaks[, chrom := as.character(chrom)]
 
     # Start with the initial (pre-fusion) haplotype label
