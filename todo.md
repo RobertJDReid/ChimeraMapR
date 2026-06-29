@@ -1,4 +1,5 @@
 # To do list for ChimeraMapR
 
-- add screenshots of web output
-- add peak-select feature for un-recognized peaks
+- reevaluate depth model
+	seems to be hyperactive at individual dips in depth
+	run some independent models

@@ -1219,6 +1219,21 @@ rule_opp_sandwich <- list(
     # and leaving a single-SNP noise blip unmerged would otherwise block
     # the cascade from ever reaching the far telomere.
     too_small_for_peak <- !is.na(ftk$n_snps) && ftk$n_snps < params$min_snps_for_peak
+
+    # A peak attached as peak_over may have its SNP position (fused_pos_bp)
+    # outside the fragment's own [start, end] span — this happens when a wide
+    # chimeric-peak window overlaps the fragment edge but the underlying SNP
+    # sits in the adjacent flank.  Such a peak is a flank-boundary marker, not
+    # interior evidence for this fragment.  Claiming it here would block R03
+    # from later using it as the merged-flank's right-junction peak.  Treat
+    # the fragment as having no internal peak evidence (same path as
+    # too_small_for_peak) so it is absorbed without consuming the boundary peak.
+    if (!is.null(pk) && !is.na(pk$fused_pos_bp) &&
+        (pk$fused_pos_bp < ftk$start || pk$fused_pos_bp > ftk$end)) {
+      pk             <- NULL
+      too_small_for_peak <- TRUE
+    }
+
     if (is.null(pk) && !too_small_for_peak) return(NULL)
 
     list(span = c(i, ri), f_tok = ftk, l_tok = l, r_tok = r,
@@ -1260,7 +1275,12 @@ rule_opp_sandwich <- list(
       n_snps      = as.integer(sum(c(m$l_tok$n_snps, m$r_tok$n_snps), na.rm = TRUE)),
       depth_ratio = mean(c(m$l_tok$depth_ratio, m$r_tok$depth_ratio), na.rm = TRUE),
       peak_left   = .edge_peak(m$l_tok, "left"),
-      peak_right  = .edge_peak(m$r_tok, "right"),
+      # Fall back to l_tok's own peak_right when r_tok has no outer-edge peak.
+      # Without this, each R06 cascade step that merges two same-state flanks
+      # loses the accumulated right-boundary peak from all prior merges,
+      # leaving the final merged token peakless on its right side and starving
+      # R03 of the pk_r it needs to fire.
+      peak_right  = .edge_peak(m$r_tok, "right") %||% m$l_tok$peak_right,
       bridged_gap = FALSE,
       meta        = c(m$l_tok$meta, m$r_tok$meta)
     )
