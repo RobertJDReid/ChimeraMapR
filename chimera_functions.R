@@ -1200,8 +1200,23 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     , xmax := data.table::shift(xmin, type = "lead", fill = win_end / 1000)
   ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
 
-  # ── Classify by run pattern ──────────────────────────────────────────────
-  runs <- as.character(seg_data$SNP_call)   # ordered sequence of run states
+  # ── Classify by run pattern, collapsing single-SNP noise runs ───────────
+  # A run of exactly one SNP position is likely a spurious near-fixed site
+  # rather than a real recombination signal. Remove such runs and re-derive
+  # the run sequence before pattern matching; seg_data is returned unchanged
+  # so the plot still shows the full observed pattern.
+  noise_runs <- peak_summary[, .N, by = run][N == 1L, run]
+  if (length(noise_runs) > 0L) {
+    clean_ps <- peak_summary[!run %in% noise_runs]
+    if (nrow(clean_ps) > 0L) {
+      clean_ps[, run2 := data.table::rleid(SNP_call)]
+      runs <- as.character(clean_ps[, .(SNP_call = SNP_call[1L]), by = run2][order(run2), SNP_call])
+    } else {
+      runs <- as.character(seg_data$SNP_call)
+    }
+  } else {
+    runs <- as.character(seg_data$SNP_call)
+  }
   n_runs <- length(runs)
 
   label <- if (n_runs == 1L) {
@@ -1358,7 +1373,18 @@ classify_fused_peak_haplotype <- function(fg, chr_name, rt_df, touching_ids,
     , xmax := data.table::shift(xmin, type = "lead", fill = win_end / 1000)
   ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
 
-  runs   <- as.character(seg_data$SNP_call)
+  noise_runs <- peak_summary[, .N, by = run][N == 1L, run]
+  if (length(noise_runs) > 0L) {
+    clean_ps <- peak_summary[!run %in% noise_runs]
+    if (nrow(clean_ps) > 0L) {
+      clean_ps[, run2 := data.table::rleid(SNP_call)]
+      runs <- as.character(clean_ps[, .(SNP_call = SNP_call[1L]), by = run2][order(run2), SNP_call])
+    } else {
+      runs <- as.character(seg_data$SNP_call)
+    }
+  } else {
+    runs <- as.character(seg_data$SNP_call)
+  }
   n_runs <- length(runs)
 
   label <- if (n_runs == 1L) {
