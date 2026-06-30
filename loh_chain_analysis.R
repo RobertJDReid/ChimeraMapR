@@ -517,6 +517,48 @@ canonicalise <- function(chain, params) {
         }
       }
 
+      # Rule 0b: F [G H G] F (same state, no peak on H, span < merge_gap) -> F
+      # When two same-state F tokens are separated by a G-H-G triplet whose H
+      # carries no chimeric-read peak and whose total span is within merge_gap_bp,
+      # the H is an artifact of the segmentation model (a handful of minority-allele
+      # reads in an otherwise fixed block), not a real biological HET event.  The
+      # same-state flanking context is the key prior: a genuine interruption would
+      # either be larger or would carry a peak.  Absorbing all five tokens into one
+      # F lets R01/R02 see the correct telomere-reaching extent without raising the
+      # general min_snps_for_peak threshold that Rule 0 uses.
+      if (i <= length(tokens) - 4L) {
+        a  <- tokens[[i]]
+        g1 <- tokens[[i + 1L]]
+        h  <- tokens[[i + 2L]]
+        g2 <- tokens[[i + 3L]]
+        b  <- tokens[[i + 4L]]
+
+        if (a$type == "F" && g1$type == "G" && h$type == "H" && g2$type == "G" && b$type == "F" &&
+            !is.na(a$state) && !is.na(b$state) && a$state == b$state &&
+            !.has_peak(h) &&
+            (g2$end - g1$start) < params$merge_gap_bp) {
+
+          merged <- make_token(
+            type        = "F",
+            state       = a$state,
+            start       = a$start,
+            end         = b$end,
+            n_snps      = as.integer(sum(c(a$n_snps, b$n_snps), na.rm = TRUE)),
+            depth_ratio = mean(c(a$depth_ratio, b$depth_ratio), na.rm = TRUE),
+            peak_over   = a$peak_over %||% b$peak_over,
+            peak_left   = a$peak_left,
+            peak_right  = b$peak_right,
+            bridged_gap = TRUE,
+            meta        = c(a$meta, b$meta)
+          )
+          tokens <- c(tokens[seq_len(i - 1L)],
+                      list(merged),
+                      tokens[seq.int(i + 5L, length(tokens))])
+          changed <- TRUE
+          next
+        }
+      }
+
       # Rule 1: F G F (same state, gap < merge_gap) -> merge into single F
       if (i <= length(tokens) - 2L) {
         a <- tokens[[i]]
