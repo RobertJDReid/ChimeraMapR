@@ -687,6 +687,8 @@ server <- function(input, output, session) {
     loh_segments            = NULL,   # loh_segments from compute_loh_map()$loh_segments; used by plots
     coverage_segments       = NULL,   # coverage_segments from compute_coverage_map(); chromosome-wide depth_ratio
     coverage_table          = NULL,   # coverage_table from compute_coverage_map(); per-position depth for terminal-event rules
+    full_read_loh           = NULL,   # MAPQ-only filtered reads from run_chimera_analysis(); used by get_chromosome_ploidy()
+    ploidy_map              = NULL,   # data.table from get_chromosome_ploidy(); per-chromosome estimated_ploidy
     strain_ref              = "",     # display name for REF haplotype (from UI input)
     strain_alt              = "",      # display name for ALT haplotype (from UI input)
     chain_result   = NULL,   # full output of run_chain_analysis()
@@ -737,6 +739,8 @@ server <- function(input, output, session) {
     results$fused_hap_labels       <- NULL
     results$loh_map                <- NULL
     results$loh_segments           <- NULL
+    results$full_read_loh          <- NULL
+    results$ploidy_map             <- NULL
     results$chain_result           <- NULL
     results$event_table            <- NULL
     results$chain_params           <- NULL
@@ -785,6 +789,7 @@ server <- function(input, output, session) {
       results$chr_span          <- res$chr_span
       results$strain_ref        <- trimws(input$strain_ref)
       results$strain_alt        <- trimws(input$strain_alt)
+      results$full_read_loh     <- res$full_read_loh
 
       # Build LOH map using the beta-binomial EM + Viterbi HMM from chimera_functions.R.
       # full_read_loh applies only MAPQ + is_del filters (no base-quality filter)

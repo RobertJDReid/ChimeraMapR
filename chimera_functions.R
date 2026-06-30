@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.6.2"
+APP_VERSION <- "0.6.3"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -843,6 +843,51 @@ compute_coverage_map <- function(full_read_loh,
 
 
 # -----------------------------------------------------------------------------
+#  get_chromosome_ploidy()
+#
+#  Estimates copy number per chromosome from per-position read depth.  Uses
+#  the same full_read_loh input as compute_coverage_map() — MAPQ-only filtered
+#  reads, no base-quality cutoff — so both functions sample the same pileup.
+#
+#  Algorithm: aggregate to per-position depth, take the genome-wide median as
+#  the reference baseline for reference_ploidy copies, divide each
+#  chromosome's median depth by that baseline, and round to the nearest
+#  integer.  Median is used at both levels for robustness to local depth
+#  variation and positional outliers.
+#
+#  Arguments
+#    full_read_loh    : data.table from run_chimera_analysis()$full_read_loh
+#    reference_ploidy : expected copy number of a normal chromosome (default 2)
+#    min_depth        : hard minimum reads per position; positions below this
+#                       are excluded before computing the baseline (default 5)
+#
+#  Returns a data.table with one row per chromosome:
+#    chrom, n_positions, median_depth, depth_ratio, estimated_ploidy
+# -----------------------------------------------------------------------------
+get_chromosome_ploidy <- function(full_read_loh,
+                                   reference_ploidy = 2L,
+                                   min_depth        = 5L) {
+  cov_dt <- full_read_loh[, .(n_total = .N), by = .(chrom, pos)]
+  setorder(cov_dt, chrom, pos)
+
+  depth_cutoff <- max(min_depth,
+                      floor(median(cov_dt$n_total) - 3 * IQR(cov_dt$n_total)))
+  cov_dt <- cov_dt[n_total >= depth_cutoff]
+
+  baseline <- median(cov_dt$n_total)
+
+  chr_ploidy <- cov_dt[, .(
+    n_positions  = .N,
+    median_depth = round(median(n_total), 1),
+    depth_ratio  = round(median(n_total) / baseline, 3)
+  ), by = chrom]
+
+  chr_ploidy[, estimated_ploidy := as.integer(round(depth_ratio * reference_ploidy))]
+  chr_ploidy[]
+}
+
+
+# -----------------------------------------------------------------------------
 #  Recombination event symbols, overlaid on the LOH band at the bp midpoint
 #  of each event's recorded start/end span. One symbol per event_class
 #  recognised in EVENT_SYMBOL_MAP; event classes not listed are skipped.
@@ -953,9 +998,41 @@ build_overview_plot <- function(results) {
   # Convert chrom to character so factors don't cause facet alignment issues
   snp_cov[, chrom := as.character(chrom)]
   fits[,    chrom := as.character(chrom)]
+  
+  # ── Per-chromosome ploidy panel backgrounds ───────────────────────────────
+  # 1N → #FAFBAC, 3N → #FEDBFF, 2N → white (no layer added).
+  # fill is set outside aes() so it doesn't interact with the LOH fill scale.
+  PLOIDY_BG <- c("1" = "#FCFCDA", "3" = "#F6E3FC")
+  ploidy_dt <- if (!is.null(results$ploidy_map)) {
+    #warning("non-null ploidy_map")
+    results$ploidy_map
+  } else if (!is.null(results$full_read_loh) && nrow(results$full_read_loh) > 0) {
+    #warning("There is a full_read_loh value so use this to call get_chromosome_ploidy")
+    get_chromosome_ploidy(results$full_read_loh)
+  } else {
+    #warning("complete fallback")
+    data.table()
+  }
+  aneuploid <- if (nrow(ploidy_dt) > 0)
+    ploidy_dt[estimated_ploidy %in% c(1L, 3L)] else data.table()
+  # alpha < 1 so the panel grid lines (drawn beneath all geom layers by
+  # ggplot2 regardless of code order) remain visible through the background
+  ploidy_bg_layers <- lapply(seq_len(nrow(aneuploid)), function(i) {
+    geom_rect(
+      data        = data.table(chrom = as.character(aneuploid$chrom[i])),
+      aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+      fill        = PLOIDY_BG[as.character(aneuploid$estimated_ploidy[i])],
+      color       = NA,
+      alpha       = 0.5,
+      inherit.aes = FALSE
+    )
+  })
 
+  #browser()
+  
   # ── Main coverage panel ────────────────────────────────────────────────────
   p_main <- ggplot(snp_cov, aes(x = pos_kb, y = n)) +
+    ploidy_bg_layers +
     geom_line(
       data  = fits,
       aes(x = uniform_pos / 1000, y = uniform_fit),

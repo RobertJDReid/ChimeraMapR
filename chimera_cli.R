@@ -308,13 +308,28 @@ results <- run_chimera_analysis(
   lambda          = opts[["lambda"]]
 )
 
+ploidy_map          <- get_chromosome_ploidy(results$full_read_loh)
+results$ploidy_map  <- ploidy_map
+
 
 # ── Print run summary ─────────────────────────────────────────────────────────
 n_chimeric  <- length(results$chimeric_read_ids)
 n_peaks     <- nrow(results$peaks_genomic)
 n_chr       <- uniqueN(results$snp_coverage$chrom)
+aneuploid   <- ploidy_map[estimated_ploidy != 2L]
 cat("\nResults:\n")
 cat("  Chromosomes analyzed :", n_chr, "\n")
+if (nrow(aneuploid) > 0) {
+  cat("  Ploidy anomalies     :\n")
+  for (i in seq_len(nrow(aneuploid))) {
+    cat(sprintf("    %-20s %dN  (depth ratio %.2f)\n",
+                as.character(aneuploid$chrom[i]),
+                aneuploid$estimated_ploidy[i],
+                aneuploid$depth_ratio[i]))
+  }
+} else {
+  cat("  Ploidy               : all chromosomes 2N\n")
+}
 cat("  Chimeric reads       :", n_chimeric, "\n")
 cat("  Peaks detected       :", n_peaks, "\n\n")
 
