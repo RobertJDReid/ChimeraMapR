@@ -1027,6 +1027,90 @@ rule_terminal_no_peak <- list(
   }
 )
 
+# Rule 2c: Terminal LOH, TEL-adjacent HET interposed — TEL [H] [F●] or [●F] [H] TEL.
+#
+# Some chromosomes carry a HET region directly adjacent to a telomere that is
+# not a true biological heterozygosity but an alignment artifact: reads from
+# other chromosomes (or the other parental homolog's sub-telomeric repeats)
+# map to the reference here, inflating apparent heterozygosity.  When the true
+# LOH (F) starts just inside this artifactual HET zone and has a binary peak on
+# its distal boundary, the standard TEL [F●] H (R02) pattern cannot fire because
+# the HET layer sits between TEL and F.  This rule recognises the extended
+# TEL [H] [F●] pattern and calls it CO_TERM_PROBABLE (review confidence).
+rule_tel_adjacent_het_loh <- list(
+  id = "R02c_tel_adjacent_het_loh",
+  match_fn = function(tokens, i, chain, params) {
+    n <- length(tokens)
+
+    check_tahl <- function(tel_i, h_i, f_i, direction) {
+      tel <- tokens[[tel_i]]
+      htk <- tokens[[h_i]]
+      ftk <- tokens[[f_i]]
+      if (tel$type != "TEL" || !.is_non_fixed(htk) || ftk$type != "F") return(NULL)
+      # Depth must be consistent with LOH, not a deletion.
+      if (is.na(.terminal_depth_ratio(ftk)) ||
+          .terminal_depth_ratio(ftk) < params$depth_drop) return(NULL)
+      # No peak at the H-F (proximal/TEL-side) boundary — if there is one, a
+      # different rule should handle it (e.g. R02 if TEL were adjacent to F).
+      pk_prox <- if (direction == "fwd")
+        .left_junction_peak(ftk, htk)    # TEL [H] [●F]: H→F boundary
+      else
+        .right_junction_peak(ftk, htk)   # [F●] [H] TEL: F→H boundary
+      if (!is.null(pk_prox)) return(NULL)
+      # F must have a binary peak on its distal (away-from-TEL) boundary.
+      pk_distal <- if (direction == "fwd") {
+        next_i <- f_i + 1L
+        if (next_i > n) return(NULL)
+        .right_junction_peak(ftk, tokens[[next_i]])
+      } else {
+        prev_i <- f_i - 1L
+        if (prev_i < 1L) return(NULL)
+        .left_junction_peak(ftk, tokens[[prev_i]])
+      }
+      if (is.null(pk_distal)) return(NULL)
+      et <- pk_distal$best_edge_type %||% pk_distal$edge_type
+      if (!isTRUE(et == "binary")) return(NULL)
+      list(span      = c(min(tel_i, h_i, f_i), max(tel_i, h_i, f_i)),
+           f_tok     = ftk,
+           h_tok     = htk,
+           peak      = pk_distal,
+           direction = direction)
+    }
+
+    # Forward: TEL [H] [F●]
+    if (i + 2L <= n) {
+      m <- check_tahl(i, i + 1L, i + 2L, "fwd")
+      if (!is.null(m)) return(m)
+    }
+    # Reverse: [●F] [H] TEL
+    if (i + 2L <= n) {
+      m <- check_tahl(i + 2L, i + 1L, i, "rev")
+      if (!is.null(m)) return(m)
+    }
+    NULL
+  },
+  fire_fn = function(m, chain, params) {
+    edge_type  <- m$peak$best_edge_type %||% m$peak$edge_type
+    n_raw      <- m$peak$n_spanning %||% NA_integer_
+    n_spanning <- if (is.null(n_raw) || is.na(n_raw)) NA_integer_ else as.integer(n_raw)
+    has_count  <- !is.na(n_spanning) && n_spanning > 0L
+
+    call <- if (has_count && n_spanning < params$min_span)
+      "AMBIGUOUS(low_coverage)"
+    else
+      "CO_TERM_PROBABLE"
+
+    ev <- .make_event(call, chain$chrom, list(m$f_tok),
+                      evidence_peaks = list(m$peak),
+                      n_support = n_spanning,
+                      notes = paste0("tel_adjacent_het; edge=", edge_type %||% "NA",
+                                     "; LOH->HET->TEL without junction peak; ",
+                                     "probable subtelomeric misalignment"))
+    list(event = ev, rewrite = NULL,
+         claims = list(peak = m$peak, loh = m$f_tok))
+  }
+)
+
 # Rule 3: TCO-captured-TCO — H ●[F]● F̄→TEL (opposite fixed reaches telomere,
 #         peaks on both sides)
 rule_tco_captured_tco <- list(
@@ -1698,6 +1782,7 @@ MOTIF_RULES <- list(
   rule_terminal_deletion,        # R01
   rule_tco_captured_tco,         # R03 — terminal CO over an earlier terminal CO
   rule_terminal_loh,             # R02
+  rule_tel_adjacent_het_loh,     # R02c — CO_TERM_PROBABLE: TEL [H] [F●], HET interposed by misalignment
   # rule_terminal_no_peak disabled: without a chimeric peak at the TEL boundary
   # there is no positive evidence for a crossover mechanism.  Leave unclaimed →
   # UNCATEGORIZED_LOH → no symbol on the overview map.

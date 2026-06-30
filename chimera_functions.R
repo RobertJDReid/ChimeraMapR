@@ -856,6 +856,7 @@ EVENT_SYMBOL_MAP <- c(
   CROSSOVER_NO_TRACT       = "✖", # HEAVY MULTIPLICATION X (crossover, tract below LOH resolution)
   DOUBLE_GC                = "𝝤𝝤", # two NCO gene conversions in one token
   CO_TERM                  = "TCO",
+  CO_TERM_PROBABLE         = "TCO?",
   TCO_CAPTURED_TCO         = "2 X TCO",
   TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA
   `AMBIGUOUS(low_coverage)` = "?"  # low spanning reads; shown as review marker
@@ -1781,15 +1782,24 @@ compute_peak_pairs <- function(snp_peaks,
 
       shared_reads <- intersect(reads_a, reads_b)
 
-      # Activates whenever the LOH bridges the gap and no read is chimeric at
-      # both flanking peaks at once. A read that crosses the LOH boundary only
-      # once (the expected pattern for a true crossover) can never land in
-      # both reads_a and reads_b, so intersect() is empty by construction for
-      # that read population. Gating on gap_bp > median_read_len was
-      # self-defeating: median_read_len is measured from the very reads that
-      # might cross the gap, so good long crossing reads inflate the
-      # threshold and prevent this branch from ever firing.
-      is_loh_crossover_mode <- loh_in_gap && length(shared_reads) == 0
+      # Pre-compute Jaccard so it is available for both the loh_crossover_mode
+      # condition below and the standard-path recording.
+      n_union_early <- length(union(reads_a, reads_b))
+      pre_jaccard   <- if (n_union_early > 0) length(shared_reads) / n_union_early else 0
+
+      # Activates whenever the LOH bridges the gap AND read overlap between the
+      # two peaks is below the Jaccard threshold. A read that crosses the LOH
+      # boundary only once (the expected crossover pattern) can never land in
+      # both reads_a and reads_b, so the ideal case has zero shared reads and
+      # low Jaccard. The original == 0 condition failed for small LOH regions
+      # (gap < median read length) where a handful of long reads happen to span
+      # both boundaries and enter shared_reads — with just 1–2 spanning reads
+      # the 3-zone standard path cannot reliably call CO vs. NCO and returns
+      # "independent_events", poisoning best_edge_type on both peaks. Switching
+      # to jaccard < threshold extends LOH crossover mode to cover these small
+      # LOH cases without disturbing pairs where the two peaks genuinely share a
+      # large fraction of reads (high Jaccard = not an LOH crossing pattern).
+      is_loh_crossover_mode <- loh_in_gap && pre_jaccard < jaccard_threshold
 
       # Clip the outer zones to the next peak on either side (exclusive of
       # that peak's own anchor position, which belongs to its own pair's
@@ -1854,8 +1864,7 @@ compute_peak_pairs <- function(snp_peaks,
 
       } else {
         # Standard path: reads chimeric at both peaks span the gap naturally.
-        n_union  <- length(union(reads_a, reads_b))
-        jaccard  <- if (n_union > 0) n_shared / n_union else 0
+        jaccard  <- pre_jaccard
 
         spanning_ids <- shared_reads
 
