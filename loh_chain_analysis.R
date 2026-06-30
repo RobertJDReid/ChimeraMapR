@@ -1357,15 +1357,26 @@ rule_opp_sandwich <- list(
     # A peak attached as peak_over may have its SNP position (fused_pos_bp)
     # outside the fragment's own [start, end] span — this happens when a wide
     # chimeric-peak window overlaps the fragment edge but the underlying SNP
-    # sits in the adjacent flank.  Such a peak is a flank-boundary marker, not
-    # interior evidence for this fragment.  Claiming it here would block R03
-    # from later using it as the merged-flank's right-junction peak.  Treat
-    # the fragment as having no internal peak evidence (same path as
-    # too_small_for_peak) so it is absorbed without consuming the boundary peak.
+    # sits in the adjacent flank.  For binary peaks this is a flank-boundary
+    # marker that belongs to R03, not interior evidence for this fragment.
+    # Claiming it here would block R03 from later using it as the
+    # merged-flank's right-junction peak.  Treat the fragment as having no
+    # internal peak evidence so it is absorbed without consuming the boundary
+    # peak.
+    # Exception: self-classifying peaks (gene_conversion, crossover,
+    # internal_crossover) whose SNP sits just past ftk$end ARE the right-
+    # junction marker for this gene-conversion motif.  If left unclaimed they
+    # propagate to the merged-flank's peak_right and get consumed by R10,
+    # producing a spuriously large NCO_GC that spans the entire merged region.
+    # Claim them here so R06 fires the correct NCO_GC_in_terminal instead.
     if (!is.null(pk) && !is.na(pk$fused_pos_bp) &&
         (pk$fused_pos_bp < ftk$start || pk$fused_pos_bp > ftk$end)) {
-      pk             <- NULL
-      too_small_for_peak <- TRUE
+      et_pk <- pk$best_edge_type %||% pk$edge_type
+      sc_pk <- isTRUE(et_pk %in% c("gene_conversion", "crossover", "internal_crossover"))
+      if (!sc_pk) {
+        pk             <- NULL
+        too_small_for_peak <- TRUE
+      }
     }
 
     if (is.null(pk) && !too_small_for_peak) return(NULL)
