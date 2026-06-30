@@ -497,6 +497,7 @@ canonicalise <- function(chain, params) {
         b <- tokens[[i + 2L]]
 
         if (a$type == "G" && h$type == "H" && b$type == "G" &&
+            !.has_peak(h) &&
             !is.na(h$n_snps) && h$n_snps <= params$min_snps_for_peak &&
             (b$end - a$start) < params$merge_gap_bp) {
 
@@ -550,6 +551,47 @@ canonicalise <- function(chain, params) {
             peak_right  = b$peak_right,
             bridged_gap = TRUE,
             meta        = c(a$meta, b$meta)
+          )
+          tokens <- c(tokens[seq_len(i - 1L)],
+                      list(merged),
+                      tokens[seq.int(i + 5L, length(tokens))])
+          changed <- TRUE
+          next
+        }
+      }
+
+      # Rule 0c: F G F_opp G F (same outer states, opposite-state middle ≤ min_snps,
+      # no peak on middle, total inner span < merge_gap) -> merged F
+      # A single- or two-SNP fixed segment of opposite state sandwiched between two
+      # same-state fixed regions is a HMM segmentation artifact (one ambiguous read
+      # misclassifying a position), not a true LOH boundary switch.  Absorbing it
+      # lets downstream rules (R02c, R03) treat the composite LOH as a single token.
+      if (i <= length(tokens) - 4L) {
+        a  <- tokens[[i]]
+        g1 <- tokens[[i + 1L]]
+        b  <- tokens[[i + 2L]]
+        g2 <- tokens[[i + 3L]]
+        cc <- tokens[[i + 4L]]
+
+        if (a$type == "F" && g1$type == "G" && b$type == "F" && g2$type == "G" && cc$type == "F" &&
+            !is.na(a$state) && !is.na(b$state) && !is.na(cc$state) &&
+            a$state == cc$state && a$state != b$state &&
+            !is.na(b$n_snps) && b$n_snps <= params$min_snps_for_peak &&
+            !.has_peak(b) &&
+            (g2$end - g1$start) < params$merge_gap_bp) {
+
+          merged <- make_token(
+            type        = "F",
+            state       = a$state,
+            start       = a$start,
+            end         = cc$end,
+            n_snps      = as.integer(sum(c(a$n_snps, cc$n_snps), na.rm = TRUE)),
+            depth_ratio = mean(c(a$depth_ratio, cc$depth_ratio), na.rm = TRUE),
+            peak_over   = a$peak_over %||% b$peak_over %||% cc$peak_over,
+            peak_left   = a$peak_left,
+            peak_right  = cc$peak_right,
+            bridged_gap = TRUE,
+            meta        = c(a$meta, cc$meta)
           )
           tokens <- c(tokens[seq_len(i - 1L)],
                       list(merged),
@@ -998,12 +1040,16 @@ rule_terminal_loh <- list(
     # Terminal LOH has a single haplotype boundary: the expected peak pattern
     # is "binary" (one clean switch, e.g. REF→ALT).  gene_conversion and
     # crossover patterns imply internal events, not a terminal boundary.
+    # "undefined" means classify_peak_haplotype lacked sufficient SNP coverage
+    # to determine the switch pattern — still a probable terminal event.
     call <- if (has_count && n_spanning < params$min_span) {
       "AMBIGUOUS(low_coverage)"
     } else if (!is.null(edge_type) && !is.na(edge_type) && edge_type == "binary") {
       "CO_TERM"
+    } else if (is.null(edge_type) || is.na(edge_type) || edge_type == "undefined") {
+      "CO_TERM_PROBABLE"
     } else {
-      paste0("AMBIGUOUS(terminal_non_binary_peak:", edge_type %||% "NA", ")")
+      paste0("AMBIGUOUS(terminal_non_binary_peak:", edge_type, ")")
     }
 
     ev <- .make_event(call, chain$chrom, list(m$f_tok),
@@ -1069,7 +1115,8 @@ rule_terminal_no_peak <- list(
   }
 )
 
-# Rule 2c: Terminal LOH, TEL-adjacent HET interposed — TEL [H] [F●] or [●F] [H] TEL.
+# Rule 2c: Terminal LOH, TEL-adjacent HET interposed —
+#   TEL [H] [F●], TEL [H] [G] [F●], [●F] [H] TEL, or [●F] [G] [H] TEL.
 #
 # Some chromosomes carry a HET region directly adjacent to a telomere that is
 # not a true biological heterozygosity but an alignment artifact: reads from
@@ -1079,6 +1126,8 @@ rule_terminal_no_peak <- list(
 # its distal boundary, the standard TEL [F●] H (R02) pattern cannot fire because
 # the HET layer sits between TEL and F.  This rule recognises the extended
 # TEL [H] [F●] pattern and calls it CO_TERM_PROBABLE (review confidence).
+# G-transparent variants (G gap between H and F) are also checked to handle
+# cases where an unscored coordinate gap separates the HET from the LOH token.
 rule_tel_adjacent_het_loh <- list(
   id = "R02c_tel_adjacent_het_loh",
   match_fn = function(tokens, i, chain, params) {
@@ -1124,9 +1173,21 @@ rule_tel_adjacent_het_loh <- list(
       m <- check_tahl(i, i + 1L, i + 2L, "fwd")
       if (!is.null(m)) return(m)
     }
+    # Forward G-transparent: TEL [H] [G] [F●]
+    # Handles the case where an unscored gap sits between the subtelomeric H and F.
+    if (i + 3L <= n && tokens[[i + 2L]]$type == "G") {
+      m <- check_tahl(i, i + 1L, i + 3L, "fwd")
+      if (!is.null(m)) return(m)
+    }
     # Reverse: [●F] [H] TEL
     if (i + 2L <= n) {
       m <- check_tahl(i + 2L, i + 1L, i, "rev")
+      if (!is.null(m)) return(m)
+    }
+    # Reverse G-transparent: [●F] [G] [H] TEL
+    # Handles the case where an unscored gap sits between F and the subtelomeric H.
+    if (i + 3L <= n && tokens[[i + 1L]]$type == "G") {
+      m <- check_tahl(i + 3L, i + 2L, i, "rev")
       if (!is.null(m)) return(m)
     }
     NULL
