@@ -326,6 +326,10 @@ ui <- fluidPage(
     .fusion-super  { background-color: #fff3cd !important; }
     .fusion-none   { background-color: #f8d7da !important; }
     .fusion-unresolv { background-color: #e2e3e5 !important; }
+    .advanced-settings summary      { cursor: pointer; font-weight: bold; margin: 8px 0; color: #337ab7; }
+    .advanced-settings summary:hover { color: #23527c; }
+    .advanced-settings               { margin-top: 4px; margin-bottom: 4px; }
+    #run_analysis                    { white-space: normal; word-wrap: break-word; }
   "))),
   titlePanel("ChimeraMapR: Detect Chimeric Haplotypes in Long Sequence Reads"),
 
@@ -359,18 +363,6 @@ ui <- fluidPage(
                 placeholder = "e.g. SK1"),
       helpText("Strain names appear in LOH band legends. Leave blank to use generic REF / ALT labels."),
 
-      numericInput("mapq_cutoff",
-                   "Minimum MAPQ Value:",
-                   value = 20,
-                   min = 0,
-                   step = 1),
-
-      numericInput("baseq_cutoff",
-                   "Base Quality Minimum:",
-                   value = 10,
-                   min = 0,
-                   step = 1),
-
       numericInput("min_run",
                    "Minimum Run Length:",
                    value = 2,
@@ -384,67 +376,72 @@ ui <- fluidPage(
                    min = 1,
                    step = 1),
 
-      numericInput("lambda",
-                   "Whittaker Lambda (\u03bb):",
-                   value = 1,
-                   min   = 0.01,
-                   step  = 0.5),
-      helpText("Smoothness penalty for Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve"),
+      tags$details(
+        class = "advanced-settings",
+        tags$summary("Advanced Settings"),
+
+        numericInput("mapq_cutoff",
+                     "Minimum MAPQ Value:",
+                     value = 20,
+                     min = 0,
+                     step = 1),
+
+        numericInput("baseq_cutoff",
+                     "Base Quality Minimum:",
+                     value = 10,
+                     min = 0,
+                     step = 1),
+
+        numericInput("lambda",
+                     "Whittaker Lambda (\u03bb):",
+                     value = 1,
+                     min   = 0.01,
+                     step  = 0.5),
+        helpText("Smoothness penalty for Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve"),
+
+        numericInput("jaccard_threshold",
+                     "Jaccard Threshold for Auto-Fusion:",
+                     value = 0.20,
+                     min   = 0.01,
+                     max   = 1.0,
+                     step  = 0.01),
+        helpText("Minimum Jaccard index of peak-associated reads to trigger automatic peak fusion"),
+
+        numericInput("tel_tol_kb",
+                     "Telomere Tolerance (Kb):",
+                     value = 5, min = 0, step = 1),
+        helpText("LOH regions within this distance of a chromosome end are treated as terminal."),
+
+        numericInput("merge_gap_kb",
+                     "Same-State Merge Gap (Kb):",
+                     value = 5, min = 0, step = 1),
+        helpText("NA gaps smaller than this between two same-state LOH runs will be merged."),
+
+        numericInput("min_span_reads",
+                     "Min Spanning Reads for Read Call:",
+                     value = 3, min = 1, step = 1),
+        helpText("Minimum spanning reads required to make a read-based event call. Below this, result is Ambiguous."),
+
+        numericInput("peak_pad_bp",
+                     "Peak Association Padding (bp):",
+                     value = 200, min = 0, step = 50),
+        helpText("A peak is attached to a token junction if its SNP position falls within this distance of the token boundary."),
+
+        numericInput("homog_frac",
+                     "NCO-GC Homogeneity Fraction:",
+                     value = 0.80, min = 0.5, max = 1.0, step = 0.05),
+        helpText("Fraction of spanning reads that must share the return pattern (AAABBBAAA) to call NCO-GC.")
+      ),
 
       hr(),
-      h3("Peak Fusion Parameters"),
-
-      numericInput("jaccard_threshold",
-                   "Jaccard Threshold for Auto-Fusion:",
-                   value = 0.20,
-                   min   = 0.01,
-                   max   = 1.0,
-                   step  = 0.01),
-      helpText("Minimum Jaccard index of peak-associated reads to trigger automatic peak fusion"),
-      
-      # LOH chain params
-      
-      hr(),
-      h3("Event Caller Parameters"),
-      
-      numericInput("tel_tol_kb",
-                   "Telomere Tolerance (Kb):",
-                   value = 5, min = 0, step = 1),
-      helpText("LOH regions within this distance of a chromosome end are treated as terminal."),
-      
-      numericInput("merge_gap_kb",
-                   "Same-State Merge Gap (Kb):",
-                   value = 5, min = 0, step = 1),
-      helpText("NA gaps smaller than this between two same-state LOH runs will be merged."),
-      
-      numericInput("min_span_reads",
-                   "Min Spanning Reads for Read Call:",
-                   value = 3, min = 1, step = 1),
-      helpText("Minimum spanning reads required to make a read-based event call. Below this, result is Ambiguous."),
-
-      numericInput("peak_pad_bp",
-                   "Peak Association Padding (bp):",
-                   value = 200, min = 0, step = 50),
-      helpText("A peak is attached to a token junction if its SNP position falls within this distance of the token boundary."),
-
-      numericInput("homog_frac",
-                   "NCO-GC Homogeneity Fraction:",
-                   value = 0.80, min = 0.5, max = 1.0, step = 0.05),
-      helpText("Fraction of spanning reads that must share the return pattern (AAABBBAAA) to call NCO-GC."),
-      
-      actionButton("run_chain",
-                   "Run Event Caller",
-                   class = "btn-success btn-lg"),
-      helpText("Run after Peak Fusion. Calls recombination events from LOH + peak chain."),
 
       actionButton("run_analysis",
-                   "Run Analysis",
+                   HTML("Find Haplotype<br/>Chimeras"),
                    class = "btn-primary btn-lg"),
 
-      actionButton("run_fusion",
-                   "Run Peak Fusion",
-                   class = "btn-warning btn-lg"),
-      helpText("Run after analysis. Re-run after approving supervised fusions below."),
+      uiOutput("run_fusion_ui"),
+
+      uiOutput("run_chain_ui"),
 
       br(),
       tags$small(
@@ -699,6 +696,31 @@ server <- function(input, output, session) {
   # Tracks which supervised pair_keys the user has checked
   supervised_approved <- reactiveVal(character(0))
 
+  # Tracks pipeline stage completion, used to progressively reveal the
+  # "Run Peak Fusion" / "Run Event Caller" buttons in the sidebar.
+  analysis_done <- reactiveVal(FALSE)
+  fusion_done    <- reactiveVal(FALSE)
+
+  output$run_fusion_ui <- renderUI({
+    req(analysis_done())
+    tagList(
+      actionButton("run_fusion",
+                   "Run Peak Fusion",
+                   class = "btn-warning btn-lg"),
+      helpText("Run after analysis. Re-run after approving supervised fusions below.")
+    )
+  })
+
+  output$run_chain_ui <- renderUI({
+    req(fusion_done())
+    tagList(
+      actionButton("run_chain",
+                   "Run Event Caller",
+                   class = "btn-success btn-lg"),
+      helpText("Run after Peak Fusion. Calls recombination events from LOH + peak chain.")
+    )
+  })
+
   # ── RLE helper (operates on plain vectors) ──────────────────────
   rle_helper <- function(x) {
     r  <- rle(x)[[1]]
@@ -745,6 +767,8 @@ server <- function(input, output, session) {
     results$event_table            <- NULL
     results$chain_params           <- NULL
     supervised_approved(character(0))
+    analysis_done(FALSE)
+    fusion_done(FALSE)
 
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
 
@@ -1025,6 +1049,7 @@ server <- function(input, output, session) {
       incProgress(1, detail = "Complete")
     })
 
+    analysis_done(TRUE)
     showNotification("Analysis complete. Click 'Run Peak Fusion' to evaluate adjacent peaks.", type = "message", duration = 5)
   })
 
@@ -1069,6 +1094,7 @@ server <- function(input, output, session) {
       )
     })
 
+    fusion_done(TRUE)
     showNotification("Peak fusion complete. Review results in the 'Peak Fusion' and 'Fused Peak Plots' tabs.", type = "message", duration = 4)
   })
   
