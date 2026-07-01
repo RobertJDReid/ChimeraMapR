@@ -337,11 +337,33 @@ ui <- fluidPage(
     sidebarPanel(
       h3("Data Files"),
       fileInput("read_data_file",
-                "Read Data File (CSV/GZ):",
+                label = tagList(
+                  "Read Data File (CSV/GZ):",
+                  tags$span(
+                    title = paste(
+                      "BAM file subset produced by bamcol.py:",
+                      "contains read information ",
+                      "at SNP positions only."
+                    ),
+                    style = "cursor: help; color: #337ab7; margin-left: 4px;",
+                    HTML("&#9432;")
+                  )
+                ),
                 accept = c(".csv", ".gz", ".csv.gz")),
 
       fileInput("snp_data_file",
-                "SNP Data File (CSV or VCF):",
+                label = tagList(
+                  "SNP Data File (CSV or VCF):",
+                  tags$span(
+                    title = paste(
+                      "VCF file with SNP positions or",
+                      "CSV file with CHROM, POS, REF and ALT",
+                      "for each SNP position"
+                    ),
+                    style = "cursor: help; color: #337ab7; margin-left: 4px;",
+                    HTML("&#9432;")
+                  )
+                ),
                 accept = c(".csv", ".vcf", ".vcf.gz", ".gz")),
 
       fileInput("chr_size_file",
