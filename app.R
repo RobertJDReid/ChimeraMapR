@@ -414,6 +414,14 @@ ui <- fluidPage(
                      min = 0,
                      step = 1),
 
+        numericInput("del_rate_cutoff",
+                     "Max Local Deletion Rate:",
+                     value = 0.10,
+                     min = 0,
+                     max = 1,
+                     step = 0.01),
+        helpText("SNPs where more than this fraction of confidently-mapped reads register a deletion (rather than a base call) are excluded — typically a sign of a nearby repeat/homopolymer destabilizing alignment."),
+
         numericInput("lambda",
                      "Whittaker Lambda (\u03bb):",
                      value = 1,
@@ -821,6 +829,7 @@ server <- function(input, output, session) {
         min_run         = input$min_run,
         min_peak_height = input$min_peak_height,
         lambda          = input$lambda,
+        del_rate_cutoff = input$del_rate_cutoff,
         warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)
       )
 
@@ -1950,6 +1959,7 @@ server <- function(input, output, session) {
       "\nAnalysis Parameters:\n",
       "  MAPQ Cutoff: ",              input$mapq_cutoff,     "\n",
       "  Base Quality Cutoff: ",      input$baseq_cutoff,    "\n",
+      "  Max Local Deletion Rate: ",  input$del_rate_cutoff, "\n",
       "  Min Run Length: ",           input$min_run,         "\n",
       "  Min Peak Height: ",          input$min_peak_height, "\n",
       "  Whittaker Lambda (\u03bb): ",input$lambda,          "\n",

@@ -131,6 +131,7 @@ run_chimera_analysis <- function(
     min_run         = 2L,
     min_peak_height = 10L,
     lambda          = 1,
+    del_rate_cutoff = 0.10,
     warn_fn         = function(msg) message("WARNING: ", msg)
 ) {
 
@@ -150,6 +151,37 @@ run_chimera_analysis <- function(
   allele_data_used <- allele_data[CHROM %in% chromosomes]
   chr_size_used    <- chr_size[CHROM %in% chromosomes]
 
+  # ── SNP-level QC: drop SNPs with an excessive local deletion rate ──────────
+  # A position where a large fraction of confidently-mapped (MAPQ-passing)
+  # reads register a deletion rather than a base call usually sits in/near a
+  # short repeat or homopolymer that destabilizes alignment for a subset of
+  # reads; the reads that do get a base call there can carry a spurious
+  # substitution, which masquerades as a single-SNP flip in an otherwise
+  # fixed haplotype block. Excluding such SNPs here removes them from every
+  # downstream read set (chimeric-read RLE, LOH allele balance, peak/
+  # breakpoint detection) with no special-casing needed further down.
+  del_stats <- read_data[
+    mapq >= mapq_cutoff,
+    .(n_total = .N, n_del = sum(is_del == 1L)),
+    by = .(chrom, pos)
+  ]
+  del_stats[, del_frac := n_del / n_total]
+
+  allele_data_used <- merge(
+    allele_data_used, del_stats,
+    by.x = c("CHROM", "POS"), by.y = c("chrom", "pos"), all.x = TRUE
+  )
+  n_high_del <- sum(!is.na(allele_data_used$del_frac) &
+                       allele_data_used$del_frac > del_rate_cutoff)
+  if (n_high_del > 0L) {
+    warn_fn(paste0(
+      n_high_del, " SNP position(s) excluded: local deletion rate exceeds ",
+      round(del_rate_cutoff * 100), "% of confidently-mapped reads."
+    ))
+  }
+  allele_data_used <- allele_data_used[is.na(del_frac) | del_frac <= del_rate_cutoff]
+  allele_data_used[, c("n_total", "n_del", "del_frac") := NULL]
+
   snp_number   <- nrow(allele_data_used)
   genome_size  <- sum(chr_size_used$length)
   snp_density  <- snp_number / genome_size
@@ -163,7 +195,7 @@ run_chimera_analysis <- function(
   ]
 
   full_read <- merge(
-    full_read, allele_data,
+    full_read, allele_data_used,
     by.x  = c("chrom", "pos"),
     by.y  = c("CHROM", "POS"),
     all.x = TRUE
@@ -193,7 +225,7 @@ run_chimera_analysis <- function(
     is_del == 0
   ]
   full_read_loh <- merge(
-    full_read_loh, allele_data,
+    full_read_loh, allele_data_used,
     by.x  = c("chrom", "pos"),
     by.y  = c("CHROM", "POS"),
     all.x = TRUE
@@ -230,7 +262,7 @@ run_chimera_analysis <- function(
 
   pos_count <- transition_pos[, .(n = .N), by = .(chrom, pos)]
 
-  snp_coverage <- allele_data[CHROM %in% chromosomes, .(chrom = CHROM, pos = POS)]
+  snp_coverage <- allele_data_used[, .(chrom = CHROM, pos = POS)]
   snp_coverage <- merge(snp_coverage, pos_count,
                         by = c("chrom", "pos"), all.x = TRUE)
   snp_coverage[is.na(n), n := 0L]
@@ -238,7 +270,7 @@ run_chimera_analysis <- function(
   snp_coverage[, pos_kb := pos / 1000]
 
   # ── 5. Build per-chromosome lambda table ─────────────────────────────────────
-  snp_counts_by_chr <- allele_data[CHROM %in% chromosomes, .N, by = CHROM]
+  snp_counts_by_chr <- allele_data_used[, .N, by = CHROM]
   chr_span <- chr_size[CHROM %in% chromosomes]
   chr_span[, chrom := factor(CHROM, levels = fasta_chr_order)]
   chr_span <- merge(chr_span, snp_counts_by_chr, by = "CHROM", all.x = TRUE)
@@ -474,6 +506,7 @@ run_chimera_analysis <- function(
       min_run         = min_run,
       min_peak_height = min_peak_height,
       lambda          = lambda,
+      del_rate_cutoff = del_rate_cutoff,
       app_version     = APP_VERSION
     )
   )

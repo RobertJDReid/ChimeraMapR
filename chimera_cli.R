@@ -105,6 +105,13 @@ option_list <- list(
               metavar = "INT",
               help    = "Minimum base quality at SNP position [default: %default]"),
 
+  make_option("--del-rate-cutoff",
+              type    = "double",
+              default = 0.10,
+              metavar = "FLOAT",
+              help    = paste("SNPs where more than this fraction of confidently-mapped",
+                              "reads register a deletion are excluded [default: %default]")),
+
   make_option("--min-run",
               type    = "integer",
               default = 2L,
@@ -282,6 +289,7 @@ cat("  FAI       : ", fai_path,  "\n")
 cat("Parameters:\n")
 cat("  MAPQ cutoff     :", opts[["mapq-cutoff"]],     "\n")
 cat("  BaseQ cutoff    :", opts[["baseq-cutoff"]],    "\n")
+cat("  Del rate cutoff :", opts[["del-rate-cutoff"]], "\n")
 cat("  Min run         :", opts[["min-run"]],         "\n")
 cat("  Min peak height :", opts[["min-peak-height"]], "\n")
 cat("  Lambda (λ)      :", opts[["lambda"]],          "\n")
@@ -303,6 +311,7 @@ results <- run_chimera_analysis(
   sample_name     = opts[["sample-name"]],
   mapq_cutoff     = opts[["mapq-cutoff"]],
   baseq_cutoff    = opts[["baseq-cutoff"]],
+  del_rate_cutoff = opts[["del-rate-cutoff"]],
   min_run         = opts[["min-run"]],
   min_peak_height = opts[["min-peak-height"]],
   lambda          = opts[["lambda"]]
