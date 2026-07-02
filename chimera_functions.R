@@ -1001,8 +1001,10 @@ build_overview_plot <- function(results) {
   
   # ── Per-chromosome ploidy panel backgrounds ───────────────────────────────
   # 1N → #FAFBAC, 3N → #FEDBFF, 2N → white (no layer added).
-  # fill is set outside aes() so it doesn't interact with the LOH fill scale.
-  PLOIDY_BG <- c("1" = "#FCFCDA", "3" = "#F6E3FC")
+  # fill is mapped through aes() (keyed on the display label) so these
+  # backgrounds join the same fill legend as the LOH band colours below.
+  PLOIDY_BG     <- c("1" = "#FCFCDA", "3" = "#F6E3FC")
+  PLOIDY_LABELS <- c("1" = "<2N", "3" = ">2N")
   ploidy_dt <- if (!is.null(results$ploidy_map)) {
     #warning("non-null ploidy_map")
     results$ploidy_map
@@ -1015,14 +1017,16 @@ build_overview_plot <- function(results) {
   }
   aneuploid <- if (nrow(ploidy_dt) > 0)
     ploidy_dt[estimated_ploidy %in% c(1L, 3L)] else data.table()
+  has_ploidy_bg <- nrow(aneuploid) > 0
   # alpha < 1 so the panel grid lines (drawn beneath all geom layers by
   # ggplot2 regardless of code order) remain visible through the background
   ploidy_bg_layers <- lapply(seq_len(nrow(aneuploid)), function(i) {
+    ploidy_key <- as.character(aneuploid$estimated_ploidy[i])
     geom_rect(
-      data        = data.table(chrom = as.character(aneuploid$chrom[i])),
-      aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
-      fill        = PLOIDY_BG[as.character(aneuploid$estimated_ploidy[i])],
-      color       = NA,
+      data        = data.table(chrom       = as.character(aneuploid$chrom[i]),
+                                ploidy_call = PLOIDY_LABELS[[ploidy_key]]),
+      aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, fill = ploidy_call),
+      color       = "black",
       alpha       = 0.5,
       inherit.aes = FALSE
     )
@@ -1094,24 +1098,22 @@ build_overview_plot <- function(results) {
   has_loh <- !is.null(loh_segs_all) && nrow(loh_segs_all) > 0 &&
              any(loh_segs_all$loh_state %in% c("REF_fixed", "ALT_fixed"), na.rm = TRUE)
 
-  if (!has_loh) {
-    return(p_main)   # nothing to add — return the plain overview
+  loh_fixed <- if (has_loh) copy(loh_segs_all[loh_state %in% c("REF_fixed", "ALT_fixed")]) else data.table()
+  if (has_loh && nrow(loh_fixed) > 0) {
+    # Convert bp coordinates to Kb and ensure chrom matches the coverage plot
+    loh_fixed[, xmin  := start / 1000]
+    loh_fixed[, xmax  := end   / 1000]
+    loh_fixed[, chrom := as.character(chrom)]
+    loh_fixed <- loh_fixed[chrom %in% unique(snp_cov$chrom)]
+  } else {
+    has_loh <- FALSE
   }
-
-  loh_fixed <- copy(loh_segs_all[loh_state %in% c("REF_fixed", "ALT_fixed")])
-  if (nrow(loh_fixed) == 0) return(p_main)
-
-  # Convert bp coordinates to Kb and ensure chrom matches the coverage plot
-  loh_fixed[, xmin  := start / 1000]
-  loh_fixed[, xmax  := end   / 1000]
-  loh_fixed[, chrom := as.character(chrom)]
-  loh_fixed <- loh_fixed[chrom %in% unique(snp_cov$chrom)]
   loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
 
   # Height of the LOH band in data (read-count) units: 4% of the y ceiling.
   # Placed at ymin = 0 so it sits flush with the x-axis baseline in every facet.
   y_ceiling  <- max(30, max(snp_cov$n))
-  loh_band_h <- y_ceiling * -0.10 # negative to put it below number line
+  loh_band_h <- y_ceiling * -0.15 # negative to put it below number line
 
   loh_labels <- c(
     REF_fixed = paste0(strain_ref), # will fix later
@@ -1122,30 +1124,58 @@ build_overview_plot <- function(results) {
     ", red\u202f=\u202f", strain_alt
   )
 
+  # -- Combined fill legend: ploidy backgrounds + LOH band colours --
+  # Both sets of colours are mapped onto the same "fill" aesthetic (ploidy
+  # backgrounds via aes(fill = ploidy_call) above) so they share one legend.
+  fill_values <- character(0)
+  fill_labels <- character(0)
+
+  if (has_ploidy_bg) {
+    ploidy_keys  <- unique(as.character(aneuploid$estimated_ploidy))
+    ploidy_names <- PLOIDY_LABELS[ploidy_keys]
+    fill_values  <- c(fill_values, setNames(PLOIDY_BG[ploidy_keys], ploidy_names))
+    fill_labels  <- c(fill_labels, setNames(ploidy_names, ploidy_names))
+  }
+
+  if (has_loh) {
+    fill_values <- c(fill_values, loh_colours)
+    fill_labels <- c(fill_labels, loh_labels)
+
+    p_main <- p_main +
+      geom_rect(
+        data        = loh_fixed,
+        aes(xmin = xmin, xmax = xmax,
+            ymin = 0,    ymax = loh_band_h,
+            fill = loh_state),
+        alpha       = 0.85,
+        inherit.aes = FALSE
+      )
+  }
+
+  if (length(fill_values) == 0) {
+    return(p_main)   # nothing to add - return the plain overview
+  }
+
   p_main <- p_main +
-    geom_rect(
-      data        = loh_fixed,
-      aes(xmin = xmin, xmax = xmax,
-          ymin = 0,    ymax = loh_band_h,
-          fill = loh_state),
-      alpha       = 0.85,
-      inherit.aes = FALSE
-    ) +
     scale_fill_manual(
-      values = loh_colours,
-      labels = loh_labels,
-      name   = "LOH",
+      values = fill_values,
+      labels = fill_labels,
+      name   = "Panel key",
       drop   = FALSE
     ) +
-    labs(caption = loh_caption) +
     theme(
-      plot.caption     = element_text(size = rel(1), colour = "grey40"),
       legend.position  = "bottom",
       legend.title     = element_text(size = rel(1), face = "bold"),
       legend.text      = element_text(size = rel(1))
     )
 
-  p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h)
+  if (has_loh) {
+    p_main <- p_main +
+      labs(caption = loh_caption) +
+      theme(plot.caption = element_text(size = rel(1), colour = "grey40"))
+
+    p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h)
+  }
 
   p_main
 }

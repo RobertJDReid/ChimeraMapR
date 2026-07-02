@@ -2,11 +2,11 @@
 
 _version 0.6.3_
 
-An interactive **R Shiny app** for identifying **chimeric long reads** in DNA sequencing data by tracking allele changes across known SNP positions, then summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection.
+An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions and summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection.
 
-Chimeric reads contain sequence derived from more than one parental chromosome — for example, reads spanning a recombination breakpoint in a hybrid or cross. The app classifies each base call at known biallelic SNP positions as REF or ALT, then uses run-length encoding to detect reads where the allele identity switches and is sustained across multiple consecutive SNPs. These switches indicate a transition between parental haplotypes within a single read.
+Chimeric reads contain sequence derived from more than one parental chromosome — for example, reads spanning a recombination breakpoint in a hybrid or cross. The app classifies each base call at known biallelic SNP positions as REF or ALT, then uses run-length encoding to detect reads where the allele identity switches and is sustained across multiple consecutive SNPs, marking a transition between parental haplotypes within a single read.
 
-The app is designed for plotting per-read base calls at known SNP sites and is the plotting function for the [bamCol](https://github.com/RobertJDReid/bamCol) python app.
+The core input is a CSV of per-read base calls at biallelic SNP positions extracted from a BAM alignment file (read ID, base call, mapping quality, strand, and related fields — see [Features](#features) for the full set of required inputs). The app groups these calls by read, flags reads with haplotype switches, and plots per-read base calls at known SNP sites, serving as the plotting front-end for the [bamCol](https://github.com/RobertJDReid/bamCol) python app.
 
 ---
 

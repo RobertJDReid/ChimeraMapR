@@ -458,9 +458,10 @@ ui <- fluidPage(
       hr(),
 
       actionButton("run_analysis",
-                   HTML("Find Haplotype<br/>Chimeras"),
+                   HTML("Plot Haplotype<br/>Chimeras"),
                    class = "btn-primary btn-lg"),
-
+      helpText(""),
+      
       uiOutput("run_fusion_ui"),
 
       uiOutput("run_chain_ui"),
@@ -729,7 +730,7 @@ server <- function(input, output, session) {
       actionButton("run_fusion",
                    "Run Peak Fusion",
                    class = "btn-warning btn-lg"),
-      helpText("Run after analysis. Re-run after approving supervised fusions below.")
+      helpText("Run after plotting chimeras. Re-run after approving supervised fusions.")
     )
   })
 
