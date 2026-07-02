@@ -628,10 +628,43 @@ compute_loh_map <- function(full_read_loh,
   snp_table <- summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)]
 
   # ── 5. Collapse into contiguous LOH segments ──────────────────────────────
-  setorder(summary_dt, chrom, pos)
-  summary_dt[, LOH_factor := rleid(AC), by = chrom]
+  # A lone single-SNP run sandwiched between two runs of the identical
+  # flanking state (on both sides) is treated as a flicker, not a real
+  # transition: a true recombination/gene-conversion tract is expected to be
+  # supported by >= 2 consecutive SNPs. Such singletons are absorbed into
+  # their flanking state before segments are built, mirroring the run-collapse
+  # already applied to chimeric-read patterns in classify_peak_haplotype() /
+  # classify_fused_peak_haplotype(). snp_table above is built from the
+  # pre-collapse AC/loh_state, so per-SNP displays still show the raw,
+  # uncollapsed observed pattern (including the flicker position itself).
+  seg_dt <- copy(summary_dt)
+  setorder(seg_dt, chrom, pos)
+  repeat {
+    seg_dt[, run_id := rleid(AC), by = chrom]
+    run_ac <- seg_dt[, .(n = .N, ac = AC[1]), by = .(chrom, run_id)]
+    setorder(run_ac, chrom, run_id)
+    run_ac[, ac_prev := shift(ac, 1L),  by = chrom]
+    run_ac[, ac_next := shift(ac, -1L), by = chrom]
+    to_absorb <- run_ac[
+      n == 1L & !is.na(ac_prev) & !is.na(ac_next) &
+        ac_prev == ac_next & ac_prev != ac
+    ]
+    if (nrow(to_absorb) == 0L) break
 
-  loh_segments <- summary_dt[, .(
+    merge_map <- to_absorb[, .(chrom, run_id, new_ac = ac_prev)]
+    seg_dt <- merge(seg_dt, merge_map, by = c("chrom", "run_id"), all.x = TRUE)
+    seg_dt[!is.na(new_ac), AC := new_ac]
+    seg_dt[, new_ac := NULL]
+    seg_dt[, loh_state := fcase(
+      AC == 0L, "ALT_fixed",
+      AC == 1L, "HET",
+      AC == 2L, "REF_fixed",
+      default  = NA_character_
+    )]
+  }
+  seg_dt[, run_id := rleid(AC), by = chrom]
+
+  loh_segments <- seg_dt[, .(
     start        = min(pos),
     end          = max(pos),
     length_bp    = max(pos) - min(pos) + 1L,
@@ -640,8 +673,8 @@ compute_loh_map <- function(full_read_loh,
     loh_state    = unique(loh_state),
     balance_mean = mean(balance, na.rm = TRUE),
     balance_sd   = sd(balance,   na.rm = TRUE)
-  ), by = .(chrom, LOH_factor)]
-  loh_segments[, LOH_factor := NULL]
+  ), by = .(chrom, run_id)]
+  loh_segments[, run_id := NULL]
 
   list(
     snp_table    = snp_table,
