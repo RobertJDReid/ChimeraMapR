@@ -411,6 +411,11 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     jaccard           = NA_real_,
     pair_edge_type    = NA_character_,
     pair_fusion_mode  = NA_character_,
+    # Position of the OTHER peak that pair_edge_type actually describes (see
+    # below). Lets consumers of pair_edge_type (classify_two_binary_junction)
+    # verify the borrowed verdict is really about the junction they're
+    # evaluating, not a different neighboring pair.
+    pair_partner_pos  = NA_real_,
     # Per-read switch count from classify_peak_haplotype(), computed at
     # Run Analysis time for "binary"/"internal_crossover" labelled peaks —
     # the only direct read evidence available for peaks that never get a
@@ -440,6 +445,14 @@ build_raw_chains <- function(loh_segments, chr_span, params,
           grp_rep$pair_edge_type[ri]   <- best_pair$edge_type
           grp_rep$pair_fusion_mode[ri] <- if ("fusion_mode" %in% names(best_pair))
                                             best_pair$fusion_mode else NA_character_
+          # Only a defined "partner" when pos is literally one of the pair's
+          # two endpoints (the normal case) — leave NA if pos merely falls
+          # inside the pair's span, since there's no single peak to name.
+          grp_rep$pair_partner_pos[ri] <- if (!is.na(best_pair$snp_pos_a) && best_pair$snp_pos_a == pos)
+                                             best_pair$snp_pos_b
+                                           else if (!is.na(best_pair$snp_pos_b) && best_pair$snp_pos_b == pos)
+                                             best_pair$snp_pos_a
+                                           else NA_real_
           if (is.na(grp_rep$best_edge_type[ri]))
             grp_rep$best_edge_type[ri] <- best_pair$edge_type
         }
@@ -814,10 +827,32 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   # Complementary -> CO_GC
 
   # Use the pair's edge_type from peak_pairs if the pair spans the tract
-  # (this is populated by compute_peak_pairs when loh_in_gap == TRUE)
-  pair_et <- left_peak$pair_edge_type %||% right_peak$pair_edge_type
+  # (this is populated by compute_peak_pairs when loh_in_gap == TRUE) — but
+  # only trust it when it actually describes the relationship between THESE
+  # two peaks. pair_edge_type is attached to a peak from whichever pair best
+  # matches that peak's own position; for a peak with a neighbor on both
+  # sides, that pair is not necessarily the one formed with the peak on the
+  # far side of THIS interstitial tract (e.g. it may describe a small
+  # fragment on the peak's other flank instead). pair_partner_pos records
+  # which peak that stored verdict is actually about, so we can confirm it
+  # lines up with the other junction peak before trusting it.
+  # (Plain %||% doesn't work here: an explicitly-NA field is not NULL, so
+  # %||% never falls through to the other side.)
+  left_pos  <- left_peak$fused_pos_bp  %||% left_peak$snp_pos
+  right_pos <- right_peak$fused_pos_bp %||% right_peak$snp_pos
 
-  if (!is.null(pair_et) && !is.na(pair_et)) {
+  left_valid  <- !is.null(left_peak$pair_edge_type) && !is.na(left_peak$pair_edge_type) &&
+                 !is.na(left_peak$pair_partner_pos %||% NA_real_) && !is.na(right_pos) &&
+                 left_peak$pair_partner_pos == right_pos
+  right_valid <- !is.null(right_peak$pair_edge_type) && !is.na(right_peak$pair_edge_type) &&
+                 !is.na(right_peak$pair_partner_pos %||% NA_real_) && !is.na(left_pos) &&
+                 right_peak$pair_partner_pos == left_pos
+
+  pair_et <- if (left_valid) left_peak$pair_edge_type
+             else if (right_valid) right_peak$pair_edge_type
+             else NA_character_
+
+  if (!is.na(pair_et)) {
     return(switch(pair_et,
       "crossover"       = list(call = "CO_GC",            reason = "complementary_binary", n_support = ns),
       "gene_conversion" = list(call = "NCO_GC_LARGE",     reason = "homogeneous_binary",   n_support = ns),
@@ -1790,12 +1825,22 @@ rule_two_binary_flanking <- list(
   },
   fire_fn = function(m, chain, params) {
     tract <- classify_two_binary_junction(m$pk_l, m$pk_r, m$f_tok$state, params)
-    call  <- switch(tract$call,
-      NCO_GC       = "NCO_GC",
-      NCO_GC_LARGE = "NCO_GC",
-      CO_GC        = "CO_GC",
-      paste0("AMBIGUOUS(", tract$reason, ")")
-    )
+    call  <- if (identical(tract$call, "AMBIGUOUS") && identical(tract$reason, "binary_no_pair")) {
+      # Both flanking peaks are independently self-classifying ("binary"),
+      # confirming a real LOH tract bridges this gap — it's just wider than
+      # any read can span, so no read evidence exists to call NCO vs CO.
+      # Report the confirmed gene-conversion-type event instead of leaving it
+      # fully ambiguous (or letting the peaks fall through separately to
+      # reconcile()'s peak-only "_subres" path).
+      "GC_UNRESOLVED"
+    } else {
+      switch(tract$call,
+        NCO_GC       = "NCO_GC",
+        NCO_GC_LARGE = "NCO_GC",
+        CO_GC        = "CO_GC",
+        paste0("AMBIGUOUS(", tract$reason, ")")
+      )
+    }
     ev <- .make_event(call, chain$chrom,
                       list(m$f_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),

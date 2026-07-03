@@ -964,6 +964,7 @@ EVENT_SYMBOL_MAP <- c(
   NCO_GC                   = "𝝤", # CAPTIAL OMICRON
   NCO_GC_subres            = "𝝤", # CAPTIAL OMICRON (no flanking LOH tract)
   NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
+  GC_UNRESOLVED            = "𝝤?", # confirmed GC-type tract (LOH flanked by two binary peaks); NCO/CO undetermined
   CROSSOVER_NO_TRACT       = "✖", # HEAVY MULTIPLICATION X (crossover, tract below LOH resolution)
   DOUBLE_GC                = "𝝤𝝤", # two NCO gene conversions in one token
   CO_TERM                  = "TCO",
@@ -2181,14 +2182,15 @@ compute_peak_pairs <- function(snp_peaks,
 
   get_peak_edge_info <- function(pid) {
     rel_pairs <- pairs_dt[peak_id_a == pid | peak_id_b == pid]
+    lbl       <- peaks_dt[peak_id == pid, haplotype_label]
+    own_label <- if (length(lbl) && !is.na(lbl)) lbl else NA_character_
+
     if (nrow(rel_pairs) == 0) {
       # Singleton — no pairs evaluated.  Use the peak's own haplotype_label so
       # callers can show something informative (e.g. "internal_crossover") instead
       # of NA.
-      lbl <- peaks_dt[peak_id == pid, haplotype_label]
       return(data.table(peak_id            = pid,
-                        best_edge_type     = if (length(lbl) && !is.na(lbl)) lbl
-                                             else NA_character_,
+                        best_edge_type     = own_label,
                         best_fusion_mode   = NA_character_,
                         adjacent_pair_keys = NA_character_))
     }
@@ -2200,9 +2202,21 @@ compute_peak_pairs <- function(snp_peaks,
     pool     <- if (nrow(auto_rel) > 0) auto_rel else rel_pairs
     pool[, priority := FUSION_HEURISTICS$edge_priority[edge_type]]
     best <- pool[which.min(priority)]
+
+    # A pair's edge_type only stands in for this peak's OWN self-classification
+    # when the pair actually fused it (fusion_mode == "automatic"). An
+    # evaluated-but-unconfirmed ("supervised"/"none") pair describes this
+    # peak's relationship to its *neighbor*, not this peak's own identity —
+    # promoting it here would let the neighbor's verdict masquerade as a
+    # self-classifying label (e.g. a genuinely "binary" peak reading as
+    # "gene_conversion"), which lets single-peak rules fire on borrowed
+    # evidence instead of leaving the peak available to rules that combine
+    # both flanking peaks.
+    best_edge <- if (nrow(auto_rel) > 0) best$edge_type else own_label
+
     data.table(
       peak_id            = pid,
-      best_edge_type     = best$edge_type,
+      best_edge_type     = best_edge,
       best_fusion_mode   = best$fusion_mode,
       adjacent_pair_keys = paste(rel_pairs$pair_key, collapse = ";")
     )

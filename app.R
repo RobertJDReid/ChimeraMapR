@@ -2325,6 +2325,7 @@ server <- function(input, output, session) {
       tags$span("NCO_GC",             style = "background:#d4edda; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("NCO_GC_LARGE",       style = "background:#c3e6cb; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("NCO_GC_subres",      style = "background:#b8daff; padding:2px 6px; border-radius:3px; margin-right:4px;"),
+      tags$span("GC_UNRESOLVED",      style = "background:#b8daff; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("CO_GC",              style = "background:#ffeeba; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("CROSSOVER_NO_TRACT", style = "background:#ffe8a1; padding:2px 6px; border-radius:3px; margin-right:4px;"),
       tags$span("CO_TERM",             style = "background:#d6d8db; padding:2px 6px; border-radius:3px; margin-right:4px;"),

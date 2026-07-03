@@ -225,19 +225,23 @@ expect("binary single peak -> AMBIGUOUS(binary_single_peak)", {
 section("classify_two_binary_junction")
 
 expect("two binary peaks with crossover pair -> CO_GC", {
-  pk_l <- list(best_edge_type = "binary", n_spanning = 4L,
-               pair_edge_type = "crossover")
-  pk_r <- list(best_edge_type = "binary", n_spanning = 4L,
-               pair_edge_type = "crossover")
+  # pair_partner_pos must point at each other's own position — that's what
+  # tells classify_two_binary_junction() this pair_edge_type genuinely
+  # describes THIS junction rather than one peak's relationship to some
+  # other, unrelated neighbor.
+  pk_l <- list(best_edge_type = "binary", n_spanning = 4L, fused_pos_bp = 100000,
+               pair_edge_type = "crossover", pair_partner_pos = 200000)
+  pk_r <- list(best_edge_type = "binary", n_spanning = 4L, fused_pos_bp = 200000,
+               pair_edge_type = "crossover", pair_partner_pos = 100000)
   r <- classify_two_binary_junction(pk_l, pk_r, "ALT_fixed", params)
   r$call == "CO_GC"
 })
 
 expect("two binary peaks with gene_conversion pair -> NCO_GC_LARGE", {
-  pk_l <- list(best_edge_type = "binary", n_spanning = 4L,
-               pair_edge_type = "gene_conversion")
-  pk_r <- list(best_edge_type = "binary", n_spanning = 4L,
-               pair_edge_type = "gene_conversion")
+  pk_l <- list(best_edge_type = "binary", n_spanning = 4L, fused_pos_bp = 100000,
+               pair_edge_type = "gene_conversion", pair_partner_pos = 200000)
+  pk_r <- list(best_edge_type = "binary", n_spanning = 4L, fused_pos_bp = 200000,
+               pair_edge_type = "gene_conversion", pair_partner_pos = 100000)
   r <- classify_two_binary_junction(pk_l, pk_r, "ALT_fixed", params)
   r$call == "NCO_GC_LARGE"
 })
@@ -1097,7 +1101,7 @@ expect("two binary flanking peaks + gene_conversion pair -> NCO_GC", {
   any(grepl("NCO_GC", event_classes(res)))
 })
 
-expect("two binary peaks with no pair data -> AMBIGUOUS (not NCO/CO)", {
+expect("two binary peaks with no pair data -> GC_UNRESOLVED (confirmed GC, NCO/CO undetermined)", {
   loh <- loh_rbind(
     make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
     make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
@@ -1112,7 +1116,7 @@ expect("two binary peaks with no pair data -> AMBIGUOUS (not NCO/CO)", {
   cs  <- make_chr_span("chrI", 500000L)
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
                              chr_span = cs, params = params)  # no peak_pairs
-  any(grepl("AMBIGUOUS", event_classes(res)))
+  any(grepl("GC_UNRESOLVED", event_classes(res)))
 })
 
 expect("R11 finds junction peaks across G gaps (real-data layout)", {
