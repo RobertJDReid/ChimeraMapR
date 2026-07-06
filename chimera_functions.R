@@ -1271,6 +1271,51 @@ build_overview_plot <- function(results) {
 #     win_end    : actual window end used (bp, possibly expanded)
 #     expanded   : logical — was the window expanded beyond peak_start/end?
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# classify_run_pattern()
+#   Maps a collapsed run-length sequence of SNP_call values ("REF"/"ALT"/
+#   "HET") to a haplotype label. Shared by classify_peak_haplotype() and
+#   classify_fused_peak_haplotype() so the two stay in lockstep.
+#
+#   n_runs == 4, alternating REF/ALT only (REF-ALT-REF-ALT or
+#   ALT-REF-ALT-REF), is patchy mismatch-repair conversion -- the middle two
+#   runs flip back before the switch settles -- but the overall junction
+#   direction is still readable from the first and last run (e.g.
+#   REF-ALT-REF-ALT is ultimately a REF->ALT switch), so it's labelled
+#   "compound_binary" rather than "undefined" and treated as a binary-type
+#   junction downstream (see FUSION_HEURISTICS$eligible_peak_classes and
+#   normalize_edge_type_label()). Any other >3-run pattern (mixed with HET,
+#   or a different length/order) keeps "undefined" -- its overall direction
+#   can't be read off cleanly.
+# ---------------------------------------------------------------------------
+classify_run_pattern <- function(runs) {
+  n_runs <- length(runs)
+
+  if (n_runs == 1L) {
+    if      (runs[1] == "HET")                           "internal_crossover"
+    else                                                  "undefined"          # single REF or ALT
+
+  } else if (n_runs == 2L) {
+    if (runs[1] %in% c("REF","ALT") && runs[2] %in% c("REF","ALT") &&
+        runs[1] != runs[2])                               "binary"
+    else                                                  "undefined"
+
+  } else if (n_runs == 3L) {
+    pat <- paste(runs, collapse = "-")
+    if      (pat %in% c("ALT-REF-ALT", "REF-ALT-REF")) "gene_conversion"
+    else if (pat %in% c("HET-ALT-HET", "HET-REF-HET")) "internal_crossover"
+    else                                                  "undefined"
+
+  } else if (n_runs == 4L) {
+    pat <- paste(runs, collapse = "-")
+    if (pat %in% c("REF-ALT-REF-ALT", "ALT-REF-ALT-REF")) "compound_binary"
+    else                                                  "undefined"
+
+  } else {
+    "undefined"
+  }
+}
+
 classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
                                     zone_min_snps = 2L) {
 
@@ -1403,35 +1448,18 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     runs <- as.character(seg_data$SNP_call)
   }
   n_runs <- length(runs)
-
-  label <- if (n_runs == 1L) {
-    if      (runs[1] == "HET")                           "internal_crossover"
-    else                                                  "undefined"          # single REF or ALT
-
-  } else if (n_runs == 2L) {
-    if (runs[1] %in% c("REF","ALT") && runs[2] %in% c("REF","ALT") &&
-        runs[1] != runs[2])                               "binary"
-    else                                                  "undefined"
-
-  } else if (n_runs == 3L) {
-    pat <- paste(runs, collapse = "-")
-    if      (pat %in% c("ALT-REF-ALT", "REF-ALT-REF")) "gene_conversion"
-    else if (pat %in% c("HET-ALT-HET", "HET-REF-HET")) "internal_crossover"
-    else                                                  "undefined"
-
-  } else {
-    "undefined"
-  }
+  label  <- classify_run_pattern(runs)
 
   # ── Count reads individually showing the switch pattern ─────────────────
   # The run pattern above pools all touching reads by position and derives
   # one consensus sequence — it never checks whether any single read itself
-  # crosses the junction. For "binary" (one real boundary) and
-  # "internal_crossover" (a narrow consensus run inside an otherwise
-  # heterozygous, unphased flank) labels, count touching reads whose own
-  # zone_L (win_start..snp_p) and zone_R (snp_p..win_end) allele calls
-  # differ — i.e. reads that are themselves chimeric across this peak,
-  # rather than just population-level noise.
+  # crosses the junction. For "binary" (one real boundary), "compound_binary"
+  # (a binary switch with a patchy, repair-flipped middle -- its flanks still
+  # differ, same as plain binary), and "internal_crossover" (a narrow
+  # consensus run inside an otherwise heterozygous, unphased flank) labels,
+  # count touching reads whose own zone_L (win_start..snp_p) and zone_R
+  # (snp_p..win_end) allele calls differ — i.e. reads that are themselves
+  # chimeric across this peak, rather than just population-level noise.
   #
   # "gene_conversion" (REF-ALT-REF / ALT-REF-ALT, three runs) can't use the
   # same differ-test: its flanks share the same allele by construction, so
@@ -1440,12 +1468,12 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   # actually traverse both flanking zones — i.e. fully span the LOH region
   # the peak sits in — which is the read-level evidence that this is a real
   # chimeric junction rather than population-level noise.
-  # "undefined" (n_runs not in 1..3, or a run pattern that doesn't match any
+  # "undefined" (n_runs not in 1..4, or a run pattern that doesn't match any
   # recognised switch type -- e.g. a second nearby island widening the window
   # into a compound multi-run signal) keeps the snp_n fallback set above; it's
   # real per-position read evidence even when the switch type can't be typed.
   n_support <- snp_n_fallback
-  if (label %in% c("binary", "internal_crossover", "gene_conversion")) {
+  if (label %in% c("binary", "compound_binary", "internal_crossover", "gene_conversion")) {
     read_states <- read_win_df[, {
       sL <- classify_zone_state(pos, IS_REF, win_start, snp_p, zone_min_snps)
       sR <- classify_zone_state(pos, IS_REF, snp_p, win_end, zone_min_snps)
@@ -1587,20 +1615,7 @@ classify_fused_peak_haplotype <- function(fg, chr_name, rt_df, touching_ids,
     runs <- as.character(seg_data$SNP_call)
   }
   n_runs <- length(runs)
-
-  label <- if (n_runs == 1L) {
-    if (runs[1] == "HET") "internal_crossover" else "undefined"
-  } else if (n_runs == 2L) {
-    if (runs[1] %in% c("REF","ALT") && runs[2] %in% c("REF","ALT") &&
-        runs[1] != runs[2]) "binary" else "undefined"
-  } else if (n_runs == 3L) {
-    pat <- paste(runs, collapse = "-")
-    if      (pat %in% c("ALT-REF-ALT", "REF-ALT-REF")) "gene_conversion"
-    else if (pat %in% c("HET-ALT-HET", "HET-REF-HET")) "internal_crossover"
-    else                                                  "undefined"
-  } else {
-    "undefined"
-  }
+  label  <- classify_run_pattern(runs)
 
   list(label = label, seg_data = seg_data,
        win_start = win_start, win_end = win_end, expanded = expanded)
@@ -1700,7 +1715,7 @@ classify_edge_type <- function(state_df) {
 FUSION_HEURISTICS <- list(
 
   excluded_peak_classes  = c("gene_conversion", "internal_crossover"),
-  eligible_peak_classes  = c("binary", "undefined"),
+  eligible_peak_classes  = c("binary", "compound_binary", "undefined"),
   unfusable_edge_types   = c("independent_events", "unresolvable"),
   auto_edge_types        = c("gene_conversion", "crossover"),
   supervised_edge_types  = c("gene_conversion", "crossover", "ambiguous"),
@@ -1842,6 +1857,19 @@ classify_loh_crossover_edge <- function(state_list, loh_state, homog_frac = 0.80
 peak_is_fusion_eligible <- function(lbl) {
   is.na(lbl) ||
     lbl %in% FUSION_HEURISTICS$eligible_peak_classes
+}
+
+# ---------------------------------------------------------------------------
+# normalize_edge_type_label()
+#   "compound_binary" peaks (see classify_run_pattern()) are a version of
+#   binary peaks for fusion/chain-analysis purposes -- their haplotype_label
+#   stays "compound_binary" for display/filtering in --peak-list output, but
+#   anywhere that label is read as an edge_type (best_edge_type, et_col) it
+#   should behave exactly like "binary". Apply this at the point haplotype_label
+#   is promoted to an edge type, not at the source column.
+# ---------------------------------------------------------------------------
+normalize_edge_type_label <- function(lbl) {
+  ifelse(!is.na(lbl) & lbl == "compound_binary", "binary", lbl)
 }
 
 # ---------------------------------------------------------------------------
@@ -2250,6 +2278,10 @@ compute_peak_pairs <- function(snp_peaks,
     rel_pairs <- pairs_dt[peak_id_a == pid | peak_id_b == pid]
     lbl       <- peaks_dt[peak_id == pid, haplotype_label]
     own_label <- if (length(lbl) && !is.na(lbl)) lbl else NA_character_
+    # compound_binary is a version of binary for edge_type purposes -- see
+    # normalize_edge_type_label(); own_label feeds best_edge_type below, which
+    # downstream chain-analysis code compares against "binary" directly.
+    own_label <- normalize_edge_type_label(own_label)
 
     if (nrow(rel_pairs) == 0) {
       # Singleton — no pairs evaluated.  Use the peak's own haplotype_label so

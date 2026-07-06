@@ -197,9 +197,10 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     if (!"fused_start_bp" %in% names(sp)) sp[, fused_start_bp := as.integer(peak_start)]
     if (!"fused_end_bp"   %in% names(sp)) sp[, fused_end_bp   := as.integer(peak_end)]
     if (!"n_sub_peaks"    %in% names(sp)) sp[, n_sub_peaks    := 1L]
-    # haplotype_label IS the edge type for singleton peaks
+    # haplotype_label IS the edge type for singleton peaks (compound_binary
+    # normalizes to "binary" here -- see normalize_edge_type_label())
     if (!"best_edge_type" %in% names(sp) && "haplotype_label" %in% names(sp))
-      sp[, best_edge_type := haplotype_label]
+      sp[, best_edge_type := normalize_edge_type_label(haplotype_label)]
     sp
   } else {
     NULL
@@ -404,6 +405,7 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     best_edge_type  = {
       bet <- if ("best_edge_type"  %in% names(chr_fp)) best_edge_type[1]  else NA_character_
       hal <- if ("haplotype_label" %in% names(chr_fp)) haplotype_label[1] else NA_character_
+      hal <- normalize_edge_type_label(hal)
       if (is.na(bet) || bet == "singleton") hal else bet
     },
     haplotype_label = if ("haplotype_label" %in% names(chr_fp)) haplotype_label[1] else NA_character_,
@@ -2163,6 +2165,7 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     fp[, et_col  := {
       bet <- if ("best_edge_type"  %in% names(fp)) best_edge_type else NA_character_
       hal <- if ("haplotype_label" %in% names(fp)) haplotype_label else NA_character_
+      hal <- normalize_edge_type_label(hal)
       ifelse(is.na(bet) | bet == "singleton", hal, bet)
     }]
     fp[, ns_col := if ("n_read_support" %in% names(fp)) n_read_support else NA_integer_]
@@ -2171,7 +2174,9 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     sp <- copy(snp_peaks)
     sp[, chrom := as.character(chrom)]
     sp[, pos_col := as.integer(snp_pos)]
-    sp[, et_col  := if ("haplotype_label" %in% names(sp)) haplotype_label else NA_character_]
+    sp[, et_col  := normalize_edge_type_label(
+      if ("haplotype_label" %in% names(sp)) haplotype_label else NA_character_
+    )]
     sp[, ns_col  := if ("n_read_support" %in% names(sp)) n_read_support else NA_integer_]
     sp[, .(chrom, pos_col, et_col, ns_col)]
   } else {
