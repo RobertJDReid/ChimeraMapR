@@ -1033,9 +1033,9 @@ rule_terminal_loh <- list(
       # Use junction-peak helpers so we catch peaks that land inside the
       # adjacent non-fixed token rather than directly on F.
       pk <- if (direction == "rev")
-        .left_junction_peak(ftk, htk)    # H [●F] TEL: junction at H→F boundary
+        .left_junction_peak(ftk, htk, params)    # H [●F] TEL: junction at H→F boundary
       else
-        .right_junction_peak(ftk, htk)   # TEL [F●] H: junction at F→H boundary
+        .right_junction_peak(ftk, htk, params)   # TEL [F●] H: junction at F→H boundary
       # If htk is an unscored G gap (no peaks), look one position further to
       # the H token that carries the junction peak.  This handles the common
       # subtelomeric case: H ends at the last SNP, an unscored gap follows,
@@ -1044,9 +1044,9 @@ rule_terminal_loh <- list(
         neighbor_i <- if (direction == "rev") h_i - 1L else h_i + 1L
         if (neighbor_i >= 1L && neighbor_i <= n && tokens[[neighbor_i]]$type == "H") {
           pk <- if (direction == "rev")
-            .left_junction_peak(ftk, tokens[[neighbor_i]])
+            .left_junction_peak(ftk, tokens[[neighbor_i]], params)
           else
-            .right_junction_peak(ftk, tokens[[neighbor_i]])
+            .right_junction_peak(ftk, tokens[[neighbor_i]], params)
         }
       }
       if (is.null(pk)) return(NULL)
@@ -1179,19 +1179,19 @@ rule_tel_adjacent_het_loh <- list(
       # No peak at the H-F (proximal/TEL-side) boundary — if there is one, a
       # different rule should handle it (e.g. R02 if TEL were adjacent to F).
       pk_prox <- if (direction == "fwd")
-        .left_junction_peak(ftk, htk)    # TEL [H] [●F]: H→F boundary
+        .left_junction_peak(ftk, htk, params)    # TEL [H] [●F]: H→F boundary
       else
-        .right_junction_peak(ftk, htk)   # [F●] [H] TEL: F→H boundary
+        .right_junction_peak(ftk, htk, params)   # [F●] [H] TEL: F→H boundary
       if (!is.null(pk_prox)) return(NULL)
       # F must have a binary peak on its distal (away-from-TEL) boundary.
       pk_distal <- if (direction == "fwd") {
         next_i <- f_i + 1L
         if (next_i > n) return(NULL)
-        .right_junction_peak(ftk, tokens[[next_i]])
+        .right_junction_peak(ftk, tokens[[next_i]], params)
       } else {
         prev_i <- f_i - 1L
         if (prev_i < 1L) return(NULL)
-        .left_junction_peak(ftk, tokens[[prev_i]])
+        .left_junction_peak(ftk, tokens[[prev_i]], params)
       }
       if (is.null(pk_distal)) return(NULL)
       et <- pk_distal$best_edge_type %||% pk_distal$edge_type
@@ -1287,8 +1287,8 @@ rule_tco_captured_tco <- list(
       # .left_junction_peak/.right_junction_peak fall back to a neighbour's
       # peak_over (position-checked), not just peak_left/peak_right — real
       # junction peaks land there far more often than directly on the token.
-      pk_l <- .left_junction_peak(ftk, htk)
-      pk_r <- .right_junction_peak(ftk, fbar_pk_ctx)  # peak on original boundary
+      pk_l <- .left_junction_peak(ftk, htk, params)
+      pk_r <- .right_junction_peak(ftk, fbar_pk_ctx, params)  # peak on original boundary
       if (is.null(pk_l) || is.null(pk_r)) return(NULL)
       list(f_tok = ftk, fbar_tok = fbar, fbar_pk_ctx = fbar_pk_ctx,
            fbar_extra = fbar_extra, fb_tel_idx = fb_tel_idx,
@@ -1733,7 +1733,17 @@ rule_subres_tract <- list(
 # Left junction peak for an F token: the peak that marks the H→F transition.
 # Priority: F$peak_left > left_ctx$peak_right > left_ctx$peak_over (left of F)
 #           > F$peak_over (if its snp_pos is left of F.start)
-.left_junction_peak <- function(f_tok, left_ctx) {
+#
+# peak_over is attached to a token whenever the peak's window overlaps ANY
+# part of that token's span (see .attach_peaks) — for a short token that's
+# effectively "at the boundary", but for a long H/G run it can be a peak
+# sitting deep inside, near the token's OTHER (far) end, describing a
+# completely different junction. Bound the *_over fallback to merge_gap_bp:
+# real junction peaks sit just past a short unscored gap (a few hundred to a
+# few thousand bp); anything farther is evidence for a different boundary,
+# not this one.
+.left_junction_peak <- function(f_tok, left_ctx, params) {
+  tol <- params$merge_gap_bp %||% 5000L
   if (!is.null(f_tok$peak_left)) return(f_tok$peak_left)
   if (!is.null(left_ctx$peak_right)) return(left_ctx$peak_right)
   pk <- left_ctx$peak_over
@@ -1741,12 +1751,12 @@ rule_subres_tract <- list(
     pos <- pk$fused_pos_bp %||% pk$snp_pos
     # <=, not <: a junction peak commonly lands exactly at the boundary
     # (that's where the allele switch is), not strictly inside the gap.
-    if (!is.na(pos) && pos <= f_tok$start) return(pk)
+    if (!is.na(pos) && pos <= f_tok$start && f_tok$start - pos <= tol) return(pk)
   }
   pk <- f_tok$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
-    if (!is.na(pos) && pos <= f_tok$start) return(pk)
+    if (!is.na(pos) && pos <= f_tok$start && f_tok$start - pos <= tol) return(pk)
   }
   NULL
 }
@@ -1754,19 +1764,21 @@ rule_subres_tract <- list(
 # Right junction peak for an F token: the peak that marks the F→H transition.
 # Priority: F$peak_right > F$peak_over (right of F.end) > right_ctx$peak_left
 #           > right_ctx$peak_over (right of F.end)
-.right_junction_peak <- function(f_tok, right_ctx) {
+# See .left_junction_peak for why the *_over fallback is distance-bounded.
+.right_junction_peak <- function(f_tok, right_ctx, params) {
+  tol <- params$merge_gap_bp %||% 5000L
   if (!is.null(f_tok$peak_right)) return(f_tok$peak_right)
   pk <- f_tok$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
     # >=, not >: see .left_junction_peak — boundary-exact peaks are normal.
-    if (!is.na(pos) && pos >= f_tok$end) return(pk)
+    if (!is.na(pos) && pos >= f_tok$end && pos - f_tok$end <= tol) return(pk)
   }
   if (!is.null(right_ctx$peak_left)) return(right_ctx$peak_left)
   pk <- right_ctx$peak_over
   if (!is.null(pk)) {
     pos <- pk$fused_pos_bp %||% pk$snp_pos
-    if (!is.na(pos) && pos >= f_tok$end) return(pk)
+    if (!is.na(pos) && pos >= f_tok$end && pos - f_tok$end <= tol) return(pk)
   }
   NULL
 }
@@ -1823,8 +1835,8 @@ rule_two_binary_flanking <- list(
     left_ctx  <- tokens[[li]]
     right_ctx <- tokens[[ri]]
 
-    pk_l <- .left_junction_peak(tok, left_ctx)
-    pk_r <- .right_junction_peak(tok, right_ctx)
+    pk_l <- .left_junction_peak(tok, left_ctx, params)
+    pk_r <- .right_junction_peak(tok, right_ctx, params)
     if (is.null(pk_l) || is.null(pk_r)) return(NULL)
 
     # Both junction peaks must be binary
@@ -1868,6 +1880,56 @@ rule_two_binary_flanking <- list(
   }
 )
 
+# ── Rule R11b: One-sided binary peak (H-[F]-H, only one junction confirmed) ───
+# Fires when an interstitial F is bracketed by a confirmed binary peak on
+# exactly ONE side, and the other side has NO peak at all (not merely a
+# non-binary one — that's a different, unresolved situation left to review).
+# This covers a real biological case: one breakpoint produced a chimeric read
+# peak, but the other breakpoint falls where the reference makes SNP calling
+# unreliable (repeat/low-complexity sequence, coverage dropout, etc.), so no
+# read can ever be scored there. R11 requires both flanks and won't fire;
+# without this rule the token would fall through to reconcile() as a plain
+# UNCATEGORIZED_LOH, silently discarding the one real peak's evidence.
+rule_one_sided_binary <- list(
+  id = "R11b_one_sided_binary",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+
+    li <- .nearest_nonfixed_left(tokens, i)
+    ri <- .nearest_nonfixed_right(tokens, i)
+    if (is.null(li) || is.null(ri)) return(NULL)
+
+    left_ctx  <- tokens[[li]]
+    right_ctx <- tokens[[ri]]
+
+    pk_l <- .left_junction_peak(tok, left_ctx, params)
+    pk_r <- .right_junction_peak(tok, right_ctx, params)
+
+    et_l <- pk_l$best_edge_type %||% pk_l$edge_type
+    et_r <- pk_r$best_edge_type %||% pk_r$edge_type
+    l_binary <- !is.null(pk_l) && isTRUE(et_l == "binary")
+    r_binary <- !is.null(pk_r) && isTRUE(et_r == "binary")
+
+    if (l_binary && is.null(pk_r)) {
+      list(span = c(i, i), f_tok = tok, pk = pk_l, side = "left")
+    } else if (r_binary && is.null(pk_l)) {
+      list(span = c(i, i), f_tok = tok, pk = pk_r, side = "right")
+    } else {
+      NULL
+    }
+  },
+  fire_fn = function(m, chain, params) {
+    ev <- .make_event("GC_ONE_SIDED", chain$chrom, list(m$f_tok),
+                      evidence_peaks = list(m$pk),
+                      n_support = .ns(m$pk),
+                      notes = paste0("one_sided_binary; confirmed_side=", m$side,
+                                     "; no peak found on the other side"))
+    list(event = ev, rewrite = NULL,
+         claims = list(peak = list(m$pk), loh = list(m$f_tok)))
+  }
+)
+
 # ── Rule R12: LOH-crossover (large interstitial LOH flanked by chimeric peaks) ─
 # Fires when an F token with a large LOH is flanked by two junction peaks that
 # share a pair record with edge_type = "crossover" from the LOH-crossover probing
@@ -1886,8 +1948,8 @@ rule_loh_crossover <- list(
     left_ctx  <- tokens[[li]]
     right_ctx <- tokens[[ri]]
 
-    pk_l <- .left_junction_peak(tok, left_ctx)
-    pk_r <- .right_junction_peak(tok, right_ctx)
+    pk_l <- .left_junction_peak(tok, left_ctx, params)
+    pk_r <- .right_junction_peak(tok, right_ctx, params)
     if (is.null(pk_l) || is.null(pk_r)) return(NULL)
 
     # Both junction peaks must share a pair_edge_type = "crossover" record.
@@ -1964,7 +2026,8 @@ MOTIF_RULES <- list(
   # UNCATEGORIZED_LOH → no symbol on the overview map.
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
-  rule_two_binary_flanking       # R11 — two binary peaks flanking H-[F]-H
+  rule_two_binary_flanking,      # R11 — two binary peaks flanking H-[F]-H
+  rule_one_sided_binary          # R11b — one confirmed binary peak, other side genuinely peak-less
   # rule_het_bounded,            # R04 — disabled (replaced by R10/R11)
   # rule_double_gc,              # R07 — disabled
   # rule_crossover_no_tract,     # R08 — disabled

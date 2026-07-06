@@ -1123,21 +1123,25 @@ expect("R11 finds junction peaks across G gaps (real-data layout)", {
   # HET segments flank the F token with coordinate G gaps between them.
   # Peaks attach to H (not G) because .attach_peaks is called on H/F tokens
   # but not on gap tokens.  Peaks should be inside H but close to the H-G
-  # boundary so they are found as left/right junction peaks by R11.
+  # boundary (within merge_gap_bp of the F token's edge — .left_junction_peak/
+  # .right_junction_peak now bound their *_over fallback to that tolerance,
+  # so a peak buried deep inside a long neighbouring H run isn't mistaken for
+  # a different, far-away junction's peak) so they are found as left/right
+  # junction peaks by R11.
   loh <- loh_rbind(
     make_loh_seg("chrI",  50000L,  89999L, "HET",       n_snps = 100L),
-    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
-    make_loh_seg("chrI", 210001L, 500000L, "HET",       n_snps = 300L)
+    make_loh_seg("chrI",  92000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 202000L, 500000L, "HET",       n_snps = 300L)
   )
   # Peaks near the H boundaries — inside H, reflecting the haplotype switch
   # position at the H→F junction that real chimera reads detect.
   pks <- peaks_rbind(
-    make_peak("chrI", pos = 85000L, edge_type = "binary",
-              start = 82000L, end = 88000L, fusion_group = 1L),   # inside H(50000-89999)
-    make_peak("chrI", pos = 215000L, edge_type = "binary",
-              start = 212000L, end = 218000L, fusion_group = 2L)  # inside H(210001-500000)
+    make_peak("chrI", pos = 89500L, edge_type = "binary",
+              start = 87000L, end = 91000L, fusion_group = 1L),   # inside H(50000-89999)
+    make_peak("chrI", pos = 202500L, edge_type = "binary",
+              start = 200500L, end = 204000L, fusion_group = 2L)  # inside H(202000-500000)
   )
-  prs <- make_pair("chrI", pos_a = 85000L, pos_b = 215000L,
+  prs <- make_pair("chrI", pos_a = 89500L, pos_b = 202500L,
                    edge_type = "gene_conversion", n_spanning = 5L)
   cs  <- make_chr_span("chrI", 500000L)
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
@@ -1158,6 +1162,58 @@ expect("single binary peak (only left junction) does NOT trigger R11", {
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
                              chr_span = cs, params = params)
   !any(c("NCO_GC","CO_GC") %in% event_classes(res))
+})
+
+expect("single binary peak, other side genuinely peak-less -> GC_ONE_SIDED (R11b)", {
+  # Same layout as the R11 negative test above: F flanked by a confirmed
+  # binary peak on the left and NO peak at all on the right (e.g. the
+  # reference is unmappable/repetitive there, so no SNP calls exist near
+  # that boundary). R11 correctly declines (needs both sides); R11b should
+  # report the one confirmed peak instead of silently dropping it to
+  # UNCATEGORIZED_LOH.
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
+    make_loh_seg("chrI", 200001L, 500000L, "HET",       n_snps = 600L)
+  )
+  pks <- make_peak("chrI", pos = 95000L, edge_type = "binary",
+                   start = 92000L, end = 98000L)
+  cs  <- make_chr_span("chrI", 500000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  "GC_ONE_SIDED" %in% event_classes(res)
+})
+
+expect("a peak buried far inside a long neighbouring H run is NOT misattributed as this F's junction peak", {
+  # Regression test for the RAD5_6 chrXV bug: a small REF_fixed island
+  # (100000-103000) sits next to a long HET run (110000-800000) whose only
+  # detected peak (750000) is far past merge_gap_bp from the island's right
+  # edge (103000) -- it actually marks a DIFFERENT junction much further
+  # along the same H run (a separate small F island further out, so the long
+  # H run's far end is NOT itself telomeric -- that would pull in R02c
+  # instead of the R11/R11b junction-peak logic this test targets).
+  # R11/R11b must not borrow that distant peak for the first island's right
+  # junction: with only a real left peak and no legitimate right peak, this
+  # should resolve as GC_ONE_SIDED (from the left peak alone), never
+  # NCO_GC/CO_GC (which would require pairing with the wrongly-borrowed
+  # distant peak).
+  loh <- loh_rbind(
+    make_loh_seg("chrI",      1L,  99999L, "HET",       n_snps = 200L),
+    make_loh_seg("chrI", 100000L, 103000L, "REF_fixed", n_snps = 20L),
+    make_loh_seg("chrI", 110000L, 800000L, "HET",       n_snps = 900L),
+    make_loh_seg("chrI", 900000L, 905000L, "REF_fixed", n_snps = 20L)
+  )
+  pks <- peaks_rbind(
+    make_peak("chrI", pos = 95000L, edge_type = "binary",
+              start = 92000L, end = 98000L, fusion_group = 1L),
+    make_peak("chrI", pos = 750000L, edge_type = "binary",
+              start = 748000L, end = 752000L, fusion_group = 2L)
+  )
+  cs  <- make_chr_span("chrI", 1000000L)
+  res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
+                             chr_span = cs, params = params)
+  ec <- event_classes(res)
+  "GC_ONE_SIDED" %in% ec && !any(c("NCO_GC", "CO_GC", "GC_UNRESOLVED") %in% ec)
 })
 
 # =============================================================================
