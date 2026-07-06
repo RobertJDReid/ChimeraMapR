@@ -1881,6 +1881,55 @@ decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
 }
 
 # ---------------------------------------------------------------------------
+# label_snp_peaks_haplotypes()
+#   Classifies each peak's haplotype run-pattern (binary / gene_conversion /
+#   internal_crossover / undefined) via classify_peak_haplotype() -- the
+#   per-peak read evidence alone, before any fusion or event calling. Peaks
+#   that already carry a non-NA haplotype_label are left untouched, so this
+#   can be called again downstream (e.g. by compute_peak_pairs()) at zero
+#   extra cost once the caller has already labeled peaks.
+#
+#   Returns snp_peaks with haplotype_label and n_read_support columns added
+#   (or overwritten for previously-unlabeled rows); all other rows/columns
+#   are preserved as-is.
+# ---------------------------------------------------------------------------
+label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
+                                       zone_min_snps = 2L) {
+  out <- copy(snp_peaks)
+  if (!"haplotype_label" %in% names(out)) out[, haplotype_label := NA_character_]
+  if (!"n_read_support"  %in% names(out)) out[, n_read_support  := NA_integer_]
+  if (nrow(out) == 0) return(out)
+
+  out[, .row_idx := .I]
+  for (.chr in unique(as.character(out$chrom))) {
+    .chr_p <- out[as.character(chrom) == .chr & !is.na(snp_pos)][order(snp_pos)]
+    for (.pi in seq_len(nrow(.chr_p))) {
+      .pk <- .chr_p[.pi]
+      if (!is.na(.pk$haplotype_label)) next
+      .touching <- transition_pos[
+        as.character(chrom) == .chr &
+          pos >= .pk$peak_start & pos <= .pk$peak_end,
+        unique(read_id)
+      ]
+      if (length(.touching) == 0) {
+        # No reads touch this peak's window at all -- same "no evidence"
+        # bucket classify_peak_haplotype() itself returns when it can't
+        # resolve a label, so callers filtering on "undefined" catch both.
+        out[.row_idx == .pk$.row_idx, haplotype_label := "undefined"]
+        next
+      }
+      .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps)
+      out[.row_idx == .pk$.row_idx, `:=`(
+        haplotype_label = .hap$label,
+        n_read_support  = .hap$n_support
+      )]
+    }
+  }
+  out[, .row_idx := NULL]
+  out[]
+}
+
+# ---------------------------------------------------------------------------
 # compute_peak_pairs()
 #   Takes snp_peaks + rt_df + transition_pos and returns:
 #     list(peak_pairs = data.table, fused_peaks = data.table)
@@ -1907,33 +1956,10 @@ compute_peak_pairs <- function(snp_peaks,
   peaks_dt[, chrom   := as.character(chrom)]
 
   # ── 0. Label any unlabeled peaks ─────────────────────────────────────────
-  # classify_peak_haplotype() is called here for any peak that doesn't already
-  # carry a haplotype_label (e.g. from the app's plot-building loop or the CLI's
-  # prior step). Pre-labeled peaks are skipped at zero cost, so callers that
-  # do their own labeling first don't pay twice.
-  if (!"haplotype_label" %in% names(peaks_dt))
-    peaks_dt[, haplotype_label := NA_character_]
-  if (!"n_read_support" %in% names(peaks_dt))
-    peaks_dt[, n_read_support := NA_integer_]
-
-  for (.chr in unique(peaks_dt$chrom)) {
-    .chr_p <- peaks_dt[chrom == .chr & !is.na(snp_pos)][order(snp_pos)]
-    for (.pi in seq_len(nrow(.chr_p))) {
-      .pk <- .chr_p[.pi]
-      if (!is.na(.pk$haplotype_label)) next
-      .touching <- transition_pos[
-        as.character(chrom) == .chr &
-          pos >= .pk$peak_start & pos <= .pk$peak_end,
-        unique(read_id)
-      ]
-      if (length(.touching) == 0) next
-      .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps)
-      peaks_dt[peak_id == .pk$peak_id, `:=`(
-        haplotype_label = .hap$label,
-        n_read_support  = .hap$n_support
-      )]
-    }
-  }
+  # label_snp_peaks_haplotypes() skips peaks that already carry a
+  # haplotype_label (e.g. from the app's plot-building loop or the CLI's
+  # prior step), so callers that do their own labeling first don't pay twice.
+  peaks_dt <- label_snp_peaks_haplotypes(peaks_dt, rt_df, transition_pos, zone_min_snps)
 
   all_pairs <- list()
 

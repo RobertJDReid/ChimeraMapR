@@ -320,6 +320,16 @@ results <- run_chimera_analysis(
 ploidy_map          <- get_chromosome_ploidy(results$full_read_loh)
 results$ploidy_map  <- ploidy_map
 
+# Classify each peak's haplotype run-pattern (binary / gene_conversion /
+# internal_crossover / undefined) from its own read evidence, before any
+# fusion or event calling -- the same per-peak classification shown on the
+# app's individual peak plots. Included in --peak-list / --overview-rds, and
+# reused (not recomputed) by --chain-all's compute_peak_pairs() below.
+results$snp_peaks <- label_snp_peaks_haplotypes(
+  results$snp_peaks, results$rt_df, results$transition_pos,
+  zone_min_snps = opts[["min-run"]]
+)
+
 
 # ── Print run summary ─────────────────────────────────────────────────────────
 n_chimeric  <- length(results$chimeric_read_ids)
@@ -340,7 +350,16 @@ if (nrow(aneuploid) > 0) {
   cat("  Ploidy               : all chromosomes 2N\n")
 }
 cat("  Chimeric reads       :", n_chimeric, "\n")
-cat("  Peaks detected       :", n_peaks, "\n\n")
+cat("  Peaks detected       :", n_peaks, "\n")
+if (!is.null(results$snp_peaks) && "haplotype_label" %in% names(results$snp_peaks)) {
+  label_counts <- results$snp_peaks[!is.na(snp_pos), .N, by = haplotype_label]
+  setorder(label_counts, -N)
+  cat("  Peak types           :\n")
+  for (i in seq_len(nrow(label_counts))) {
+    cat(sprintf("    %-20s %d\n", label_counts$haplotype_label[i], label_counts$N[i]))
+  }
+}
+cat("\n")
 
 
 # ── Write output ──────────────────────────────────────────────────────────────
