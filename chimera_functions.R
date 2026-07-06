@@ -1422,15 +1422,27 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   # zone_L (win_start..snp_p) and zone_R (snp_p..win_end) allele calls
   # differ — i.e. reads that are themselves chimeric across this peak,
   # rather than just population-level noise.
+  #
+  # "gene_conversion" (REF-ALT-REF / ALT-REF-ALT, three runs) can't use the
+  # same differ-test: its flanks share the same allele by construction, so
+  # state_L == state_R for a genuine GC read and the switch count would
+  # always be zero. Support for a GC call instead comes from how many reads
+  # actually traverse both flanking zones — i.e. fully span the LOH region
+  # the peak sits in — which is the read-level evidence that this is a real
+  # chimeric junction rather than population-level noise.
   n_support <- NA_integer_
-  if (label %in% c("binary", "internal_crossover")) {
+  if (label %in% c("binary", "internal_crossover", "gene_conversion")) {
     read_states <- read_win_df[, {
       sL <- classify_zone_state(pos, IS_REF, win_start, snp_p, zone_min_snps)
       sR <- classify_zone_state(pos, IS_REF, snp_p, win_end, zone_min_snps)
       .(state_L = sL, state_R = sR)
     }, by = read_id]
-    n_support <- sum(!is.na(read_states$state_L) & !is.na(read_states$state_R) &
-                     read_states$state_L != read_states$state_R)
+    n_support <- if (label == "gene_conversion") {
+      sum(!is.na(read_states$state_L) & !is.na(read_states$state_R))
+    } else {
+      sum(!is.na(read_states$state_L) & !is.na(read_states$state_R) &
+          read_states$state_L != read_states$state_R)
+    }
   }
 
   list(
@@ -1887,6 +1899,8 @@ compute_peak_pairs <- function(snp_peaks,
   # do their own labeling first don't pay twice.
   if (!"haplotype_label" %in% names(peaks_dt))
     peaks_dt[, haplotype_label := NA_character_]
+  if (!"n_read_support" %in% names(peaks_dt))
+    peaks_dt[, n_read_support := NA_integer_]
 
   for (.chr in unique(peaks_dt$chrom)) {
     .chr_p <- peaks_dt[chrom == .chr & !is.na(snp_pos)][order(snp_pos)]
@@ -1900,7 +1914,10 @@ compute_peak_pairs <- function(snp_peaks,
       ]
       if (length(.touching) == 0) next
       .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps)
-      peaks_dt[peak_id == .pk$peak_id, haplotype_label := .hap$label]
+      peaks_dt[peak_id == .pk$peak_id, `:=`(
+        haplotype_label = .hap$label,
+        n_read_support  = .hap$n_support
+      )]
     }
   }
 
@@ -2171,6 +2188,14 @@ compute_peak_pairs <- function(snp_peaks,
     peaks_dt[, fusion_group := mem[as.character(peak_id)]]
   }
 
+  # n_read_support is intentionally left off this aggregate: it's a per-peak
+  # value already present on peaks_dt (set above, or carried in from the
+  # caller), and merging it back in from here would just collide with that
+  # column. Self-classifying peak classes (gene_conversion / internal_crossover)
+  # are excluded from automatic fusion entirely
+  # (FUSION_HEURISTICS$excluded_peak_classes), so their fusion_group is always
+  # a singleton -- the per-peak value already equals what a group aggregate
+  # would produce.
   fused_coords <- peaks_dt[, .(
     fused_pos_bp    = round(mean(snp_pos,    na.rm = TRUE)),
     fused_start_bp  = min(peak_start, na.rm = TRUE),
@@ -2232,8 +2257,12 @@ compute_peak_pairs <- function(snp_peaks,
   snp_peaks_out <- copy(snp_peaks)
   if (!"haplotype_label" %in% names(snp_peaks_out))
     snp_peaks_out[, haplotype_label := NA_character_]
-  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label)]
-  snp_peaks_out[label_map, on = .(snp_pos, chrom), haplotype_label := i.haplotype_label]
+  if (!"n_read_support" %in% names(snp_peaks_out))
+    snp_peaks_out[, n_read_support := NA_integer_]
+  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label, n_read_support)]
+  snp_peaks_out[label_map, on = .(snp_pos, chrom),
+                `:=`(haplotype_label = i.haplotype_label,
+                     n_read_support  = i.n_read_support)]
 
   list(
     peak_pairs  = pairs_dt,

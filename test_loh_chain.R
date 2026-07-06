@@ -752,7 +752,7 @@ section("Multi-chromosome run")
 # =============================================================================
 section("Unclaimed token reconciliation")
 
-expect("LOH with no peak -> UNCATEGORIZED_LOH", {
+expect("LOH with no peak -> not an event, but reported as other-event LOH", {
   loh <- loh_rbind(
     make_loh_seg("chrI",     1L,  99999L, "HET",       n_snps = 200L),
     make_loh_seg("chrI", 100000L, 200000L, "REF_fixed", n_snps = 40L),
@@ -761,10 +761,12 @@ expect("LOH with no peak -> UNCATEGORIZED_LOH", {
   cs  <- make_chr_span("chrI", 500000L)
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = NULL,
                              chr_span = cs, params = params)
-  "UNCATEGORIZED_LOH" %in% event_classes(res)
+  !("UNCATEGORIZED_LOH" %in% event_classes(res)) &&
+    length(res$unclaimed_loh) == 1L &&
+    res$unclaimed_loh[[1]]$chrom == "chrI"
 })
 
-expect("peak with no LOH -> UNCATEGORIZED_PEAK", {
+expect("self-classifying peak with no LOH -> promoted to NCO_GC_subres event, not left unclaimed", {
   loh <- loh_rbind(
     make_loh_seg("chrI", 1L, 500000L, "HET", n_snps = 1000L)
   )
@@ -772,7 +774,8 @@ expect("peak with no LOH -> UNCATEGORIZED_PEAK", {
   cs  <- make_chr_span("chrI", 500000L)
   res <- run_chain_analysis(loh_segments = loh, fused_peaks = pks,
                              chr_span = cs, params = params)
-  "UNCATEGORIZED_PEAK" %in% event_classes(res)
+  "NCO_GC_subres" %in% event_classes(res) &&
+    length(res$unclaimed_peaks) == 0L
 })
 
 expect("peak at junction with gene_conversion but low spanning -> AMBIGUOUS", {

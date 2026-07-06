@@ -2193,62 +2193,63 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     }
   }
 
-  # Emit UNCATEGORIZED / POSSIBLE_GC events for anything left over.
-  # Fixed tokens with very few SNPs (< min_snps_for_peak) may be too short
-  # for chimeric reads to generate a detectable peak even when a real gene
-  # conversion occurred.  Flag these separately so the user knows to
-  # consider lowering the Minimum Run Length parameter.
-  uncat_events <- lapply(unclaimed_loh, function(u) {
-    n <- u$n_snps %||% NA_integer_
-    is_small <- !is.na(n) && n < params$min_snps_for_peak
-    if (is_small) {
-      list(event_class = "POSSIBLE_GC", chrom = u$chrom,
-           start = u$start, end = u$end, length_bp = u$end - u$start,
-           n_support = NA_integer_, peak_edge_types = NA_character_,
-           notes = paste0("state=", u$state, "; n_snps=", n,
-                          " < min_snps_for_peak (", params$min_snps_for_peak,
-                          "); consider lowering the Minimum Run Length parameter"),
-           tokens = list())
-    } else {
-      list(event_class = "UNCATEGORIZED_LOH", chrom = u$chrom,
-           start = u$start, end = u$end, length_bp = u$end - u$start,
-           n_support = NA_integer_, peak_edge_types = NA_character_,
-           notes = paste0("state=", u$state), tokens = list())
-    }
-  })
   # Peaks whose own edge_type is self-classifying (gene_conversion /
   # crossover / internal_crossover) but that never attached to any token —
   # e.g. an internal_crossover sitting in a SNP-desert with no flanking LOH
   # to anchor a motif rule on — are promoted here using the same
-  # classify_tract() logic the motif rules use, rather than left as an
-  # unclassified UNCATEGORIZED_PEAK. Such peaks are excluded from
-  # compute_peak_pairs()'s pairing step entirely (no peak_pairs row, so no
-  # pairwise n_spanning) and have no flanking-LOH corroboration, so their
-  # only direct read evidence is the per-read switch count computed at
-  # classification time (n_read_support, from classify_peak_haplotype()).
+  # classify_tract() logic the motif rules use. A peak that resolves to a
+  # real call (NCO_GC/CO_GC) IS an event, with real read support behind it,
+  # so it's added to `events` and removed from `unclaimed_peaks` — showing
+  # the same peak simultaneously as a called event *and* as "unclaimed" is
+  # exactly the confusing double-reporting this reconciliation used to do.
   # They're named "_subres" (sub-resolution) and fall to "review" confidence
   # in build_event_table(), distinguishing them from the better-supported
-  # CO_GC/NCO_GC calls fired by the motif rules.
-  uncat_peak_events <- lapply(unclaimed_peaks, function(u) {
+  # CO_GC/NCO_GC calls fired by the motif rules. Peaks that classify_tract()
+  # genuinely cannot resolve (binary singleton, independent_events, no
+  # edge_type, low coverage, ...) are not events — they stay in
+  # `unclaimed_peaks` for manual review, tagged with the reason.
+  uncat_peak_events   <- list()
+  still_unclaimed_pks <- list()
+  for (u in unclaimed_peaks) {
     tract <- classify_tract(list(best_edge_type = u$edge_type,
                                  n_spanning = u$n_read_support), params)
     if (tract$call %in% c("NCO_GC", "CO_GC")) {
-      list(event_class = paste0(tract$call, "_subres"), chrom = u$chrom,
-           start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
-           length_bp = 0L, n_support = tract$n_support,
-           peak_edge_types = u$edge_type %||% NA_character_,
-           notes = "no_fixed_tract; peak_only", tokens = list())
+      uncat_peak_events <- c(uncat_peak_events, list(list(
+        event_class = paste0(tract$call, "_subres"), chrom = u$chrom,
+        start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
+        length_bp = 0L, n_support = tract$n_support,
+        peak_edge_types = u$edge_type %||% NA_character_,
+        notes = "no_fixed_tract; peak_only", tokens = list())))
     } else {
-      list(event_class = "UNCATEGORIZED_PEAK", chrom = u$chrom,
-           start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
-           length_bp = 0L, n_support = NA_integer_,
-           peak_edge_types = u$edge_type %||% NA_character_,
-           notes = "", tokens = list())
+      u$reason <- tract$reason
+      still_unclaimed_pks <- c(still_unclaimed_pks, list(u))
     }
+  }
+  unclaimed_peaks <- still_unclaimed_pks
+
+  # LOH tokens that never attached to any motif-scanned event and have no
+  # corroborating peak are genuinely unresolved — too short to raise a
+  # detectable peak, sitting in a SNP desert, or just lacking chimeric-read
+  # evidence either way. Unlike self-classifying peaks above, an orphan LOH
+  # tract has no positive evidence for any specific mechanism, so it is NOT
+  # promoted into `events` (that used to add UNCATEGORIZED_LOH/POSSIBLE_GC
+  # rows to the events table while the *same* interval also sat in
+  # `unclaimed_loh` — duplicate reporting of an un-scored interval as if it
+  # were a called event). It's annotated with a reason and left only in
+  # `unclaimed_loh` for manual review.
+  unclaimed_loh <- lapply(unclaimed_loh, function(u) {
+    n <- u$n_snps %||% NA_integer_
+    is_small <- !is.na(n) && n < params$min_snps_for_peak
+    u$reason <- if (is_small)
+      paste0("n_snps=", n, " < min_snps_for_peak (", params$min_snps_for_peak,
+             "); consider lowering the Minimum Run Length parameter")
+    else
+      "no attached peak"
+    u
   })
 
   list(
-    events          = c(all_events, uncat_events, uncat_peak_events),
+    events          = c(all_events, uncat_peak_events),
     unclaimed_loh   = unclaimed_loh,
     unclaimed_peaks = unclaimed_peaks
   )
@@ -2317,9 +2318,17 @@ build_event_table <- function(events) {
 #'
 #' @return named list:
 #'   $chains          per-chromosome loh_chain objects (canonicalised)
-#'   $events          flat list of event objects
-#'   $unclaimed_peaks list of unmatched peaks
-#'   $unclaimed_loh   list of unmatched LOH segments
+#'   $events          flat list of event objects. Self-classifying peaks
+#'                    (gene_conversion/crossover/internal_crossover) that never
+#'                    attached to a motif-scanned token are included here too
+#'                    (as *_subres, "review" confidence) -- they ARE events,
+#'                    just not shown twice by also appearing below.
+#'   $unclaimed_peaks "Other events": peaks classify_tract() could not resolve
+#'                    (binary singleton, independent_events, low coverage, ...),
+#'                    for manual review. Not included in $events/$event_table.
+#'   $unclaimed_loh   "Other events": LOH segments with no attached peak and no
+#'                    motif-scanned event, for manual review. Not included in
+#'                    $events/$event_table.
 #'   $event_table     data.table ready for display / download
 
 run_chain_analysis <- function(loh_segments,

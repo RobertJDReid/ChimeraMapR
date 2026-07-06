@@ -600,9 +600,9 @@ ui <- fluidPage(
                                             "Download Chain Objects (.rds)"))
                  ),
                  br(),
-                 h5("Unclaimed LOH / Peaks"),
-                 helpText("LOH regions and peaks not assigned to any event. These may need parameter adjustment or manual review."),
-                 tableOutput("unclaimed_table")
+                 h5("Other Events"),
+                 helpText("LOH regions and peaks that could not be resolved into a scored event above. These may need parameter adjustment or manual review."),
+                 tableOutput("other_events_table")
         ),
         
         tabPanel("Curve Fits",
@@ -2367,11 +2367,11 @@ server <- function(input, output, session) {
     et
   }, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "s", na = "\u2014")
   
-  # Unclaimed LOH + peaks summary
-  output$unclaimed_table <- renderTable({
+  # Other events: LOH regions and peaks that didn't resolve into a scored event
+  output$other_events_table <- renderTable({
     req(results$chain_result)
     cr <- results$chain_result
-    
+
     uncl_loh <- if (length(cr$unclaimed_loh) > 0) {
       rbindlist(lapply(cr$unclaimed_loh, function(u) data.table(
         Type  = "LOH",
@@ -2379,10 +2379,10 @@ server <- function(input, output, session) {
         Start = format(u$start, big.mark = ","),
         End   = format(u$end,   big.mark = ","),
         `Length (kb)` = round((u$end - u$start) / 1000, 2),
-        Detail = paste0(u$state, "; snps=", u$n_snps)
+        Detail = paste0(u$state, "; snps=", u$n_snps, "; ", u$reason %||% "")
       )), fill = TRUE)
     } else NULL
-    
+
     uncl_pk <- if (length(cr$unclaimed_peaks) > 0) {
       rbindlist(lapply(cr$unclaimed_peaks, function(u) data.table(
         Type  = "Peak",
@@ -2390,13 +2390,13 @@ server <- function(input, output, session) {
         Start = format(as.integer(u$snp_pos), big.mark = ","),
         End   = format(as.integer(u$snp_pos), big.mark = ","),
         `Length (kb)` = 0,
-        Detail = paste0("edge=", u$edge_type %||% "?")
+        Detail = paste0("edge=", u$edge_type %||% "?", "; ", u$reason %||% "")
       )), fill = TRUE)
     } else NULL
-    
+
     out <- rbindlist(list(uncl_loh, uncl_pk), fill = TRUE)
     if (nrow(out) == 0)
-      return(data.frame(Message = "All LOH segments and peaks accounted for."))
+      return(data.frame(Message = "All LOH segments and peaks resolved into events above."))
     setorder(out, Chr, Start)
     out
   }, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "s")

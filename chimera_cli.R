@@ -603,7 +603,7 @@ if (opts[["chain-all"]]) {
   cat(sprintf("  Post-scan tokens     → %s (%d tokens)\n\n",  step3_tok, nrow(step3_tok_dt)))
 
   # ── Step 4: Reconcile ─────────────────────────────────────────────────────────
-  cat("[chain] Step 4: Reconciling unclaimed tokens and peaks ...\n")
+  cat("[chain] Step 4: Reconciling other events (unresolved LOH/peaks) ...\n")
   rec <- reconcile(
     scan_results = scan_results,
     chains       = canonical_chains,
@@ -621,7 +621,7 @@ if (opts[["chain-all"]]) {
               sum(final_events$confidence == "review")))
 
   if (length(rec$unclaimed_loh) > 0) {
-    step4_ul <- paste0(stem, "_step4_unclaimed_loh.csv")
+    step4_ul <- paste0(stem, "_step4_other_events_loh.csv")
     uncl_loh <- data.table::rbindlist(lapply(rec$unclaimed_loh, function(u)
       data.table::data.table(
         chrom     = u$chrom,
@@ -629,22 +629,24 @@ if (opts[["chain-all"]]) {
         end       = u$end,
         length_bp = u$end - u$start,
         state     = u$state,
-        n_snps    = u$n_snps
+        n_snps    = u$n_snps,
+        reason    = u$reason
       )))
     data.table::fwrite(uncl_loh, step4_ul)
-    cat(sprintf("  Unclaimed LOH    → %s (%d segments)\n", step4_ul, nrow(uncl_loh)))
+    cat(sprintf("  Other events (LOH)   → %s (%d segments)\n", step4_ul, nrow(uncl_loh)))
   }
 
   if (length(rec$unclaimed_peaks) > 0) {
-    step4_up <- paste0(stem, "_step4_unclaimed_peaks.csv")
+    step4_up <- paste0(stem, "_step4_other_events_peaks.csv")
     uncl_pk <- data.table::rbindlist(lapply(rec$unclaimed_peaks, function(u)
       data.table::data.table(
         chrom     = u$chrom,
         snp_pos   = u$snp_pos,
-        edge_type = u$edge_type
+        edge_type = u$edge_type,
+        reason    = u$reason
       )))
     data.table::fwrite(uncl_pk, step4_up)
-    cat(sprintf("  Unclaimed peaks  → %s (%d peaks)\n", step4_up, nrow(uncl_pk)))
+    cat(sprintf("  Other events (peaks) → %s (%d peaks)\n", step4_up, nrow(uncl_pk)))
   }
 
   cat("\n── Chain analysis complete ───────────────────────────────────────────────────\n")
