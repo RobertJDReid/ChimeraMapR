@@ -1429,6 +1429,23 @@ rule_opp_sandwich <- list(
     combined_flank <- (l$length_bp %||% 0L) + (r$length_bp %||% 0L)
     if ((ftk$length_bp %||% Inf) >= params$small_frac * combined_flank) return(NULL)
 
+    # l can be a large, already-resolved accumulation from earlier merges in
+    # this same cascade — its size reflects history, not whether ftk is truly
+    # a small excursion here and now. r, by contrast, is always the next
+    # not-yet-merged raw segment, so it reflects the actual local scale at
+    # this point in the scan. When ftk is not smaller than r, ftk is not a
+    # small anomaly embedded in l's background — it is at least as large as
+    # r itself, meaning ftk is really the leading edge of a *different*,
+    # potentially much larger region that happens to look "small" only
+    # because it is being measured against l's inflated combined_flank.
+    # Absorbing it here would grow l across a real regional boundary instead
+    # of leaving that boundary for R02/R03 to close out, and would silently
+    # misreport the true transition point. Comparing against r alone (not
+    # l, not l+r) is what lets the scan reach ftk directly on its own turn,
+    # where this same rule can correctly grow ftk's own state against the
+    # (now fresh) r beyond it.
+    if ((ftk$length_bp %||% Inf) >= (r$length_bp %||% 0L)) return(NULL)
+
     # Peak evidence must be ftk's OWN attachment, not borrowed from l/r.
     # l/r can be large (or, after an earlier R06 rewrite, already a
     # cumulative merge of several prior segments) — falling back to their
