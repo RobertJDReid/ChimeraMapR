@@ -1279,6 +1279,16 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   pk_end   <- pk$peak_end
   min_each <- zone_min_snps + 1L        # SNPs required on each side
 
+  # snp_n (from the earlier "detecting chimeric reads" pass, chimera_functions.R
+  # transition_pos/pos_count) is the count of already-known-chimeric reads whose
+  # own allele-run boundary sits exactly at this SNP -- real read support that
+  # exists independently of whether the run-pattern logic below can classify a
+  # clean switch type. Used as the n_support fallback whenever this function
+  # can't resolve a label (e.g. a nearby second island widens the window into
+  # an unrecognised >3-run pattern), so real evidence isn't discarded just
+  # because the *type* of switch is ambiguous.
+  snp_n_fallback <- suppressWarnings(as.integer(pk$snp_n %||% NA_integer_))
+
   # All positions available from reads touching this peak on this chromosome
   avail_pos <- sort(unique(
     rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name, pos]
@@ -1287,7 +1297,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   if (length(avail_pos) == 0)
     return(list(label = "undefined", seg_data = NULL,
                 win_start = pk_start, win_end = pk_end, expanded = FALSE,
-                n_support = NA_integer_))
+                n_support = snp_n_fallback))
 
   # Median read length for the expansion upper limit
   read_lengths <- rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name,
@@ -1341,7 +1351,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   if (n_left < min_each || n_right < min_each) {
     return(list(label = "undefined", seg_data = NULL,
                 win_start = win_start, win_end = win_end, expanded = expanded,
-                n_support = NA_integer_))
+                n_support = snp_n_fallback))
   }
 
   # Aggregate IS_REF by position within the window to get SNP_call
@@ -1353,7 +1363,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   if (nrow(read_win_df) == 0)
     return(list(label = "undefined", seg_data = NULL,
                 win_start = win_start, win_end = win_end, expanded = expanded,
-                n_support = NA_integer_))
+                n_support = snp_n_fallback))
 
   peak_summary <- read_win_df[, .(
     REF = sum(IS_REF),
@@ -1430,7 +1440,11 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   # actually traverse both flanking zones — i.e. fully span the LOH region
   # the peak sits in — which is the read-level evidence that this is a real
   # chimeric junction rather than population-level noise.
-  n_support <- NA_integer_
+  # "undefined" (n_runs not in 1..3, or a run pattern that doesn't match any
+  # recognised switch type -- e.g. a second nearby island widening the window
+  # into a compound multi-run signal) keeps the snp_n fallback set above; it's
+  # real per-position read evidence even when the switch type can't be typed.
+  n_support <- snp_n_fallback
   if (label %in% c("binary", "internal_crossover", "gene_conversion")) {
     read_states <- read_win_df[, {
       sL <- classify_zone_state(pos, IS_REF, win_start, snp_p, zone_min_snps)
