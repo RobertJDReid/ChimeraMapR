@@ -6,6 +6,35 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-07
+
+- Ported the beta-binomial EM + Viterbi LOH HMM to Rcpp/C++ for speed.
+- Added aneuploidy detection: per-chromosome ploidy is estimated and shown
+  as background shading on the overview plot.
+- Extensive chaining-rule work on `loh_chain_analysis.R`: new
+  `rule_one_sided_binary` (R11b, `GC_ONE_SIDED`) and `GC_UNRESOLVED` labels,
+  gap-aware TEL-LOH chaining, exemptions so self-classifying peaks
+  (gene_conversion / crossover / internal_crossover) aren't dropped or
+  gated out by coverage/out-of-span checks, collapsing of interrupted or
+  single-SNP-flight LOH regions, and disabling terminal-no-peak TCO calls.
+- Added a `compound_binary` peak class (REF-ALT-REF-ALT / ALT-REF-ALT-REF
+  patterns) that behaves like a binary peak for fusion/chaining but is
+  reported separately in `--peak-list` output.
+- Peak-fusion fixes: same-tract LOH pairs no longer incorrectly blocked
+  from fusion, `peaks_bridge_independent_tracts()` fixed to use the peak
+  window instead of the pad, and haplotype labeling moved into
+  `compute_peak_pairs()` (simplifying the CLI).
+- Added `del_rate_cutoff` as a SNP filtering parameter (default 10%,
+  configurable under Advanced Settings).
+- Added spanning-read counts (n-reads) to event/peak tables for support.
+- Recombination Events tab now lists unresolved LOH regions/peaks as
+  "Other Events" instead of silently dropping them; fixed three bugs
+  affecting claimed/unclaimed event bookkeeping.
+- Interface cleanup: help text on sidebar file inputs, dropped an unused
+  legend on the Recombination Events tab, peaks below the qualifying
+  height no longer shown in the displayed list, download-button layout
+  fix.
+
 ## [0.6.0] - 2026-06-09
 
 - Reworked `loh_chain_analysis.R` to handle long LOH tracts with crossovers,
