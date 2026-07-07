@@ -1787,6 +1787,14 @@ gap_loh_state <- function(loh_segments, chr_name, pos_start, pos_end) {
 #     giving an exact-match check). Using the full window avoids false
 #     negatives when the LOH segment boundary sits a few hundred bp inside
 #     the peak window rather than exactly at the SNP anchor.
+#
+#   Checked BEFORE the a_exits/b_enters heuristic below: if a single fixed
+#   segment spans the whole pos_a-pos_b gap by itself, pos_a and pos_b are
+#   simply the entry/exit boundaries of that ONE tract, not two independent
+#   ones -- regardless of what flanking segments happen to end/start inside
+#   the peak windows (a peak is, by construction, always the transition
+#   between a tract and its flanking segment, so a_exits/b_enters alone
+#   can't tell this apart from the genuinely-independent case).
 # ---------------------------------------------------------------------------
 peaks_bridge_independent_tracts <- function(loh_segments, chr_name,
                                             pos_a, pos_b,
@@ -1798,9 +1806,48 @@ peaks_bridge_independent_tracts <- function(loh_segments, chr_name,
     as.character(chrom) == chr_name & loh_state %in% c("REF_fixed", "ALT_fixed")
   ]
   if (nrow(segs) == 0) return(FALSE)
+  if (any(segs$start <= pos_a & segs$end >= pos_b)) return(FALSE)
   a_exits  <- any(segs$end   >= win_start_a & segs$end   <= win_end_a & segs$end   < pos_b)
   b_enters <- any(segs$start >= win_start_b & segs$start <= win_end_b & segs$start > pos_a)
   a_exits && b_enters
+}
+
+# ---------------------------------------------------------------------------
+# flanking_tracts_share_state()
+#   TRUE when the fixed segment exiting at pos_a and the fixed segment
+#   entering at pos_b -- the same two segments peaks_bridge_independent_tracts()
+#   keys its a_exits/b_enters check off -- carry the SAME loh_state.
+#
+#   peaks_bridge_independent_tracts() only asks "is there SOME fixed segment
+#   there", never which allele -- so it can't tell a genuine boundary between
+#   two independent tracts (different alleles on each side) apart from a
+#   pair that simply returns to the SAME background allele on both sides
+#   (e.g. ALT [REF island] ALT -- a plain gene-conversion excursion, just
+#   represented as three separate loh_segments rows rather than one).
+#
+#   Used only to refine compute_peak_pairs()'s is_loh_crossover_mode fusion
+#   decision, where loh_in_gap is already guaranteed TRUE (the gap is
+#   genuinely filled by resolved LOH, not an unresolved HET stretch) --
+#   deliberately NOT folded into peaks_bridge_independent_tracts() itself,
+#   whose existing bridges_independent_tracts && !loh_in_gap usage in
+#   decide_fusion_mode() targets a different scenario (two same-or-different
+#   -allele tracts separated by a genuine HET gap) that this refinement
+#   should not risk disturbing.
+# ---------------------------------------------------------------------------
+flanking_tracts_share_state <- function(loh_segments, chr_name,
+                                        pos_a, pos_b,
+                                        win_start_a = pos_a, win_end_a = pos_a,
+                                        win_start_b = pos_b, win_end_b = pos_b) {
+  if (is.null(loh_segments) || nrow(loh_segments) == 0) return(FALSE)
+  if (is.na(pos_a) || is.na(pos_b)) return(FALSE)
+  segs <- loh_segments[
+    as.character(chrom) == chr_name & loh_state %in% c("REF_fixed", "ALT_fixed")
+  ]
+  if (nrow(segs) == 0) return(FALSE)
+  exit_state  <- segs[end   >= win_start_a & end   <= win_end_a & end   < pos_b, loh_state]
+  enter_state <- segs[start >= win_start_b & start <= win_end_b & start > pos_a, loh_state]
+  if (length(exit_state) == 0 || length(enter_state) == 0) return(FALSE)
+  exit_state[1] == enter_state[1]
 }
 
 # ---------------------------------------------------------------------------
@@ -2183,7 +2230,22 @@ compute_peak_pairs <- function(snp_peaks,
       #   (b)  bridges_independent_tracts: each peak already exits its own
       #       independent LOH tract into this gap — these are the two flanks of
       #       a crossover point and must not be merged.
-      fusion_mode <- if (is_loh_crossover_mode && !bridges_independent_tracts) {
+      #
+      # bridges_independent_tracts() itself only checks whether SOME fixed
+      # segment ends near pos_a and SOME fixed segment starts near pos_b --
+      # not which allele. When those two flanking segments carry the SAME
+      # loh_state (e.g. ALT [REF island] ALT), the pair isn't bridging two
+      # independent tracts at all -- it's returning to the same background
+      # allele on both sides, i.e. case (a) in different bookkeeping clothes
+      # (the background got split into separate loh_segments rows around the
+      # embedded excursion, not because it's actually two unrelated events).
+      # flanking_tracts_share_state() catches that and lets it fuse.
+      independent_tracts_here <- bridges_independent_tracts &&
+        !flanking_tracts_share_state(loh_segments, chr_name, pk_a$snp_pos, pk_b$snp_pos,
+                                     win_start_a = pk_a$peak_start, win_end_a = pk_a$peak_end,
+                                     win_start_b = pk_b$peak_start, win_end_b = pk_b$peak_end)
+
+      fusion_mode <- if (is_loh_crossover_mode && !independent_tracts_here) {
         "automatic"
       } else if (is_loh_crossover_mode) {
         "none"
@@ -2240,6 +2302,97 @@ compute_peak_pairs <- function(snp_peaks,
   }
 
   auto_edges <- pairs_dt[fusion_mode == "automatic"]
+
+  # Cap transitive fusion at 2 peaks per group. Pairs are only ever formed
+  # between snp-adjacent peaks (see the `for (j in seq_len(nrow(chr_peaks) -
+  # 1L))` loop above), so the "automatic" edges on a chromosome form disjoint
+  # PATHS, never branches -- a peak can end up on two automatic edges only by
+  # sitting at the shared boundary of two adjacent embedded excursions (e.g.
+  # peak B in an A-B-C alternating REF/ALT/REF run, where A-B flanks one
+  # excursion and B-C flanks the next). decide_fusion_mode()'s loh_in_gap
+  # bypass makes *every* adjacent pair along such a run look "automatic" in
+  # isolation -- there is always LOH "in the gap" between consecutive peaks
+  # by construction -- so igraph::components() would transitively chain the
+  # whole run into one multi-peak group with no upper bound on length. That
+  # collapses two (or more) independently-evidenced excursions into a single
+  # incoherent blob (visible downstream as a spurious multi-peak
+  # "compound_binary" classification at fusion-group scale -- a label whose
+  # original intent, from classify_run_pattern()'s n_runs==4 case, was a
+  # tight noisy flip-back *within one peak's own local window*, not a merge
+  # of independently-resolvable kb-scale segments).
+  #
+  # Since automatic edges only ever form a path, "cap every group at 2
+  # peaks" is a maximum-weight independent edge set on a path: pick the
+  # non-adjacent subset of edges (no peak used by more than one kept edge)
+  # that maximises total evidentiary weight. A local "keep whichever edge is
+  # heavier at this peak" greedy is NOT sufficient here -- e.g. a 3-edge
+  # chain weighted 22-11-4 greedily keeps only edge 1 (11 loses to 22 at
+  # their shared peak, then 4 loses to 11 at *its* shared peak, leaving just
+  # one edge kept), when the actual best non-overlapping selection is edges
+  # 1 and 3 together (22+4=26 > either edge alone) -- exactly the "outer
+  # pair, outer pair, drop the middle" shape a longer alternating run should
+  # resolve to. Solved with the standard weighted-interval-scheduling DP.
+  #
+  # n_spanning (not jaccard) is the weight: it is populated consistently by
+  # both routes to "automatic" (the plain jaccard-threshold path and the
+  # is_loh_crossover_mode path), whereas jaccard itself is always exactly 0
+  # for crossover-mode edges by construction (see above) even when they are
+  # well supported by many physically-crossing reads -- comparing on jaccard
+  # would make every crossover-mode edge look artificially weakest.
+  #
+  # Edges that lose the DP's selection are downgraded to "supervised" rather
+  # than dropped entirely, so the pairwise evidence is still visible in
+  # peak_pairs / --peak-list and a human can approve the wider merge -- it
+  # just no longer happens silently.
+  if (nrow(auto_edges) > 0) {
+    ae <- copy(auto_edges)
+    ae[, weight := fifelse(is.na(n_spanning), 0, as.numeric(n_spanning))]
+    # ae inherits pairs_dt's generation order (chromosome-by-chromosome,
+    # left-to-right by peak position), so consecutive rows are adjacent
+    # unless a non-automatic pair broke the run -- start a new chain
+    # whenever the previous edge's right peak isn't this edge's left peak.
+    ae[, new_chain := c(TRUE, chrom[-1] != chrom[-.N] | peak_id_a[-1] != peak_id_b[-.N])]
+    ae[, chain_id := cumsum(new_chain)]
+
+    keep_pair_keys <- character(0)
+    for (cid in unique(ae$chain_id)) {
+      chain <- ae[chain_id == cid]
+      k <- nrow(chain)
+      if (k == 1L) {
+        keep_pair_keys <- c(keep_pair_keys, chain$pair_key)
+        next
+      }
+      w <- chain$weight
+      # dp[i+1] = best total weight achievable using only edges 1..i of this
+      # chain; take[i+1] records whether edge i is part of that optimum.
+      # Adjacent edges in a path always conflict (they share the peak
+      # between them), so taking edge i rules out edge i-1.
+      dp   <- numeric(k + 1L)
+      take <- logical(k + 1L)
+      dp[2] <- w[1]; take[2] <- TRUE
+      for (i in 2:k) {
+        skip_val <- dp[i]
+        take_val <- dp[i - 1L] + w[i]
+        if (take_val > skip_val) {
+          dp[i + 1L] <- take_val; take[i + 1L] <- TRUE
+        } else {
+          dp[i + 1L] <- skip_val; take[i + 1L] <- FALSE
+        }
+      }
+      sel <- logical(k)
+      i <- k
+      while (i >= 1L) {
+        if (take[i + 1L]) { sel[i] <- TRUE; i <- i - 2L } else { i <- i - 1L }
+      }
+      keep_pair_keys <- c(keep_pair_keys, chain$pair_key[sel])
+    }
+
+    downgrade_keys <- setdiff(auto_edges$pair_key, keep_pair_keys)
+    if (length(downgrade_keys) > 0) {
+      pairs_dt[pair_key %in% downgrade_keys, fusion_mode := "supervised"]
+      auto_edges <- pairs_dt[fusion_mode == "automatic"]
+    }
+  }
 
   peaks_dt[, fusion_group := peak_id]
 

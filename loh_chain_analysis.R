@@ -1052,6 +1052,27 @@ rule_terminal_loh <- list(
         }
       }
       if (is.null(pk)) return(NULL)
+
+      # If the boundary peak's edge_type describes an interior excursion
+      # (gene_conversion/crossover) rather than a single clean terminal
+      # switch, and R06 (rule_opp_sandwich) can resolve ftk as a same-state
+      # run with a small embedded opposite-state fragment further down the
+      # chain, defer to R06 instead of reporting AMBIGUOUS here. Without this,
+      # R02 — evaluated from the TEL token, one position before ftk — claims
+      # ftk before the scanner ever reaches ftk's own index, so R06 (which
+      # only matches when anchored AT the F token) never gets the chance its
+      # priority-list position implies it should have. This only fires for
+      # the forward direction; R06 looks rightward from f_i, which does not
+      # mirror the reverse (H [●F] TEL) orientation, so the reverse case is
+      # unaffected and keeps its prior behavior.
+      edge_type_here <- pk$best_edge_type %||% pk$edge_type
+      if (direction == "fwd" &&
+          !is.null(edge_type_here) && !is.na(edge_type_here) &&
+          edge_type_here %in% c("gene_conversion", "crossover") &&
+          !is.null(rule_opp_sandwich$match_fn(tokens, f_i, chain, params))) {
+        return(NULL)
+      }
+
       list(span = c(tel_i, f_i, h_i), f_tok = ftk, peak = pk,
            direction = direction)
     }
@@ -1405,128 +1426,181 @@ rule_het_bounded <- list(
   }
 )
 
-# Rule 6: F ●[F̄]● F — small interstitial opposite-state fragment
+# Rule 6: F ●[F̄]● F [●F̄]● F ... — a chain of small interstitial fragments
+#          alternating against a common background state
 #          (GC from a prior event captured by terminal CO)
+#
+#   A single embedded excursion (L [Fbar] R, L/R sharing one state, Fbar the
+#   other) is the base case. But consecutive excursions chain: L [F1] R1
+#   [F2] R2 [F3] R3 ... as long as each Fk is small relative to what
+#   immediately follows it (Rk), each Rk in turn becomes the new "L" for
+#   testing whether the NEXT gap also holds a small fragment, rather than
+#   being silently absorbed as part of one giant merge. Each Fk gets its own
+#   reported event — e.g. R06 walking L=ALT [F1=REF] R1=ALT [F2=REF] R2=ALT
+#   reports F1 and F2 as two separate excursions, using R1 purely as the
+#   shared background connecting them (R1 itself is not reported: it plays
+#   the same role L does for F1, and the same role L plays for F2 relative to
+#   R1 — every interior token alternates between "fragment" and "confirming
+#   background" roles as the walk proceeds, and only fragment-role tokens are
+#   reported). Only the walk's outermost L and final R get merged into one
+#   background token; every fragment token in between is consumed and
+#   reported without being folded into that merge.
 rule_opp_sandwich <- list(
   id = "R06_opp_sandwich",
   match_fn = function(tokens, i, chain, params) {
-    n <- length(tokens)
     l <- tokens[[i]]
     if (l$type != "F") return(NULL)
 
-    # G-transparent: real loh_segments data almost never tiles a chromosome
-    # with zero gaps, so the fragment and its flanks are usually separated by
-    # small unscored G tokens rather than being strictly adjacent list
-    # entries. Skip over them to find the actual fixed neighbours.
-    fi <- .nearest_fixed_right(tokens, i)
-    if (is.null(fi)) return(NULL)
-    ri <- .nearest_fixed_right(tokens, fi)
-    if (is.null(ri)) return(NULL)
+    fragments  <- list()
+    cur_bg     <- l
+    cur_bg_idx <- i
 
-    ftk <- tokens[[fi]]; r <- tokens[[ri]]
-    if (is.na(l$state) || is.na(ftk$state) || is.na(r$state)) return(NULL)
-    if (ftk$state == l$state || l$state != r$state) return(NULL)
-    if (ftk$state != .opp_state(l$state)) return(NULL)
-    # Check "small" criterion
-    combined_flank <- (l$length_bp %||% 0L) + (r$length_bp %||% 0L)
-    if ((ftk$length_bp %||% Inf) >= params$small_frac * combined_flank) return(NULL)
+    repeat {
+      # G-transparent: real loh_segments data almost never tiles a chromosome
+      # with zero gaps, so the fragment and its flanks are usually separated
+      # by small unscored G tokens rather than being strictly adjacent list
+      # entries. Skip over them to find the actual fixed neighbours.
+      fi <- .nearest_fixed_right(tokens, cur_bg_idx)
+      if (is.null(fi)) break
+      ri <- .nearest_fixed_right(tokens, fi)
+      if (is.null(ri)) break
 
-    # l can be a large, already-resolved accumulation from earlier merges in
-    # this same cascade — its size reflects history, not whether ftk is truly
-    # a small excursion here and now. r, by contrast, is always the next
-    # not-yet-merged raw segment, so it reflects the actual local scale at
-    # this point in the scan. When ftk is not smaller than r, ftk is not a
-    # small anomaly embedded in l's background — it is at least as large as
-    # r itself, meaning ftk is really the leading edge of a *different*,
-    # potentially much larger region that happens to look "small" only
-    # because it is being measured against l's inflated combined_flank.
-    # Absorbing it here would grow l across a real regional boundary instead
-    # of leaving that boundary for R02/R03 to close out, and would silently
-    # misreport the true transition point. Comparing against r alone (not
-    # l, not l+r) is what lets the scan reach ftk directly on its own turn,
-    # where this same rule can correctly grow ftk's own state against the
-    # (now fresh) r beyond it.
-    if ((ftk$length_bp %||% Inf) >= (r$length_bp %||% 0L)) return(NULL)
+      ftk <- tokens[[fi]]; r <- tokens[[ri]]
+      if (is.na(cur_bg$state) || is.na(ftk$state) || is.na(r$state)) break
+      if (ftk$state == cur_bg$state || cur_bg$state != r$state) break
+      if (ftk$state != .opp_state(cur_bg$state)) break
+      # Check "small" criterion
+      combined_flank <- (cur_bg$length_bp %||% 0L) + (r$length_bp %||% 0L)
+      if ((ftk$length_bp %||% Inf) >= params$small_frac * combined_flank) break
 
-    # Peak evidence must be ftk's OWN attachment, not borrowed from l/r.
-    # l/r can be large (or, after an earlier R06 rewrite, already a
-    # cumulative merge of several prior segments) — falling back to their
-    # peak_over/peak_left/peak_right grabs a peak that really belongs to
-    # l's or r's OWN far boundary (an unrelated, earlier event), not the
-    # junction adjacent to ftk. A wide fused peak window can legitimately
-    # overlap (and so get attached as peak_over to) both ftk and its
-    # immediate neighbour; trusting only ftk's own fields means that peak
-    # is claimed by ftk's event, not stolen by the flank's merge — which
-    # would otherwise starve ftk of the evidence it needs to ever fire.
-    pk_l <- ftk$peak_left
-    pk_r <- ftk$peak_right
-    pk   <- .best_peak(ftk)
+      # cur_bg can be a large, already-resolved accumulation from earlier
+      # steps of this same walk — its size reflects history, not whether ftk
+      # is truly a small excursion here and now. r, by contrast, is always
+      # the next not-yet-merged raw segment, so it reflects the actual local
+      # scale at this point in the scan. When ftk is not smaller than r, ftk
+      # is not a small anomaly embedded in cur_bg's background — it is at
+      # least as large as r itself, meaning ftk is really the leading edge of
+      # a *different*, potentially much larger region that happens to look
+      # "small" only because it is being measured against cur_bg's inflated
+      # combined_flank. Stopping the walk here leaves that boundary for
+      # R02/R03 to close out instead of silently misreporting the true
+      # transition point. Comparing against r alone (not cur_bg, not
+      # cur_bg+r) is what lets a later scan position reach ftk directly on
+      # its own turn, where this same rule can correctly grow ftk's own
+      # state against the (now fresh) r beyond it.
+      if ((ftk$length_bp %||% Inf) >= (r$length_bp %||% 0L)) break
 
-    # Fragments with too few SNPs to ever generate a chimeric-read peak
-    # (the same floor reconcile() already uses for POSSIBLE_GC) are still
-    # eligible to be absorbed — with no peak, there's nothing to mis-claim,
-    # and leaving a single-SNP noise blip unmerged would otherwise block
-    # the cascade from ever reaching the far telomere.
-    too_small_for_peak <- !is.na(ftk$n_snps) && ftk$n_snps < params$min_snps_for_peak
+      # Peak evidence must be ftk's OWN attachment, not borrowed from its
+      # neighbours. Those can be large (or, after an earlier step of this
+      # same walk, already a cumulative merge of several prior segments) —
+      # falling back to their peak_over/peak_left/peak_right grabs a peak
+      # that really belongs to a far boundary (an unrelated, earlier event),
+      # not the junction adjacent to ftk. A wide fused peak window can
+      # legitimately overlap (and so get attached as peak_over to) both ftk
+      # and its immediate neighbour; trusting only ftk's own fields means
+      # that peak is claimed by ftk's event, not stolen by the flank's merge
+      # — which would otherwise starve ftk of the evidence it needs to ever
+      # fire.
+      pk_l <- ftk$peak_left
+      pk_r <- ftk$peak_right
+      pk   <- .best_peak(ftk)
 
-    # A peak attached as peak_over may have its SNP position (fused_pos_bp)
-    # outside the fragment's own [start, end] span — this happens when a wide
-    # chimeric-peak window overlaps the fragment edge but the underlying SNP
-    # sits in the adjacent flank.  For binary peaks this is a flank-boundary
-    # marker that belongs to R03, not interior evidence for this fragment.
-    # Claiming it here would block R03 from later using it as the
-    # merged-flank's right-junction peak.  Treat the fragment as having no
-    # internal peak evidence so it is absorbed without consuming the boundary
-    # peak.
-    # Exception: self-classifying peaks (gene_conversion, crossover,
-    # internal_crossover) whose SNP sits just past ftk$end ARE the right-
-    # junction marker for this gene-conversion motif.  If left unclaimed they
-    # propagate to the merged-flank's peak_right and get consumed by R10,
-    # producing a spuriously large NCO_GC that spans the entire merged region.
-    # Claim them here so R06 fires the correct NCO_GC_in_terminal instead.
-    if (!is.null(pk) && !is.na(pk$fused_pos_bp) &&
-        (pk$fused_pos_bp < ftk$start || pk$fused_pos_bp > ftk$end)) {
-      et_pk <- pk$best_edge_type %||% pk$edge_type
-      sc_pk <- isTRUE(et_pk %in% c("gene_conversion", "crossover", "internal_crossover"))
-      if (!sc_pk) {
-        pk             <- NULL
-        too_small_for_peak <- TRUE
+      # Fragments with too few SNPs to ever generate a chimeric-read peak
+      # (the same floor reconcile() already uses for POSSIBLE_GC) are still
+      # eligible to be absorbed — with no peak, there's nothing to mis-claim,
+      # and leaving a single-SNP noise blip unmerged would otherwise block
+      # the cascade from ever reaching the far telomere.
+      too_small_for_peak <- !is.na(ftk$n_snps) && ftk$n_snps < params$min_snps_for_peak
+
+      # A peak attached as peak_over may have its SNP position (fused_pos_bp)
+      # outside the fragment's own [start, end] span — this happens when a
+      # wide chimeric-peak window overlaps the fragment edge but the
+      # underlying SNP sits in the adjacent flank. For binary peaks this is a
+      # flank-boundary marker that belongs to R03, not interior evidence for
+      # this fragment. Claiming it here would block R03 from later using it
+      # as the merged-flank's right-junction peak. Treat the fragment as
+      # having no internal peak evidence so it is absorbed without consuming
+      # the boundary peak.
+      # Exception: self-classifying peaks (gene_conversion, crossover,
+      # internal_crossover) whose SNP sits just past ftk$end ARE the right-
+      # junction marker for this gene-conversion motif. If left unclaimed
+      # they propagate to the merged-flank's peak_right and get consumed by
+      # R10, producing a spuriously large NCO_GC that spans the entire merged
+      # region. Claim them here so R06 fires the correct NCO_GC_in_terminal
+      # instead.
+      if (!is.null(pk) && !is.na(pk$fused_pos_bp) &&
+          (pk$fused_pos_bp < ftk$start || pk$fused_pos_bp > ftk$end)) {
+        et_pk <- pk$best_edge_type %||% pk$edge_type
+        sc_pk <- isTRUE(et_pk %in% c("gene_conversion", "crossover", "internal_crossover"))
+        if (!sc_pk) {
+          pk             <- NULL
+          too_small_for_peak <- TRUE
+        }
       }
+
+      if (is.null(pk) && !too_small_for_peak) break
+
+      fragments[[length(fragments) + 1L]] <- list(
+        f_tok = ftk, pk = pk, pk_l = pk_l, pk_r = pk_r,
+        too_small_for_peak = too_small_for_peak
+      )
+
+      # r becomes the new confirming background: test whether the NEXT gap
+      # (past r) also holds a small fragment instead of assuming everything
+      # from here on is uniform background to be swallowed whole.
+      cur_bg     <- r
+      cur_bg_idx <- ri
     }
 
-    if (is.null(pk) && !too_small_for_peak) return(NULL)
+    if (length(fragments) == 0) return(NULL)
 
-    list(span = c(i, ri), f_tok = ftk, l_tok = l, r_tok = r,
-         pk = pk, pk_l = pk_l, pk_r = pk_r,
-         too_small_for_peak = too_small_for_peak)
+    list(span = c(i, cur_bg_idx), l_tok = l, r_tok = cur_bg, fragments = fragments)
   },
   fire_fn = function(m, chain, params) {
-    centered <- .is_roughly_centered(m$f_tok, params$center_tol) ||
-                .is_roughly_centered(
-                  make_token("F", start = m$f_tok$start, end = m$f_tok$end,
-                             peak_over = m$pk_l), params$center_tol)
 
-    tract <- if (m$too_small_for_peak && is.null(m$pk))
-      list(call = "POSSIBLE_GC", reason = "too_small_for_peak", n_support = 0L)
-    else if (!is.null(m$pk_l) && !is.null(m$pk_r))
-      classify_two_binary_junction(m$pk_l, m$pk_r, m$f_tok$state, params)
-    else
-      classify_tract(m$pk, params)
+    events <- lapply(m$fragments, function(frag) {
+      centered <- .is_roughly_centered(frag$f_tok, params$center_tol) ||
+                  .is_roughly_centered(
+                    make_token("F", start = frag$f_tok$start, end = frag$f_tok$end,
+                               peak_over = frag$pk_l), params$center_tol)
 
-    call <- switch(tract$call,
-      NCO_GC       = "NCO_GC_in_terminal",
-      NCO_GC_LARGE = "NCO_GC_in_terminal",
-      CO_GC        = "CO_GC",
-      POSSIBLE_GC  = "POSSIBLE_GC",
-      paste0("AMBIGUOUS(", tract$reason, ")")
-    )
+      tract <- if (frag$too_small_for_peak && is.null(frag$pk))
+        list(call = "POSSIBLE_GC", reason = "too_small_for_peak", n_support = 0L)
+      else if (!is.null(frag$pk_l) && !is.null(frag$pk_r))
+        classify_two_binary_junction(frag$pk_l, frag$pk_r, frag$f_tok$state, params)
+      else
+        classify_tract(frag$pk, params)
 
-    # Rewrite: combine flanking F tokens into one (they become adjacent after
-    # consuming the tiny F̄ fragment). l_tok/r_tok's own outer-edge peak can
-    # be attached as peak_over rather than peak_left/peak_right (the G gap
-    # to the next segment is often wider than peak_pad_bp) — .edge_peak()
-    # recovers it by position so a terminal rule downstream (R02/R02b/R03)
-    # doesn't see a peakless token where a real junction peak exists.
+      call <- switch(tract$call,
+        NCO_GC       = "NCO_GC_in_terminal",
+        NCO_GC_LARGE = "NCO_GC_in_terminal",
+        CO_GC        = "CO_GC",
+        POSSIBLE_GC  = "POSSIBLE_GC",
+        paste0("AMBIGUOUS(", tract$reason, ")")
+      )
+
+      # Report only this fragment's own span, not the merged flank's — the
+      # merged flank is a structural rewrite for later rules (R02/R02b etc)
+      # to evaluate as one unit, not part of this event. Including the
+      # cumulative l_tok/r_tok span here would make each fragment's reported
+      # span balloon to cover all the unrelated territory peeled before it,
+      # and would duplicate whatever event later claims the fully-merged
+      # flank.
+      .make_event(call, chain$chrom,
+                  list(frag$f_tok),
+                  evidence_peaks = Filter(Negate(is.null),
+                                          list(frag$pk, frag$pk_l, frag$pk_r)),
+                  n_support = tract$n_support,
+                  notes = paste0("small_opp_fragment; centered=", centered))
+    })
+
+    # Rewrite: combine the walk's outermost flanking F tokens into one (every
+    # fragment token in between has now been consumed and reported above).
+    # l_tok/r_tok's own outer-edge peak can be attached as peak_over rather
+    # than peak_left/peak_right (the G gap to the next segment is often wider
+    # than peak_pad_bp) — .edge_peak() recovers it by position so a terminal
+    # rule downstream (R02/R02b/R03) doesn't see a peakless token where a
+    # real junction peak exists.
     merged_flank <- make_token(
       type        = "F",
       state       = m$l_tok$state,
@@ -1545,25 +1619,13 @@ rule_opp_sandwich <- list(
       meta        = c(m$l_tok$meta, m$r_tok$meta)
     )
 
-    # Report only the small fragment's own span, not the merged flank's —
-    # the merged flank is a structural rewrite for later rules (R02/R02b etc)
-    # to evaluate as one unit, not part of this event. When several of these
-    # fragments are embedded in the same long run, each successive merge's
-    # l_tok is already the cumulative result of prior merges; including it
-    # here would make each fragment's reported span balloon to cover all the
-    # unrelated territory peeled before it, and would duplicate whatever
-    # event later claims the fully-merged flank.
-    ev <- .make_event(call, chain$chrom,
-                      list(m$f_tok),
-                      evidence_peaks = Filter(Negate(is.null),
-                                              list(m$pk, m$pk_l, m$pk_r)),
-                      n_support = tract$n_support,
-                      notes = paste0("small_opp_fragment; centered=", centered))
+    all_peaks <- unlist(lapply(m$fragments, function(frag)
+      Filter(Negate(is.null), list(frag$pk, frag$pk_l, frag$pk_r))), recursive = FALSE)
+    all_loh   <- lapply(m$fragments, `[[`, "f_tok")
 
-    list(event = ev,
+    list(events  = events,
          rewrite = list(span = m$span, replacement = list(merged_flank)),
-         claims  = list(peak = Filter(Negate(is.null), list(m$pk, m$pk_l, m$pk_r)),
-                        loh  = list(m$f_tok)))
+         claims  = list(peak = all_peaks, loh = all_loh))
   }
 )
 
@@ -2074,8 +2136,12 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
     }
 
     if (!is.null(hit)) {
-      fired  <- hit$rule$fire_fn(hit$match, chain, params)
-      events <- c(events, list(fired$event))
+      fired <- hit$rule$fire_fn(hit$match, chain, params)
+      # Most rules fire a single event (fired$event); R06 can walk a chain of
+      # several embedded excursions in one match and report each as its own
+      # event via fired$events (a list) instead.
+      new_events <- if (!is.null(fired$events)) fired$events else list(fired$event)
+      events <- c(events, new_events)
 
       # Claim peaks
       new_pk_pos <- .peak_pos_from_match(hit$match)
@@ -2113,6 +2179,14 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
                 list(m$pk %||% NULL, m$pk_l %||% NULL, m$pk_r %||% NULL,
                      m$pk1 %||% NULL, m$pk2 %||% NULL,
                      m$peak %||% NULL))
+  # R06 (rule_opp_sandwich) can carry several fragments' peaks in m$fragments
+  # instead of the single pk/pk_l/pk_r fields other rules use.
+  if (!is.null(m$fragments)) {
+    frag_pks <- unlist(lapply(m$fragments, function(frag)
+      Filter(Negate(is.null), list(frag$pk, frag$pk_l, frag$pk_r))),
+      recursive = FALSE)
+    pks <- c(pks, frag_pks)
+  }
   if (length(pks) == 0) return(numeric(0))
   unlist(lapply(pks, function(p) {
     v <- p$fused_pos_bp %||% p$snp_pos %||% NA_real_
