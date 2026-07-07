@@ -1892,6 +1892,18 @@ rule_two_binary_flanking <- list(
 # read can ever be scored there. R11 requires both flanks and won't fire;
 # without this rule the token would fall through to reconcile() as a plain
 # UNCATEGORIZED_LOH, silently discarding the one real peak's evidence.
+#
+# Deliberately reads pk$haplotype_label (the raw, pre-normalization type)
+# rather than best_edge_type here: a compound_binary peak marks a patchy,
+# repair-flipped switch whose immediate host fragment is often just that
+# noise, not a genuine standalone island. Since scan_chain() claims peaks by
+# position as soon as any rule uses them, letting compound_binary qualify
+# here would let this rule grab the peak for the noisy fragment before the
+# scan reaches the real, farther boundary it actually marks — starving
+# .left_junction_peak()'s bounded peak_over fallback (and thus R03) of the
+# peak it needs to chain the real tract. best_edge_type (which normalizes
+# compound_binary to "binary") is still what downstream fusion/pairing and
+# event reporting see — only this rule's own eligibility gate is stricter.
 rule_one_sided_binary <- list(
   id = "R11b_one_sided_binary",
   match_fn = function(tokens, i, chain, params) {
@@ -1908,8 +1920,8 @@ rule_one_sided_binary <- list(
     pk_l <- .left_junction_peak(tok, left_ctx, params)
     pk_r <- .right_junction_peak(tok, right_ctx, params)
 
-    et_l <- pk_l$best_edge_type %||% pk_l$edge_type
-    et_r <- pk_r$best_edge_type %||% pk_r$edge_type
+    et_l <- pk_l$haplotype_label %||% pk_l$best_edge_type %||% pk_l$edge_type
+    et_r <- pk_r$haplotype_label %||% pk_r$best_edge_type %||% pk_r$edge_type
     l_binary <- !is.null(pk_l) && isTRUE(et_l == "binary")
     r_binary <- !is.null(pk_r) && isTRUE(et_r == "binary")
 
