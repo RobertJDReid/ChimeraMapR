@@ -589,8 +589,6 @@ ui <- fluidPage(
                    "'Review' events need manual inspection."
                  ),
                  br(),
-                 uiOutput("event_table_legend"),
-                 br(),
                  tableOutput("event_table_output"),
                  br(),
                  fluidRow(
@@ -2316,31 +2314,7 @@ server <- function(input, output, session) {
   )
   
   # --- Event table output
-  
-  # Event table legend
-  output$event_table_legend <- renderUI({
-    tags$div(
-      style = "font-size:0.85em; color:#444; margin-bottom:8px;",
-      strong("Event classes: "),
-      tags$span("NCO_GC",             style = "background:#d4edda; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("NCO_GC_LARGE",       style = "background:#c3e6cb; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("NCO_GC_subres",      style = "background:#b8daff; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("GC_UNRESOLVED",      style = "background:#b8daff; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("CO_GC",              style = "background:#ffeeba; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("CROSSOVER_NO_TRACT", style = "background:#ffe8a1; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("CO_TERM",             style = "background:#d6d8db; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("TERMINAL_DELETION",  style = "background:#f5c6cb; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("TCO_CAPTURED_TCO",   style = "background:#e2d9f3; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("DOUBLE_GC",          style = "background:#bee5eb; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("AMBIGUOUS",          style = "background:#fff3cd; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("UNCATEGORIZED",      style = "background:#f8d7da; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      br(), br(),
-      strong("Confidence: "),
-      tags$span("high",   style = "background:#d4edda; padding:2px 6px; border-radius:3px; margin-right:4px;"),
-      tags$span("review", style = "background:#fff3cd; padding:2px 6px; border-radius:3px; margin-right:4px;")
-    )
-  })
-  
+
   # Main event table
   output$event_table_output <- renderTable({
     req(results$event_table)
