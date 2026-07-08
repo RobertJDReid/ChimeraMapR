@@ -391,6 +391,15 @@ if (output_mode == "csv") {
   cat('  d <- readRDS("', out_path, '")\n', sep = "")
   cat('  print(build_overview_plot(d))\n')
 
+} else if (opts[["chain-all"]]) {
+
+  # PNG overview plot, but --chain-all is also requested: defer the render.
+  # The chain block below populates results$loh_segments and
+  # results$event_table, which build_overview_plot() overlays as the LOH band
+  # and event symbols. Building here would produce a peaks-only plot, so we
+  # wait and render the annotated overview at the end of the chain block.
+  message("Overview plot will be rendered after chain analysis (annotated) ...")
+
 } else {
 
   # Default: PNG overview plot
@@ -404,7 +413,10 @@ if (output_mode == "csv") {
   cat("Overview plot saved to:", out_path, "\n")
 }
 
-cat("Done.\n")
+# When the overview render is deferred to the --chain-all block, defer "Done."
+# too so it prints after the annotated PNG is actually saved.
+if (!(output_mode == "png" && opts[["chain-all"]]))
+  cat("Done.\n")
 
 
 # ── Coverage map (sequencing depth) ─────────────────────────────────────────────
@@ -668,5 +680,29 @@ if (opts[["chain-all"]]) {
     cat(sprintf("  Other events (peaks) → %s (%d peaks)\n", step4_up, nrow(uncl_pk)))
   }
 
+  # ── Annotated overview PNG ────────────────────────────────────────────────────
+  # In the default (PNG) output mode the overview render was deferred above so
+  # it could be annotated. Feed the chain results back into `results` — the LOH
+  # segment table and the final event table — so build_overview_plot() draws the
+  # LOH band and event symbols, matching the app's annotated overview. Skipped
+  # for --peak-list / --overview-rds, where out_path is a CSV/RDS file.
+  if (output_mode == "png") {
+    results$loh_segments <- loh_segs
+    results$event_table  <- final_events
+
+    message("Building annotated overview plot ...")
+    p     <- build_overview_plot(results)
+    n_chr <- length(unique(results$snp_coverage$chrom))
+    png_h <- max(3, min(16, n_chr * 1.2))
+
+    message("Saving PNG → ", out_path)
+    ggplot2::ggsave(out_path, plot = p, width = 12, height = png_h, dpi = 300)
+    cat(sprintf("Annotated overview plot (LOH + events) saved to: %s\n", out_path))
+  }
+
   cat("\n── Chain analysis complete ───────────────────────────────────────────────────\n")
+
+  # Deferred "Done." — the non-chain path prints this right after writing the
+  # main output; in deferred-PNG mode the PNG is saved above, so print it here.
+  if (output_mode == "png") cat("Done.\n")
 }
