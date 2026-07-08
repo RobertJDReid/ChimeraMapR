@@ -22,6 +22,9 @@
 #    # Per-position coverage table + collapsed coverage segments as CSV
 #    Rscript chimera_cli.R --coverage-map reads.csv.gz snps.vcf.gz genome.fa.fai
 #
+#    # Only the final chain-caller events table as CSV
+#    Rscript chimera_cli.R --events-table reads.csv.gz snps.vcf.gz genome.fa.fai
+#
 #    # Full parameter set
 #    Rscript chimera_cli.R \
 #      --sample-name My_Sample \
@@ -141,6 +144,12 @@ option_list <- list(
               default = FALSE,
               help    = "Save the overview plot as an RDS object for re-plotting in R"),
 
+  make_option("--events-table",
+              action  = "store_true",
+              default = FALSE,
+              help    = paste("Run the chain-based caller and write ONLY the final events",
+                              "table as a CSV (no intermediate step CSVs, no plot)")),
+
   # Coverage map (sequencing depth)
   make_option("--coverage-map",
               action  = "store_true",
@@ -209,6 +218,7 @@ parser <- OptionParser(
     "  [default]       Genome-wide overview plot saved as PNG",
     "  --peak-list     Detected peaks as CSV",
     "  --overview-rds  Overview plot object saved as RDS (re-plot with readRDS + print)",
+    "  --events-table  Final chain-caller events table as CSV (only the events)",
     sep = "\n"
   )
 )
@@ -229,20 +239,30 @@ for (f in c(read_path, snp_path, fai_path)) {
     stop("Input file not found: ", f)
 }
 
-# Validate output mode
-if (opts[["peak-list"]] && opts[["overview-rds"]])
-  stop("--peak-list and --overview-rds are mutually exclusive. Choose one.")
+# Validate output mode — the primary output modes are mutually exclusive
+n_modes <- sum(opts[["peak-list"]], opts[["overview-rds"]], opts[["events-table"]])
+if (n_modes > 1)
+  stop("--peak-list, --overview-rds and --events-table are mutually exclusive. Choose one.")
 
-if (opts[["chain-all"]] && is.null(chain_found))
-  stop("--chain-all requires loh_chain_analysis.R but it was not found next to chimera_functions.R")
+# --events-table produces the chain caller's final events table only; asking for
+# --chain-all at the same time (which writes every step CSV + the annotated PNG)
+# is contradictory.
+if (opts[["events-table"]] && opts[["chain-all"]])
+  stop("--events-table and --chain-all are mutually exclusive. Use --chain-all for the full output set.")
+
+# Both the full chain run and the events-only mode need the chain analysis code.
+run_chain <- opts[["chain-all"]] || opts[["events-table"]]
+if (run_chain && is.null(chain_found))
+  stop("--chain-all / --events-table requires loh_chain_analysis.R but it was not found next to chimera_functions.R")
 
 
 # ── Resolve output path ───────────────────────────────────────────────────────
 resolve_output <- function(opts_output, sample_name, mode) {
   ext <- switch(mode,
-    png = ".png",
-    csv = "_peaks.csv",
-    rds = "_overview.rds"
+    png    = ".png",
+    csv    = "_peaks.csv",
+    rds    = "_overview.rds",
+    events = "_events.csv"
   )
   stem <- paste0(sample_name, "_chimera_", Sys.Date())
 
@@ -272,8 +292,9 @@ resolve_extra_dir <- function(opts_output, out_path) {
   }
 }
 
-output_mode <- if (opts[["peak-list"]])    "csv" else
-               if (opts[["overview-rds"]]) "rds" else
+output_mode <- if (opts[["peak-list"]])    "csv"    else
+               if (opts[["overview-rds"]]) "rds"    else
+               if (opts[["events-table"]]) "events" else
                                            "png"
 
 out_path <- resolve_output(opts[["output"]], opts[["sample-name"]], output_mode)
@@ -391,6 +412,12 @@ if (output_mode == "csv") {
   cat('  d <- readRDS("', out_path, '")\n', sep = "")
   cat('  print(build_overview_plot(d))\n')
 
+} else if (output_mode == "events") {
+
+  # Events-only mode: the events table is produced by the chain pipeline below,
+  # so defer writing until the chain block has built final_events.
+  message("Events table will be written after chain analysis ...")
+
 } else if (opts[["chain-all"]]) {
 
   # PNG overview plot, but --chain-all is also requested: defer the render.
@@ -413,9 +440,10 @@ if (output_mode == "csv") {
   cat("Overview plot saved to:", out_path, "\n")
 }
 
-# When the overview render is deferred to the --chain-all block, defer "Done."
-# too so it prints after the annotated PNG is actually saved.
-if (!(output_mode == "png" && opts[["chain-all"]]))
+# When output is produced by the chain block below (deferred annotated PNG for
+# --chain-all, or the events table for --events-table), defer "Done." too so it
+# prints after that output is actually written.
+if (!(output_mode == "png" && opts[["chain-all"]]) && output_mode != "events")
   cat("Done.\n")
 
 
@@ -426,7 +454,7 @@ if (!(output_mode == "png" && opts[["chain-all"]]))
 # --coverage-map or --chain-all is requested, since chain analysis's Step 0a
 # needs the same result and would otherwise recompute it.
 coverage_result <- NULL
-if (opts[["coverage-map"]] || opts[["chain-all"]]) {
+if (opts[["coverage-map"]] || run_chain) {
   message("Computing coverage map ...")
   coverage_result <- compute_coverage_map(results$full_read_loh)
 }
@@ -451,8 +479,14 @@ if (opts[["coverage-map"]]) {
 }
 
 
-# ── Chain-based LOH event calling (--chain-all) ───────────────────────────────
-if (opts[["chain-all"]]) {
+# ── Chain-based LOH event calling (--chain-all / --events-table) ──────────────
+# The full pipeline (steps 0–4) always runs; `full_chain` decides how much is
+# written. Under --chain-all we emit every intermediate step CSV and the
+# annotated overview PNG. Under --events-table we run the same pipeline but write
+# only the final events table (to out_path).
+if (run_chain) {
+
+  full_chain <- opts[["chain-all"]]
 
   # ── Helpers: flatten chain structures to data.tables ─────────────────────────
 
@@ -536,12 +570,14 @@ if (opts[["chain-all"]]) {
   loh_result <- compute_loh_map(results$full_read_loh)
   loh_segs   <- loh_result$loh_segments
 
-  step0_snp <- paste0(stem, "_step0_loh_snps.csv")
-  step0_seg <- paste0(stem, "_step0_loh_segments.csv")
-  data.table::fwrite(loh_result$snp_table, step0_snp)
-  data.table::fwrite(loh_segs,             step0_seg)
-  cat(sprintf("  LOH SNP table    → %s (%d rows)\n",  step0_snp, nrow(loh_result$snp_table)))
-  cat(sprintf("  LOH segments     → %s (%d segments)\n\n", step0_seg, nrow(loh_segs)))
+  if (full_chain) {
+    step0_snp <- paste0(stem, "_step0_loh_snps.csv")
+    step0_seg <- paste0(stem, "_step0_loh_segments.csv")
+    data.table::fwrite(loh_result$snp_table, step0_snp)
+    data.table::fwrite(loh_segs,             step0_seg)
+    cat(sprintf("  LOH SNP table    → %s (%d rows)\n",  step0_snp, nrow(loh_result$snp_table)))
+    cat(sprintf("  LOH segments     → %s (%d segments)\n\n", step0_seg, nrow(loh_segs)))
+  }
 
   # ── Step 0a: Coverage map ────────────────────────────────────────────────────
   # Real per-position read depth, modeled with the same EM+HMM approach as
@@ -554,10 +590,12 @@ if (opts[["chain-all"]]) {
   if (is.null(coverage_result)) coverage_result <- compute_coverage_map(results$full_read_loh)
   coverage_segs    <- coverage_result$coverage_segments
 
-  step0a_cov <- paste0(stem, "_step0a_coverage_segments.csv")
-  data.table::fwrite(coverage_segs, step0a_cov)
-  cat(sprintf("  Coverage segments → %s (%d segments; baseline depth = %.1f)\n\n",
-              step0a_cov, nrow(coverage_segs), coverage_result$baseline_depth))
+  if (full_chain) {
+    step0a_cov <- paste0(stem, "_step0a_coverage_segments.csv")
+    data.table::fwrite(coverage_segs, step0a_cov)
+    cat(sprintf("  Coverage segments → %s (%d segments; baseline depth = %.1f)\n\n",
+                step0a_cov, nrow(coverage_segs), coverage_result$baseline_depth))
+  }
 
   # ── Step 0b: Haplotype labeling + peak fusion ────────────────────────────────
   # compute_peak_pairs() now runs classify_peak_haplotype() internally for any
@@ -596,21 +634,25 @@ if (opts[["chain-all"]]) {
     coverage_table    = coverage_result$coverage_table
   )
 
-  step1_out  <- paste0(stem, "_step1_raw_tokens.csv")
-  step1_dt   <- tokens_to_dt(raw_chains)
-  data.table::fwrite(step1_dt, step1_out)
-  cat(sprintf("  Raw tokens       → %s (%d tokens across %d chromosomes)\n\n",
-              step1_out, nrow(step1_dt), length(raw_chains)))
+  step1_dt <- tokens_to_dt(raw_chains)
+  if (full_chain) {
+    step1_out <- paste0(stem, "_step1_raw_tokens.csv")
+    data.table::fwrite(step1_dt, step1_out)
+    cat(sprintf("  Raw tokens       → %s (%d tokens across %d chromosomes)\n\n",
+                step1_out, nrow(step1_dt), length(raw_chains)))
+  }
 
   # ── Step 2: Canonicalise ──────────────────────────────────────────────────────
   cat("[chain] Step 2: Canonicalising (merging same-state gaps) ...\n")
   canonical_chains <- lapply(raw_chains, canonicalise, params = cp)
 
-  step2_out <- paste0(stem, "_step2_canonical_tokens.csv")
-  step2_dt  <- tokens_to_dt(canonical_chains)
-  data.table::fwrite(step2_dt, step2_out)
-  cat(sprintf("  Canonical tokens → %s (%d tokens; %d merged from step 1)\n\n",
-              step2_out, nrow(step2_dt), nrow(step1_dt) - nrow(step2_dt)))
+  if (full_chain) {
+    step2_out <- paste0(stem, "_step2_canonical_tokens.csv")
+    step2_dt  <- tokens_to_dt(canonical_chains)
+    data.table::fwrite(step2_dt, step2_out)
+    cat(sprintf("  Canonical tokens → %s (%d tokens; %d merged from step 1)\n\n",
+                step2_out, nrow(step2_dt), nrow(step1_dt) - nrow(step2_dt)))
+  }
 
   # ── Step 3: Motif scan ────────────────────────────────────────────────────────
   cat("[chain] Step 3: Scanning for recombination motifs ...\n")
@@ -624,14 +666,16 @@ if (opts[["chain-all"]]) {
     canonical_chains[[cname]] <- scan_results[[cname]]$chain
   }
 
-  step3_ev  <- paste0(stem, "_step3_events.csv")
-  step3_tok <- paste0(stem, "_step3_tokens_post_scan.csv")
-  step3_dt  <- scan_events_to_dt(scan_results)
-  step3_tok_dt <- tokens_to_dt(canonical_chains)
-  data.table::fwrite(step3_dt,     step3_ev)
-  data.table::fwrite(step3_tok_dt, step3_tok)
-  cat(sprintf("  Pre-reconcile events → %s (%d events)\n",    step3_ev,  nrow(step3_dt)))
-  cat(sprintf("  Post-scan tokens     → %s (%d tokens)\n\n",  step3_tok, nrow(step3_tok_dt)))
+  if (full_chain) {
+    step3_ev  <- paste0(stem, "_step3_events.csv")
+    step3_tok <- paste0(stem, "_step3_tokens_post_scan.csv")
+    step3_dt  <- scan_events_to_dt(scan_results)
+    step3_tok_dt <- tokens_to_dt(canonical_chains)
+    data.table::fwrite(step3_dt,     step3_ev)
+    data.table::fwrite(step3_tok_dt, step3_tok)
+    cat(sprintf("  Pre-reconcile events → %s (%d events)\n",    step3_ev,  nrow(step3_dt)))
+    cat(sprintf("  Post-scan tokens     → %s (%d tokens)\n\n",  step3_tok, nrow(step3_tok_dt)))
+  }
 
   # ── Step 4: Reconcile ─────────────────────────────────────────────────────────
   cat("[chain] Step 4: Reconciling other events (unresolved LOH/peaks) ...\n")
@@ -643,7 +687,9 @@ if (opts[["chain-all"]]) {
     snp_peaks    = results$snp_peaks
   )
 
-  step4_ev <- paste0(stem, "_step4_final_events.csv")
+  # Under --chain-all the events table is one of many step CSVs (stem-named);
+  # under --events-table it is the single requested output, written to out_path.
+  step4_ev <- if (full_chain) paste0(stem, "_step4_final_events.csv") else out_path
   final_events <- build_event_table(rec$events)
   data.table::fwrite(final_events, step4_ev)
   cat(sprintf("  Final events     → %s (%d total; %d high, %d review)\n",
@@ -651,7 +697,7 @@ if (opts[["chain-all"]]) {
               sum(final_events$confidence == "high"),
               sum(final_events$confidence == "review")))
 
-  if (length(rec$unclaimed_loh) > 0) {
+  if (full_chain && length(rec$unclaimed_loh) > 0) {
     step4_ul <- paste0(stem, "_step4_other_events_loh.csv")
     uncl_loh <- data.table::rbindlist(lapply(rec$unclaimed_loh, function(u)
       data.table::data.table(
@@ -667,7 +713,7 @@ if (opts[["chain-all"]]) {
     cat(sprintf("  Other events (LOH)   → %s (%d segments)\n", step4_ul, nrow(uncl_loh)))
   }
 
-  if (length(rec$unclaimed_peaks) > 0) {
+  if (full_chain && length(rec$unclaimed_peaks) > 0) {
     step4_up <- paste0(stem, "_step4_other_events_peaks.csv")
     uncl_pk <- data.table::rbindlist(lapply(rec$unclaimed_peaks, function(u)
       data.table::data.table(
@@ -703,6 +749,7 @@ if (opts[["chain-all"]]) {
   cat("\n── Chain analysis complete ───────────────────────────────────────────────────\n")
 
   # Deferred "Done." — the non-chain path prints this right after writing the
-  # main output; in deferred-PNG mode the PNG is saved above, so print it here.
-  if (output_mode == "png") cat("Done.\n")
+  # main output; here the PNG (deferred --chain-all) or the events table
+  # (--events-table) is written above, so print it now.
+  if (output_mode %in% c("png", "events")) cat("Done.\n")
 }
