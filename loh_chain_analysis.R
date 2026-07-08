@@ -342,6 +342,17 @@ build_raw_chains <- function(loh_segments, chr_span, params,
         annotate_terminal(last_i, .nearest_nonfixed_left(tokens, last_i))
     }
 
+    # ── Interstitial fixed tokens: flank-relative depth ratio ─────────────────
+    # For every HET-bounded (non-terminal) fixed tract, store the ratio of its
+    # depth to the higher of its two HET flanks. The interstitial-deletion rule
+    # (Rd) uses this to separate a hemizygous deletion (depth ~halved) from a
+    # copy-neutral LOH tract (depth preserved). Computed from the same
+    # coverage_table the terminal ratios use; skipped (NA) when unavailable.
+    for (fi in which(vapply(tokens, `[[`, character(1), "type") == "F")) {
+      fr <- .interstitial_flank_depth_ratio(tokens, fi, chr_name, coverage_table)
+      if (!is.na(fr)) tokens[[fi]]$meta$flank_depth_ratio <- fr
+    }
+
     make_chain(tokens, chr_name, chr_len,
                snp_start = first_pos, snp_end = last_pos)
   })
@@ -905,6 +916,31 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   tok$meta$terminal_depth_ratio %||% tok$depth_ratio
 }
 
+# Flank-relative depth ratio for an INTERSTITIAL fixed token: the token's mean
+# real read depth divided by the *higher* of its two nearest non-fixed (HET)
+# flank depths (skipping unscored G gaps). A hemizygous deletion of one homolog
+# yields a fixed-allele tract whose total depth is ~half its flanking diploid
+# regions; a copy-neutral LOH tract (gene conversion / crossover) keeps full
+# depth, giving a ratio near 1. The MAX flank — not the average — is the
+# reference so a genuine ~half-depth deletion is still detected when one flank
+# is itself depth-depressed (e.g. a short sub-telomeric HET stretch that
+# sequences shallow for reasons unrelated to copy number). Returns NA unless a
+# coverage_table was supplied and both flanks are HET-resolvable.
+.interstitial_flank_depth_ratio <- function(tokens, idx, chr_name, coverage_table) {
+  li <- .nearest_nonfixed_left(tokens, idx)
+  ri <- .nearest_nonfixed_right(tokens, idx)
+  if (is.null(li) || is.null(ri)) return(NA_real_)   # not HET-bounded both sides
+  d_f <- .lookup_mean_depth(coverage_table, chr_name,
+                            tokens[[idx]]$start, tokens[[idx]]$end)
+  d_l <- .lookup_mean_depth(coverage_table, chr_name,
+                            tokens[[li]]$start, tokens[[li]]$end)
+  d_r <- .lookup_mean_depth(coverage_table, chr_name,
+                            tokens[[ri]]$start, tokens[[ri]]$end)
+  ref <- suppressWarnings(max(d_l, d_r, na.rm = TRUE))
+  if (is.na(d_f) || !is.finite(ref) || ref <= 0) return(NA_real_)
+  d_f / ref
+}
+
 # TRUE for any token that is not fixed LOH — H (called HET) and G (unscored
 # gap) are both treated as non-fixed context for motif matching.  In real data,
 # loh_segments only contains SNP-position rows; the coordinate stretches between
@@ -1015,6 +1051,38 @@ rule_terminal_deletion <- list(
                       list(m$f_tok),
                       notes = sprintf("depth_ratio=%.2f < %.2f",
                                       .terminal_depth_ratio(m$f_tok), params$depth_drop))
+    list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
+  }
+)
+
+# Rule 1i: Interstitial deletion — H [F] H with a real depth drop.
+# A hemizygous deletion of one homolog leaves a fixed-allele tract (the retained
+# homolog's SNPs, so the region reads as REF_fixed or ALT_fixed) whose total
+# read depth is ~half that of the flanking diploid HET regions. That depth drop
+# is what separates it from a copy-neutral LOH tract (gene conversion /
+# crossover), which keeps full depth. Uses SNP-site coverage only — no CNV or
+# breakpoint modelling — so it fires only on a clear drop below params$depth_drop
+# vs. the higher HET flank, and is reported at "review" confidence. Placed above
+# the recombination rules so a genuinely deleted tract is not mis-called as a
+# gene conversion when a coincident peak sits inside it.
+rule_interstitial_deletion <- list(
+  id = "Rd_interstitial_deletion",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+    # HET-bounded on both sides (skipping unscored G gaps). A TEL-adjacent
+    # fixed tract is a terminal deletion (R01), handled above — not here.
+    if (is.null(.nearest_nonfixed_left(tokens, i)) ||
+        is.null(.nearest_nonfixed_right(tokens, i))) return(NULL)
+    dr <- tok$meta$flank_depth_ratio
+    if (is.null(dr) || is.na(dr) || dr >= params$depth_drop) return(NULL)
+    list(span = i, f_tok = tok, ratio = dr)
+  },
+  fire_fn = function(m, chain, params) {
+    ev <- .make_event("DELETION", chain$chrom, list(m$f_tok),
+                      notes = sprintf(paste0("interstitial hemizygous deletion; ",
+                                             "flank_depth_ratio=%.2f < %.2f (SNP-site depth)"),
+                                      m$ratio, params$depth_drop))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
   }
 )
@@ -2182,6 +2250,7 @@ rule_loh_crossover <- list(
 MOTIF_RULES <- list(
   rule_opp_sandwich,             # R06 — small opposite-state fragment nested in a same-state run
   rule_terminal_deletion,        # R01
+  rule_interstitial_deletion,    # Rd — HET-bounded fixed tract at ~half depth (hemizygous deletion)
   rule_tco_captured_tco,         # R03 — terminal CO over an earlier terminal CO
   rule_terminal_loh,             # R02
   rule_terminal_loh_gapped,      # R02g — terminal LOH whose internal switch falls in a SNP gap

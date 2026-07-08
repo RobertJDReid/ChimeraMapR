@@ -6,6 +6,16 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [Unreleased]
 
+- Added an interstitial hemizygous-deletion call (`DELETION`, rendered as a
+  `Δ` on the overview map). A HET-bounded fixed-allele LOH tract whose
+  SNP-site read depth drops below `depth_drop` (default 0.60) of its higher
+  HET flank is labeled a deletion of the missing homolog rather than a
+  copy-neutral LOH tract. Uses the existing SNP-position coverage map only
+  (no BAM/CNV/breakpoint modelling), so it is reported at `review`
+  confidence. The higher of the two flanks is used as the diploid reference
+  so a short depth-depressed (e.g. sub-telomeric) flank does not mask a real
+  drop. Complements the existing terminal-deletion rule (R01).
+
 ## [0.7.0] - 2026-07-07
 
 - Ported the beta-binomial EM + Viterbi LOH HMM to Rcpp/C++ for speed.

@@ -972,6 +972,7 @@ EVENT_SYMBOL_MAP <- c(
   CO_TERM_PROBABLE         = "TCO?",
   TCO_CAPTURED_TCO         = "2 X TCO",
   TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA
+  DELETION                 = "Δ",  # interstitial hemizygous deletion (HET-bounded, ~half depth)
   `AMBIGUOUS(low_coverage)` = "?"  # low spanning reads; shown as review marker
 )
 
