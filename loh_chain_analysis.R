@@ -1095,17 +1095,25 @@ rule_terminal_loh <- list(
     n_spanning <- if (is.null(n_raw) || is.na(n_raw)) NA_integer_ else as.integer(n_raw)
     has_count  <- !is.na(n_spanning) && n_spanning > 0L
 
-    # Terminal LOH has a single haplotype boundary: the expected peak pattern
-    # is "binary" (one clean switch, e.g. REF→ALT).  gene_conversion and
-    # crossover patterns imply internal events, not a terminal boundary.
-    # "undefined" means classify_peak_haplotype lacked sufficient SNP coverage
-    # to determine the switch pattern — still a probable terminal event.
+    # A terminal LOH tract reaching the telomere IS a terminal LOH/crossover —
+    # that is the defining evidence, independent of the junction peak's fine
+    # structure. A clean "binary" switch is the textbook case, but a
+    # gene_conversion / crossover edge type at the boundary does not negate the
+    # terminal event: it almost always reflects a tiny artifactual HET (or
+    # opposite-state) island sitting right at the junction, which biases the
+    # per-peak read classifier away from "binary" even though the tract still
+    # runs to the telomere (see RAD5_v2_04 chrXIV @363616, chrXVI @156908).
+    # So any resolved switch-type junction peak → CO_TERM; only a genuinely
+    # unresolvable edge type is left ambiguous. "undefined" (too little SNP
+    # coverage to type the switch) stays CO_TERM_PROBABLE (review confidence).
+    known_switch <- !is.null(edge_type) && !is.na(edge_type) &&
+      edge_type %in% c("binary", "gene_conversion", "crossover", "internal_crossover")
     call <- if (has_count && n_spanning < params$min_span) {
       "AMBIGUOUS(low_coverage)"
-    } else if (!is.null(edge_type) && !is.na(edge_type) && edge_type == "binary") {
-      "CO_TERM"
     } else if (is.null(edge_type) || is.na(edge_type) || edge_type == "undefined") {
       "CO_TERM_PROBABLE"
+    } else if (known_switch) {
+      "CO_TERM"
     } else {
       paste0("AMBIGUOUS(terminal_non_binary_peak:", edge_type, ")")
     }
@@ -1116,6 +1124,86 @@ rule_terminal_loh <- list(
                       notes = paste0("terminal; edge=", edge_type %||% "NA"))
     list(event = ev, rewrite = NULL,
          claims = list(peak = m$peak, loh = m$f_tok))
+  }
+)
+
+# Rule 2g: Terminal LOH whose internal haplotype switch falls in a SNP gap.
+#
+# Pattern (forward):  H [F:X ●binary] {G} [F:Y] ... {G} [F:Z]{tel}
+#         (reverse): {tel}[F:Z] ... [F:Y] {G} [●binary F:X] H
+#
+# A terminal LOH tract can carry an internal allele switch (X→Y, e.g. ALT→REF)
+# whose junction lands in a wide SNP-desert gap, so no chimeric-read peak can
+# ever mark it — while the tract's PROXIMAL (H-facing) boundary does carry a
+# clean binary switch peak. R02 can't fire (the telomere-reaching F is peakless
+# and non-adjacent to the H); R03 can't fire (it needs a peak on BOTH of the
+# small LOH's junctions). The tract still runs to the telomere, so it is a
+# terminal LOH/crossover. We walk from the binary-peaked proximal F across G
+# gaps and further F tokens (of ANY state — the whole point is that the switch
+# is real but unobservable) to a telomere-reaching F, and call CO_TERM.
+# Requires >= 2 F tokens so it never competes with R02's single-F terminal.
+rule_terminal_loh_gapped <- list(
+  id = "R02g_terminal_loh_gapped",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+
+    # Collect a run of F tokens starting at i, walking one direction through
+    # G gaps only (no intervening H — that would be a real, peak-able boundary
+    # this rule must not swallow). Returns the {toks, last_idx} reached.
+    walk_run <- function(dir) {
+      run       <- list(tok)
+      last_idx  <- i
+      repeat {
+        nf <- if (dir == "fwd") .nearest_fixed_right(tokens, last_idx)
+              else              .nearest_fixed_left(tokens, last_idx)
+        if (is.null(nf)) break
+        # only G tokens may separate the F run (an intervening H is a real,
+        # peak-able boundary this rule must not swallow)
+        lo <- min(last_idx, nf) + 1L; hi <- max(last_idx, nf) - 1L
+        if (hi >= lo && any(vapply(tokens[lo:hi], function(t) t$type == "H", logical(1))))
+          break
+        run <- c(run, list(tokens[[nf]])); last_idx <- nf
+      }
+      list(run = run, last_idx = last_idx)
+    }
+
+    try_dir <- function(dir) {
+      # Proximal binary junction peak on the H-facing side of tok.
+      ctx_i <- if (dir == "fwd") .nearest_nonfixed_left(tokens, i)
+               else              .nearest_nonfixed_right(tokens, i)
+      if (is.null(ctx_i)) return(NULL)
+      pk <- if (dir == "fwd") .left_junction_peak(tok, tokens[[ctx_i]], params)
+            else               .right_junction_peak(tok, tokens[[ctx_i]], params)
+      if (is.null(pk)) return(NULL)
+      et <- pk$best_edge_type %||% pk$edge_type
+      if (!isTRUE(et == "binary")) return(NULL)
+      if (is.na(.terminal_depth_ratio(tok)) ||
+          .terminal_depth_ratio(tok) < params$depth_drop) return(NULL)
+
+      w <- walk_run(dir)
+      if (length(w$run) < 2L) return(NULL)                       # need a gap-split continuation
+      distal <- tokens[[w$last_idx]]
+      if (!.is_telomeric(distal, chain, params)) return(NULL)    # must reach the telomere
+      if (.has_peak(distal)) return(NULL)                        # distal switch is genuinely peakless
+
+      span <- range(c(i, w$last_idx, ctx_i))
+      list(span = span, f_toks = w$run, peak = pk, direction = dir)
+    }
+
+    m <- try_dir("fwd"); if (!is.null(m)) return(m)
+    try_dir("rev")
+  },
+  fire_fn = function(m, chain, params) {
+    n_raw      <- m$peak$n_spanning %||% NA_integer_
+    n_spanning <- if (is.null(n_raw) || is.na(n_raw)) NA_integer_ else as.integer(n_raw)
+    ev <- .make_event("CO_TERM", chain$chrom, m$f_toks,
+                      evidence_peaks = list(m$peak),
+                      n_support = n_spanning,
+                      notes = paste0("terminal LOH; internal allele switch in a ",
+                                     "SNP-gap (no junction peak); proximal boundary binary"))
+    list(event = ev, rewrite = NULL,
+         claims = list(peak = m$peak, loh = m$f_toks))
   }
 )
 
@@ -2096,6 +2184,7 @@ MOTIF_RULES <- list(
   rule_terminal_deletion,        # R01
   rule_tco_captured_tco,         # R03 — terminal CO over an earlier terminal CO
   rule_terminal_loh,             # R02
+  rule_terminal_loh_gapped,      # R02g — terminal LOH whose internal switch falls in a SNP gap
   rule_tel_adjacent_het_loh,     # R02c — CO_TERM_PROBABLE: TEL [H] [F●], HET interposed by misalignment
   # rule_terminal_no_peak disabled: without a chimeric peak at the TEL boundary
   # there is no positive evidence for a crossover mechanism.  Leave unclaimed →
@@ -2111,61 +2200,145 @@ MOTIF_RULES <- list(
 )
 
 # =============================================================================
-#  STEP 4 — SCAN A SINGLE CHAIN
+#  STEP 4 — SCAN A SINGLE CHAIN  (candidate generation + global resolver)
 # =============================================================================
+#
+#  Design (see the module header / MOTIF_RULES priority notes): instead of a
+#  greedy left-to-right pass where the FIRST rule to reach a shared peak (by
+#  scan position) wins it, the scan is split into three phases:
+#
+#    1. PROPOSE  — every rule is run at every anchor position, read-only. Each
+#                  match becomes a *candidate* carrying the event it would fire,
+#                  the evidence it would consume (peak positions + F-token
+#                  identities), whether it rewrites the chain, and a score.
+#    2. RESOLVE  — a single global selector picks the highest-scoring set of
+#                  candidates that do not contend for the same evidence. Rule
+#                  priority (MOTIF_RULES order) becomes the score, so conflicts
+#                  are settled by an explicit, inspectable objective rather than
+#                  by which anchor the cursor happened to reach first.
+#    3. APPLY    — chosen events are committed. Structural rewrites (R06 flank
+#                  merges) are applied one at a time, re-canonicalising and
+#                  regenerating candidates, so "events within events" resolve by
+#                  peeling the chain to a fixpoint before the terminal /
+#                  interstitial rules are committed on the simplified chain.
+#
+#  Two candidates CONFLICT when they would claim the same chimeric-read peak
+#  (peaks are shared observations that back a single event) OR the same fixed
+#  (F) LOH token (each LOH tract gets one call). This reproduces the exclusivity
+#  the old advancing cursor gave for free — e.g. R01 and R10 can no longer both
+#  claim one terminal F — without making it depend on scan order.
+
+# Evidence keys a fired candidate would consume: peak positions + F-token ids.
+# Used by the resolver to detect conflicts and by the caller to claim peaks.
+.fired_claim_keys <- function(fired, peak_pos) {
+  keys <- character(0)
+  if (length(peak_pos))
+    keys <- c(keys, paste0("pk:", format(peak_pos, scientific = FALSE, trim = TRUE)))
+  loh <- fired$claims$loh
+  if (!is.null(loh)) {
+    # claims$loh is either a single token (has $type) or a list of tokens
+    toks <- if (!is.null(loh$type)) list(loh) else loh
+    for (t in toks) {
+      if (!is.null(t) && !is.null(t$start) && !is.na(t$start))
+        keys <- c(keys, paste0("loh:", t$start, "-", t$end))
+    }
+  }
+  keys
+}
+
+# Priority score: earlier rules in MOTIF_RULES score higher, so the resolver
+# prefers the same rule the old priority-ordered pass preferred when two
+# candidates contend for the same evidence.
+.candidate_score <- function(rule_idx, n_rules) {
+  (n_rules - rule_idx + 1L) * 1000L
+}
+
+# PROPOSE: run every rule at every position over the current token list,
+# read-only. Skips matches whose peaks are already claimed. Fires each match
+# once (fire_fn is pure) to learn the event, rewrite spec, and claim keys.
+.generate_candidates <- function(tokens, chain, params, rules, claimed_peak_pos) {
+  cands <- list()
+  for (ri in seq_along(rules)) {
+    rule <- rules[[ri]]
+    for (i in seq_along(tokens)) {
+      m <- rule$match_fn(tokens, i, chain, params)
+      if (is.null(m)) next
+      pk_pos <- .peak_pos_from_match(m)
+      if (length(pk_pos) && any(pk_pos %in% claimed_peak_pos)) next
+      fired <- rule$fire_fn(m, chain, params)
+      cands[[length(cands) + 1L]] <- list(
+        rule_idx = ri, match = m, fired = fired,
+        peak_pos = pk_pos,
+        keys     = .fired_claim_keys(fired, pk_pos),
+        is_rewrite = !is.null(fired$rewrite),
+        score    = .candidate_score(ri, length(rules))
+      )
+    }
+  }
+  cands
+}
+
+# RESOLVE: greedy weighted selection — accept candidates by descending score,
+# skipping any whose evidence keys overlap an already-accepted candidate.
+# Ties (equal score, i.e. same rule) break by generation order, which is
+# position order — matching the old "lower position first" behaviour.
+.resolve_candidates <- function(cands) {
+  if (!length(cands)) return(list())
+  ord <- order(vapply(cands, `[[`, numeric(1), "score"), decreasing = TRUE)
+  accepted <- list()
+  used     <- character(0)
+  for (k in ord) {
+    ck <- cands[[k]]$keys
+    if (length(ck) && any(ck %in% used)) next
+    accepted[[length(accepted) + 1L]] <- cands[[k]]
+    used <- c(used, ck)
+  }
+  accepted
+}
 
 scan_chain <- function(chain, params, rules = MOTIF_RULES) {
-  tokens  <- chain$tokens
-  events  <- list()
-  # Track claimed peaks by their position (proxy for identity)
+  tokens <- chain$tokens
+  chain$tokens <- tokens
+  events <- list()
   claimed_peak_pos <- numeric(0)
 
-  i <- 1L
-  while (i <= length(tokens)) {
-    hit <- NULL
+  commit <- function(cand) {
+    fired <- cand$fired
+    new_events <- if (!is.null(fired$events)) fired$events else list(fired$event)
+    events <<- c(events, new_events)
+    claimed_peak_pos <<- unique(c(claimed_peak_pos, cand$peak_pos))
+  }
 
-    for (rule in rules) {
-      m <- rule$match_fn(tokens, i, chain, params)
-      if (!is.null(m)) {
-        # Check peak has not already been claimed
-        pk_pos <- .peak_pos_from_match(m)
-        if (any(pk_pos %in% claimed_peak_pos)) { m <- NULL; next }
-        hit <- list(match = m, rule = rule)
-        break
-      }
+  repeat {
+    cands  <- .generate_candidates(tokens, chain, params, rules, claimed_peak_pos)
+    if (!length(cands)) break
+    chosen <- .resolve_candidates(cands)
+    if (!length(chosen)) break
+
+    # Phase 1 — structural simplification. Apply the highest-scoring rewrite
+    # (chosen is already score-ordered), then re-canonicalise and regenerate so
+    # the terminal/interstitial rules see the peeled, unified chain. Only the
+    # rewrite's own events are committed here; other chosen candidates are
+    # deferred to the next round on the simplified chain.
+    rw <- Find(function(c) c$is_rewrite, chosen)
+    if (!is.null(rw)) {
+      commit(rw)
+      span <- rw$fired$rewrite$span
+      repl <- rw$fired$rewrite$replacement
+      tokens <- c(tokens[seq_len(span[1] - 1L)],
+                  repl,
+                  if (span[2] < length(tokens))
+                    tokens[seq.int(span[2] + 1L, length(tokens))]
+                  else list())
+      chain$tokens <- tokens
+      chain        <- canonicalise(chain, params)
+      tokens       <- chain$tokens
+      next
     }
 
-    if (!is.null(hit)) {
-      fired <- hit$rule$fire_fn(hit$match, chain, params)
-      # Most rules fire a single event (fired$event); R06 can walk a chain of
-      # several embedded excursions in one match and report each as its own
-      # event via fired$events (a list) instead.
-      new_events <- if (!is.null(fired$events)) fired$events else list(fired$event)
-      events <- c(events, new_events)
-
-      # Claim peaks
-      new_pk_pos <- .peak_pos_from_match(hit$match)
-      claimed_peak_pos <- unique(c(claimed_peak_pos, new_pk_pos))
-
-      if (!is.null(fired$rewrite)) {
-        span <- fired$rewrite$span
-        repl <- fired$rewrite$replacement
-        tokens <- c(tokens[seq_len(span[1] - 1L)],
-                    repl,
-                    if (span[2] < length(tokens))
-                      tokens[seq.int(span[2] + 1L, length(tokens))]
-                    else list())
-        # Re-canonicalise after rewrite
-        chain$tokens <- tokens
-        chain        <- canonicalise(chain, params)
-        tokens       <- chain$tokens
-        i            <- max(1L, span[1] - 1L)   # back up to check new neighbours
-      } else {
-        i <- hit$match$span[2] + 1L
-      }
-    } else {
-      i <- i + 1L
-    }
+    # Phase 2 — no rewrites remain: commit every chosen (non-conflicting) event.
+    for (c in chosen) commit(c)
+    break
   }
 
   list(chain  = chain,
