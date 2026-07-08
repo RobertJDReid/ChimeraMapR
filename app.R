@@ -2005,6 +2005,34 @@ server <- function(input, output, session) {
     setorder(plot_df, read_id, pos)
     results$selected_region_data <- copy(plot_df)
 
+    x_lims <- c(plot_start, plot_end) / 1000
+
+    # ── LOH strip (bottom band) ────────────────────────────────────────────────
+    # Mirrors the fixed-haplotype LOH band on the Overview plot.  Because every
+    # read_id facet here is the SAME chromosome, the LOH band is shared across
+    # the whole plot and rendered as a single strip beneath the reads (via
+    # patchwork), rather than a per-facet geom_rect as on the Overview plot.
+    # loh_segments may be NULL if the LOH analysis has not been run yet.
+    s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
+      results$strain_ref else "REF"
+    s_alt <- if (!is.null(results$strain_alt) && nzchar(results$strain_alt))
+      results$strain_alt else "ALT"
+
+    loh_win <- data.table()
+    if (!is.null(results$loh_segments) && nrow(results$loh_segments) > 0) {
+      loh_win <- copy(results$loh_segments[
+        as.character(chrom) == reg$chrom &
+          loh_state %in% c("REF_fixed", "ALT_fixed") &
+          end >= plot_start & start <= plot_end
+      ])
+      if (nrow(loh_win) > 0) {
+        # Clip each segment to the padded display window and convert to Kb
+        loh_win[, xmin := pmax(start, plot_start) / 1000]
+        loh_win[, xmax := pmin(end,   plot_end)   / 1000]
+      }
+    }
+    has_loh_strip <- nrow(loh_win) > 0
+
     p <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
       geom_vline(xintercept = reg$start / 1000,
                  color = "grey60", linewidth = 0.8, linetype = 2) +
@@ -2013,6 +2041,7 @@ server <- function(input, output, session) {
       geom_point() +
       facet_grid(read_id ~ .) +
       scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+      scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
       theme_bw() +
       theme(
         axis.text.y      = element_blank(),
@@ -2036,7 +2065,44 @@ server <- function(input, output, session) {
         round(plot_end   / 1000, 2), " Kb)"
       ))
 
-    results$selected_region_plot <- p
+    if (has_loh_strip) {
+      # Blank the read panel's x-axis; the LOH strip below carries it.
+      p <- p + theme(
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank()
+      )
+
+      p_loh <- ggplot(loh_win) +
+        geom_rect(aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = 1,
+                      fill = loh_state), alpha = 0.85) +
+        geom_vline(xintercept = reg$start / 1000,
+                   color = "grey60", linewidth = 0.8, linetype = 2) +
+        geom_vline(xintercept = reg$end / 1000,
+                   color = "grey60", linewidth = 0.8, linetype = 2) +
+        scale_fill_manual(
+          values = c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick"),
+          labels = c(REF_fixed = s_ref, ALT_fixed = s_alt),
+          name   = "LOH",
+          drop   = FALSE
+        ) +
+        coord_cartesian(xlim = x_lims, ylim = c(0, 1), expand = FALSE) +
+        labs(x = "Position (Kbp)", y = "LOH") +
+        theme_bw() +
+        theme(
+          axis.text.y      = element_blank(),
+          axis.ticks.y     = element_blank(),
+          panel.grid       = element_blank(),
+          legend.position  = "bottom",
+          legend.title     = element_text(face = "bold")
+        )
+
+      results$selected_region_plot <- patchwork::wrap_plots(
+        p, p_loh, ncol = 1, heights = c(9, 1)
+      )
+    } else {
+      results$selected_region_plot <- p
+    }
 
     if (!"Selected Region" %in% isolate(input$main_tabs)) {
       insertTab(
@@ -2048,7 +2114,7 @@ server <- function(input, output, session) {
           title = "Selected Region",
           value = "Selected Region",
           h4("Regional Read Plot"),
-          helpText("Shows all chimeric reads touching the selected interval, plotted in a padded display window."),
+          helpText("Shows all chimeric reads touching the selected interval, plotted in a padded display window. When LOH analysis has been run, a fixed-haplotype LOH strip is shown beneath the reads (blue = REF, red = ALT)."),
           plotOutput("selected_region_plot", height = "800px"),
           br(),
           fluidRow(
