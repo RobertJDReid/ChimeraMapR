@@ -348,7 +348,8 @@ results$ploidy_map  <- ploidy_map
 # reused (not recomputed) by --chain-all's compute_peak_pairs() below.
 results$snp_peaks <- label_snp_peaks_haplotypes(
   results$snp_peaks, results$rt_df, results$transition_pos,
-  zone_min_snps = opts[["min-run"]]
+  zone_min_snps = opts[["min-run"]],
+  full_read_loh = results$full_read_loh
 )
 
 
@@ -608,7 +609,8 @@ if (run_chain) {
     transition_pos = results$transition_pos,
     loh_segments   = loh_segs,
     zone_min_snps  = as.integer(opts[["min-run"]]),
-    homog_frac     = cp$homog_frac
+    homog_frac     = cp$homog_frac,
+    full_read_loh  = results$full_read_loh
   )
   # Update snp_peaks with the labels compute_peak_pairs assigned so downstream
   # steps (chain build, reconcile, CSV export) see them.

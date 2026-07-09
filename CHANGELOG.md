@@ -6,6 +6,22 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [Unreleased]
 
+- Phase-based rescue of `undefined` peaks. When a peak's consensus run pattern
+  is a HET-bounded fixed-allele island (e.g. the `REF-HET-ALT-HET` signature a
+  broad smoothed peak produces when it straddles an LOH island plus a
+  neighbouring tract), `classify_peak_haplotype()` now phases every read
+  spanning the island by its left- and right-flank majority allele instead of
+  relying on population consensus — which reads HET on both flanks because the
+  two reciprocal crossover orientations average out. A switch fraction
+  `>= 0.80` is relabeled `internal_crossover` (crossover), `<= 0.20`
+  `gene_conversion` (NCO); otherwise the peak stays `undefined`. This uses all
+  reads (`full_read_loh`), so non-switching reads stay in the denominator —
+  the ratio that separates a crossover from a fixed conversion patch on a het
+  background. New `phase_call` / `phase_switch_frac` columns are surfaced in
+  the peak table and the switch fraction is carried into the Recombination
+  Events table. `full_read_loh` is threaded through
+  `label_snp_peaks_haplotypes()` / `compute_peak_pairs()`; when absent the
+  prior `undefined` behaviour is unchanged.
 - Added an interstitial hemizygous-deletion call (`DELETION`, rendered as a
   `Δ` on the overview map). A HET-bounded fixed-allele LOH tract whose
   SNP-site read depth drops below `depth_drop` (default 0.60) of its higher

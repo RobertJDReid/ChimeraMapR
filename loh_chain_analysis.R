@@ -420,6 +420,13 @@ build_raw_chains <- function(loh_segments, chr_span, params,
       if (is.na(bet) || bet == "singleton") hal else bet
     },
     haplotype_label = if ("haplotype_label" %in% names(chr_fp)) haplotype_label[1] else NA_character_,
+    # Read-phasing evidence for peaks rescued from "undefined" by
+    # classify_peak_haplotype()'s resolve_undefined_by_phase(): the finer
+    # verdict ("crossover (reciprocal)" / "gene_conversion (NCO)" / ...) and
+    # the fraction of spanning reads that switch haplotype across the island.
+    # NA for peaks classified from consensus alone.
+    phase_call        = if ("phase_call"        %in% names(chr_fp)) phase_call[1]        else NA_character_,
+    phase_switch_frac = if ("phase_switch_frac" %in% names(chr_fp)) phase_switch_frac[1] else NA_real_,
     n_spanning        = 0L,
     jaccard           = NA_real_,
     pair_edge_type    = NA_character_,
@@ -998,16 +1005,33 @@ classify_two_binary_junction <- function(left_peak, right_peak,
       p$best_edge_type %||% p$edge_type %||% "?")), collapse = ";")
   else NA_character_
 
+  # Read-phasing evidence carried from the associated peak(s): the largest
+  # per-read switch fraction across the event's peaks (NA when none was
+  # phase-resolved), i.e. the fraction of island-spanning reads that switched
+  # haplotype -- direct support for a CO/GC call rescued from "undefined".
+  # Gather peaks from evidence_peaks AND from the involved tokens' attached
+  # peaks (peak_over/left/right) so the fraction surfaces regardless of which
+  # rule fired the event or whether it passed evidence_peaks explicitly.
+  tok_peaks  <- unlist(lapply(tokens_involved, function(t)
+    list(t$peak_over, t$peak_left, t$peak_right)), recursive = FALSE)
+  all_peaks  <- c(evidence_peaks, tok_peaks)
+  phase_frac <- if (length(all_peaks) > 0) {
+    fr <- suppressWarnings(as.numeric(unlist(lapply(all_peaks, function(p)
+      if (is.null(p)) NA_real_ else p$phase_switch_frac %||% NA_real_))))
+    if (all(is.na(fr))) NA_real_ else max(fr, na.rm = TRUE)
+  } else NA_real_
+
   list(
-    event_class     = call,
-    chrom           = chrom,
-    start           = as.integer(ev_start),
-    end             = as.integer(ev_end),
-    length_bp       = as.integer(ev_end - ev_start),
-    n_support       = as.integer(n_support),
-    peak_edge_types = pk_edge,
-    notes           = notes,
-    tokens          = tokens_involved   # keep for downstream use / plotting
+    event_class       = call,
+    chrom             = chrom,
+    start             = as.integer(ev_start),
+    end               = as.integer(ev_end),
+    length_bp         = as.integer(ev_end - ev_start),
+    n_support         = as.integer(n_support),
+    peak_edge_types   = pk_edge,
+    phase_switch_frac = phase_frac,
+    notes             = notes,
+    tokens            = tokens_involved   # keep for downstream use / plotting
   )
 }
 
@@ -2552,6 +2576,7 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
         length_bp = 0L, n_support = tract$n_support,
         peak_edge_types = u$edge_type %||% NA_character_,
+        phase_switch_frac = u$phase_switch_frac %||% NA_real_,
         notes = "no_fixed_tract; peak_only", tokens = list())))
     } else {
       u$reason <- tract$reason
@@ -2598,6 +2623,7 @@ build_event_table <- function(events) {
       event_class = character(), chrom = character(),
       start = integer(), end = integer(), length_kb = numeric(),
       n_support = integer(), peak_edge_types = character(),
+      phase_switch_frac = numeric(),
       confidence = character(), notes = character()
     ))
 
@@ -2617,6 +2643,7 @@ build_event_table <- function(events) {
       length_kb       = round((as.integer(ev$end) - as.integer(ev$start)) / 1000, 3),
       n_support       = as.integer(ev$n_support),
       peak_edge_types = ev$peak_edge_types %||% NA_character_,
+      phase_switch_frac = ev$phase_switch_frac %||% NA_real_,
       confidence      = confidence,
       notes           = ev$notes %||% ""
     )

@@ -1317,8 +1317,93 @@ classify_run_pattern <- function(runs) {
   }
 }
 
+# ---------------------------------------------------------------------------
+# resolve_undefined_by_phase()
+#   Rescue an "undefined" peak whose consensus run pattern contains a FIX
+#   (REF- or ALT-fixed) island bounded by HET on both sides -- e.g. the
+#   REF-HET-ALT-HET signature produced when a broad smoothed peak straddles a
+#   het-flanked LOH island plus a neighbouring tract. Population consensus
+#   reads HET on both flanks (the two reciprocal crossover orientations
+#   average to ~0.5 at every flank SNP), so classify_run_pattern() can never
+#   type it. Individual reads can: phase every read spanning the island by its
+#   left- and right-flank majority allele and read the event off the L/R
+#   cross-tab.
+#
+#     switch fraction >= switch_hi, both directions -> reciprocal crossover
+#     switch fraction >= switch_hi, one direction   -> one-sided crossover
+#     switch fraction <= switch_lo (flanks agree)   -> gene conversion (NCO)
+#     otherwise                                     -> stays undefined
+#
+#   Requires full_read_loh (ALL reads, not just the already-chimeric rt_df) so
+#   non-switching reads land in the denominator -- that ratio is exactly what
+#   separates a crossover from a fixed conversion patch on a het background.
+#   The crossover verdict maps to the existing "internal_crossover" label and
+#   the NCO verdict to "gene_conversion", so downstream fusion / event calling
+#   handle them with no new label vocabulary.
+#
+#   Returns NULL when no rescue applies (caller keeps the undefined label),
+#   otherwise list(label, n_support, phase_call, phase_frac, phase_n,
+#   island_state).
+# ---------------------------------------------------------------------------
+resolve_undefined_by_phase <- function(seg_data, chr_name, full_read_loh,
+                                       win_start, win_end, zone_min_snps,
+                                       min_span, switch_hi, switch_lo) {
+  if (is.null(full_read_loh) || is.null(seg_data) || nrow(seg_data) < 3L)
+    return(NULL)
+
+  # ── Locate a HET-bounded FIX island in the consensus run structure ───────
+  # seg_data runs are in kb; run i spans [xmin_i, xmax_i) where xmax_i is the
+  # lead of the next run's xmin, so a middle FIX run's xmax is the next HET
+  # run's start.
+  s    <- as.character(seg_data$SNP_call)
+  prev <- data.table::shift(s,  1L)
+  nxt  <- data.table::shift(s, -1L)
+  cand <- which(s %in% c("REF", "ALT") & prev == "HET" & nxt == "HET")
+  if (length(cand) == 0L) return(NULL)
+  i         <- cand[which.max(seg_data$xmax[cand] - seg_data$xmin[cand])]  # widest island
+  isl_start <- seg_data$xmin[i] * 1000
+  isl_end   <- seg_data$xmax[i] * 1000
+  isl_state <- s[i]
+
+  # ── Phase every spanning read: left-flank vs right-flank majority allele ──
+  fr <- full_read_loh[as.character(chrom) == chr_name &
+                        pos >= win_start & pos <= win_end]
+  if (nrow(fr) == 0L) return(NULL)
+  ph <- fr[, .(
+    L = classify_zone_state(pos, IS_REF, win_start,    isl_start - 1L, zone_min_snps),
+    R = classify_zone_state(pos, IS_REF, isl_end + 1L, win_end,        zone_min_snps)
+  ), by = read_id][!is.na(L) & !is.na(R)]
+
+  n_span <- nrow(ph)
+  if (n_span < min_span) return(NULL)
+
+  n_switch <- sum(ph$L != ph$R)
+  frac     <- n_switch / n_span
+  n_RtoA   <- sum(ph$L == "REF" & ph$R == "ALT")
+  n_AtoR   <- sum(ph$L == "ALT" & ph$R == "REF")
+
+  if (frac >= switch_hi) {
+    list(label        = "internal_crossover",
+         n_support    = n_switch,
+         phase_call   = if (n_RtoA > 0L && n_AtoR > 0L) "crossover (reciprocal)"
+                        else                             "crossover (one-sided)",
+         phase_frac   = frac, phase_n = n_span, island_state = isl_state)
+  } else if (frac <= switch_lo) {
+    list(label        = "gene_conversion",
+         n_support    = n_span,
+         phase_call   = "gene_conversion (NCO)",
+         phase_frac   = frac, phase_n = n_span, island_state = isl_state)
+  } else {
+    NULL   # ambiguous switch fraction -- leave undefined
+  }
+}
+
 classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
-                                    zone_min_snps = 2L) {
+                                    zone_min_snps   = 2L,
+                                    full_read_loh   = NULL,
+                                    phase_min_span  = 5L,
+                                    phase_switch_hi = 0.80,
+                                    phase_switch_lo = 0.20) {
 
   snp_p    <- pk$snp_pos
   pk_start <- pk$peak_start
@@ -1488,13 +1573,40 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     }
   }
 
+  # ── Phase-based rescue for undefined het-bounded FIX islands ─────────────
+  # A REF-HET-ALT-HET-type consensus can't be typed from the pooled run
+  # pattern, but the reads spanning the FIX island can be phased individually
+  # (see resolve_undefined_by_phase). Only fires when full_read_loh is
+  # supplied; otherwise the undefined label stands, preserving prior behaviour.
+  phase_call   <- NA_character_
+  phase_frac   <- NA_real_
+  phase_n      <- NA_integer_
+  island_state <- NA_character_
+  if (label == "undefined") {
+    rescue <- resolve_undefined_by_phase(
+      seg_data, chr_name, full_read_loh, win_start, win_end,
+      zone_min_snps, phase_min_span, phase_switch_hi, phase_switch_lo)
+    if (!is.null(rescue)) {
+      label        <- rescue$label
+      n_support    <- rescue$n_support
+      phase_call   <- rescue$phase_call
+      phase_frac   <- rescue$phase_frac
+      phase_n      <- rescue$phase_n
+      island_state <- rescue$island_state
+    }
+  }
+
   list(
-    label     = label,
-    seg_data  = seg_data,
-    win_start = win_start,
-    win_end   = win_end,
-    expanded  = expanded,
-    n_support = n_support
+    label        = label,
+    seg_data     = seg_data,
+    win_start    = win_start,
+    win_end      = win_end,
+    expanded     = expanded,
+    n_support    = n_support,
+    phase_call   = phase_call,
+    phase_frac   = phase_frac,
+    phase_n      = phase_n,
+    island_state = island_state
   )
 }
 
@@ -1970,10 +2082,13 @@ decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
 #   are preserved as-is.
 # ---------------------------------------------------------------------------
 label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
-                                       zone_min_snps = 2L) {
+                                       zone_min_snps = 2L,
+                                       full_read_loh = NULL) {
   out <- copy(snp_peaks)
-  if (!"haplotype_label" %in% names(out)) out[, haplotype_label := NA_character_]
-  if (!"n_read_support"  %in% names(out)) out[, n_read_support  := NA_integer_]
+  if (!"haplotype_label"   %in% names(out)) out[, haplotype_label   := NA_character_]
+  if (!"n_read_support"    %in% names(out)) out[, n_read_support    := NA_integer_]
+  if (!"phase_call"        %in% names(out)) out[, phase_call        := NA_character_]
+  if (!"phase_switch_frac" %in% names(out)) out[, phase_switch_frac := NA_real_]
   if (nrow(out) == 0) return(out)
 
   out[, .row_idx := .I]
@@ -1994,10 +2109,13 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
         out[.row_idx == .pk$.row_idx, haplotype_label := "undefined"]
         next
       }
-      .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps)
+      .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps,
+                                      full_read_loh = full_read_loh)
       out[.row_idx == .pk$.row_idx, `:=`(
-        haplotype_label = .hap$label,
-        n_read_support  = .hap$n_support
+        haplotype_label   = .hap$label,
+        n_read_support    = .hap$n_support,
+        phase_call        = .hap$phase_call %||% NA_character_,
+        phase_switch_frac = .hap$phase_frac %||% NA_real_
       )]
     }
   }
@@ -2019,7 +2137,8 @@ compute_peak_pairs <- function(snp_peaks,
                                jaccard_threshold  = 0.20,
                                zone_min_snps      = 2L,
                                supervised_override = NULL,
-                               homog_frac          = 0.80) {
+                               homog_frac          = 0.80,
+                               full_read_loh       = NULL) {
 
   if (is.null(snp_peaks) || nrow(snp_peaks) == 0)
     return(list(peak_pairs = NULL, fused_peaks = NULL, snp_peaks = snp_peaks))
@@ -2035,7 +2154,8 @@ compute_peak_pairs <- function(snp_peaks,
   # label_snp_peaks_haplotypes() skips peaks that already carry a
   # haplotype_label (e.g. from the app's plot-building loop or the CLI's
   # prior step), so callers that do their own labeling first don't pay twice.
-  peaks_dt <- label_snp_peaks_haplotypes(peaks_dt, rt_df, transition_pos, zone_min_snps)
+  peaks_dt <- label_snp_peaks_haplotypes(peaks_dt, rt_df, transition_pos, zone_min_snps,
+                                         full_read_loh = full_read_loh)
 
   all_pairs <- list()
 

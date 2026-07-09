@@ -909,18 +909,21 @@ server <- function(input, output, session) {
             chr_name      = chr_name,
             rt_df         = res$rt_df,
             touching_ids  = touching_ids,
-            zone_min_snps = input$min_run
+            zone_min_snps = input$min_run,
+            full_read_loh = res$full_read_loh
           )
 
           # Record label for writing back to snp_peaks later (keyed by .row_idx
           # so skipped peaks safely receive NA on the join)
           hap_label_rows[[length(hap_label_rows) + 1L]] <<- data.table(
-            .row_idx         = pk$.row_idx,
-            haplotype_label  = hap$label,
-            hap_win_start    = hap$win_start,
-            hap_win_end      = hap$win_end,
-            hap_win_expanded = hap$expanded,
-            n_read_support   = hap$n_support
+            .row_idx          = pk$.row_idx,
+            haplotype_label   = hap$label,
+            hap_win_start     = hap$win_start,
+            hap_win_end       = hap$win_end,
+            hap_win_expanded  = hap$expanded,
+            n_read_support    = hap$n_support,
+            phase_call        = hap$phase_call %||% NA_character_,
+            phase_switch_frac = hap$phase_frac %||% NA_real_
           )
 
           # seg_data now comes from the classifier (window may be expanded)
@@ -1101,7 +1104,8 @@ server <- function(input, output, session) {
         jaccard_threshold  = input$jaccard_threshold,
         zone_min_snps      = zone_min_snps,
         supervised_override = supervised_approved(),
-        homog_frac         = input$homog_frac
+        homog_frac         = input$homog_frac,
+        full_read_loh      = results$full_read_loh
       )
 
       results$peak_pairs  <- fusion_res$peak_pairs
@@ -1200,7 +1204,8 @@ server <- function(input, output, session) {
         jaccard_threshold   = input$jaccard_threshold,
         zone_min_snps       = zone_min_snps,
         supervised_override = supervised_approved(),
-        homog_frac          = input$homog_frac
+        homog_frac          = input$homog_frac,
+        full_read_loh       = results$full_read_loh
       )
       results$peak_pairs  <- fusion_res$peak_pairs
       results$fused_peaks <- fusion_res$fused_peaks
