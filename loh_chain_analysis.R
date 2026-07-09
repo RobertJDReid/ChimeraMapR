@@ -427,6 +427,12 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     # NA for peaks classified from consensus alone.
     phase_call        = if ("phase_call"        %in% names(chr_fp)) phase_call[1]        else NA_character_,
     phase_switch_frac = if ("phase_switch_frac" %in% names(chr_fp)) phase_switch_frac[1] else NA_real_,
+    # Bounds of the excised FIX (LOH) island the phase rescue keyed on — the
+    # actual conversion/crossover tract. Used to recompute the reported event
+    # footprint (.make_event) so a rescued event covers this tract rather than
+    # the broad peak window or a neighbouring LOH tract the scanner anchored to.
+    phase_island_start = if ("phase_island_start" %in% names(chr_fp)) phase_island_start[1] else NA_integer_,
+    phase_island_end   = if ("phase_island_end"   %in% names(chr_fp)) phase_island_end[1]   else NA_integer_,
     n_spanning        = 0L,
     jaccard           = NA_real_,
     pair_edge_type    = NA_character_,
@@ -1020,6 +1026,21 @@ classify_two_binary_junction <- function(left_peak, right_peak,
       if (is.null(p)) NA_real_ else p$phase_switch_frac %||% NA_real_))))
     if (all(is.na(fr))) NA_real_ else max(fr, na.rm = TRUE)
   } else NA_real_
+
+  # ── Re-anchor the footprint of a phase-rescued event to its excised island ─
+  # A peak recovered from "undefined" carries the FIX (LOH) island bounds the
+  # phasing keyed on. The motif scanner may have matched an adjacent tract
+  # (e.g. the REF_fixed tract flanking a het-bounded ALT island), giving a span
+  # that doesn't even overlap the real event. When any involved peak supplies
+  # island bounds, report the event over that tract instead.
+  isl_starts <- suppressWarnings(as.integer(unlist(lapply(all_peaks, function(p)
+    if (is.null(p)) NA_integer_ else p$phase_island_start %||% NA_integer_))))
+  isl_ends   <- suppressWarnings(as.integer(unlist(lapply(all_peaks, function(p)
+    if (is.null(p)) NA_integer_ else p$phase_island_end   %||% NA_integer_))))
+  if (any(!is.na(isl_starts)) && any(!is.na(isl_ends))) {
+    ev_start <- min(isl_starts, na.rm = TRUE)
+    ev_end   <- max(isl_ends,   na.rm = TRUE)
+  }
 
   list(
     event_class       = call,
@@ -2571,10 +2592,16 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     tract <- classify_tract(list(best_edge_type = u$edge_type,
                                  n_spanning = u$n_read_support), params)
     if (tract$call %in% c("NCO_GC", "CO_GC")) {
+      # If phase-rescued, report the event over the excised island tract;
+      # otherwise it is a point event at the peak's SNP position.
+      u_isl_s <- u$phase_island_start
+      u_isl_e <- u$phase_island_end
+      ev_st <- if (!is.null(u_isl_s) && !is.na(u_isl_s)) as.integer(u_isl_s) else as.integer(u$snp_pos)
+      ev_en <- if (!is.null(u_isl_e) && !is.na(u_isl_e)) as.integer(u_isl_e) else as.integer(u$snp_pos)
       uncat_peak_events <- c(uncat_peak_events, list(list(
         event_class = paste0(tract$call, "_subres"), chrom = u$chrom,
-        start = as.integer(u$snp_pos), end = as.integer(u$snp_pos),
-        length_bp = 0L, n_support = tract$n_support,
+        start = ev_st, end = ev_en,
+        length_bp = as.integer(ev_en - ev_st), n_support = tract$n_support,
         peak_edge_types = u$edge_type %||% NA_character_,
         phase_switch_frac = u$phase_switch_frac %||% NA_real_,
         notes = "no_fixed_tract; peak_only", tokens = list())))

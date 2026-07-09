@@ -1341,34 +1341,50 @@ classify_run_pattern <- function(runs) {
 #   the NCO verdict to "gene_conversion", so downstream fusion / event calling
 #   handle them with no new label vocabulary.
 #
+#   The island is detected from the FULL-read consensus (all reads, not the
+#   chimeric subset), so it corresponds to a genuine population-level fixed
+#   LOH tract rather than a chimeric-read artifact -- the same signal the LOH
+#   HMM sees. Its bounds (isl_start, isl_end) are the FIX run's own first/last
+#   SNP positions, i.e. the excised LOH tract itself, and are returned so
+#   callers can report the rescued event over that tract rather than the broad
+#   smoothed peak window or a neighbouring LOH tract the motif scanner anchored
+#   to. A peak with no het-bounded fixed island in the full-read consensus
+#   (e.g. a fixed tract merely abutting a HET region) is NOT rescued.
+#
 #   Returns NULL when no rescue applies (caller keeps the undefined label),
 #   otherwise list(label, n_support, phase_call, phase_frac, phase_n,
-#   island_state).
+#   island_state, island_start, island_end).
 # ---------------------------------------------------------------------------
-resolve_undefined_by_phase <- function(seg_data, chr_name, full_read_loh,
-                                       win_start, win_end, zone_min_snps,
-                                       min_span, switch_hi, switch_lo) {
-  if (is.null(full_read_loh) || is.null(seg_data) || nrow(seg_data) < 3L)
-    return(NULL)
+resolve_undefined_by_phase <- function(chr_name, full_read_loh, win_start, win_end,
+                                       zone_min_snps, min_span, switch_hi, switch_lo) {
+  if (is.null(full_read_loh)) return(NULL)
 
-  # ── Locate a HET-bounded FIX island in the consensus run structure ───────
-  # seg_data runs are in kb; run i spans [xmin_i, xmax_i) where xmax_i is the
-  # lead of the next run's xmin, so a middle FIX run's xmax is the next HET
-  # run's start.
-  s    <- as.character(seg_data$SNP_call)
-  prev <- data.table::shift(s,  1L)
-  nxt  <- data.table::shift(s, -1L)
-  cand <- which(s %in% c("REF", "ALT") & prev == "HET" & nxt == "HET")
-  if (length(cand) == 0L) return(NULL)
-  i         <- cand[which.max(seg_data$xmax[cand] - seg_data$xmin[cand])]  # widest island
-  isl_start <- seg_data$xmin[i] * 1000
-  isl_end   <- seg_data$xmax[i] * 1000
-  isl_state <- s[i]
-
-  # ── Phase every spanning read: left-flank vs right-flank majority allele ──
   fr <- full_read_loh[as.character(chrom) == chr_name &
                         pos >= win_start & pos <= win_end]
   if (nrow(fr) == 0L) return(NULL)
+
+  # ── Locate a HET-bounded FIX island in the full-read consensus ───────────
+  # Per-position allele balance -> REF/ALT/HET (same thresholds as
+  # classify_peak_haplotype), run-length encoded; island bounds are the FIX
+  # run's own first/last SNP positions.
+  cons <- fr[, .(bal = mean(IS_REF)), by = pos][order(pos)]
+  cons[, SNP_call := data.table::fcase(bal < 0.2, "ALT", bal > 0.8, "REF",
+                                       default = "HET")]
+  cons[, run := data.table::rleid(SNP_call)]
+  runs <- cons[, .(SNP_call = SNP_call[1], pmin = min(pos), pmax = max(pos)),
+               by = run][order(run)]
+  if (nrow(runs) < 3L) return(NULL)
+  sv   <- runs$SNP_call
+  cand <- which(sv %in% c("REF", "ALT") &
+                data.table::shift(sv,  1L) == "HET" &
+                data.table::shift(sv, -1L) == "HET")
+  if (length(cand) == 0L) return(NULL)
+  k         <- cand[which.max(runs$pmax[cand] - runs$pmin[cand])]  # widest island
+  isl_start <- runs$pmin[k]
+  isl_end   <- runs$pmax[k]
+  isl_state <- sv[k]
+
+  # ── Phase every spanning read: left-flank vs right-flank majority allele ──
   ph <- fr[, .(
     L = classify_zone_state(pos, IS_REF, win_start,    isl_start - 1L, zone_min_snps),
     R = classify_zone_state(pos, IS_REF, isl_end + 1L, win_end,        zone_min_snps)
@@ -1382,17 +1398,17 @@ resolve_undefined_by_phase <- function(seg_data, chr_name, full_read_loh,
   n_RtoA   <- sum(ph$L == "REF" & ph$R == "ALT")
   n_AtoR   <- sum(ph$L == "ALT" & ph$R == "REF")
 
+  mk <- function(label, support, call)
+    list(label = label, n_support = support, phase_call = call,
+         phase_frac = frac, phase_n = n_span, island_state = isl_state,
+         island_start = as.integer(isl_start), island_end = as.integer(isl_end))
+
   if (frac >= switch_hi) {
-    list(label        = "internal_crossover",
-         n_support    = n_switch,
-         phase_call   = if (n_RtoA > 0L && n_AtoR > 0L) "crossover (reciprocal)"
-                        else                             "crossover (one-sided)",
-         phase_frac   = frac, phase_n = n_span, island_state = isl_state)
+    mk("internal_crossover", n_switch,
+       if (n_RtoA > 0L && n_AtoR > 0L) "crossover (reciprocal)"
+       else                            "crossover (one-sided)")
   } else if (frac <= switch_lo) {
-    list(label        = "gene_conversion",
-         n_support    = n_span,
-         phase_call   = "gene_conversion (NCO)",
-         phase_frac   = frac, phase_n = n_span, island_state = isl_state)
+    mk("gene_conversion", n_span, "gene_conversion (NCO)")
   } else {
     NULL   # ambiguous switch fraction -- leave undefined
   }
@@ -1582,9 +1598,11 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   phase_frac   <- NA_real_
   phase_n      <- NA_integer_
   island_state <- NA_character_
-  if (label == "undefined") {
+  island_start <- NA_integer_
+  island_end   <- NA_integer_
+  if (label == "undefined" && !is.null(full_read_loh)) {
     rescue <- resolve_undefined_by_phase(
-      seg_data, chr_name, full_read_loh, win_start, win_end,
+      chr_name, full_read_loh, win_start, win_end,
       zone_min_snps, phase_min_span, phase_switch_hi, phase_switch_lo)
     if (!is.null(rescue)) {
       label        <- rescue$label
@@ -1593,6 +1611,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
       phase_frac   <- rescue$phase_frac
       phase_n      <- rescue$phase_n
       island_state <- rescue$island_state
+      island_start <- rescue$island_start
+      island_end   <- rescue$island_end
     }
   }
 
@@ -1606,7 +1626,9 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     phase_call   = phase_call,
     phase_frac   = phase_frac,
     phase_n      = phase_n,
-    island_state = island_state
+    island_state = island_state,
+    island_start = island_start,
+    island_end   = island_end
   )
 }
 
@@ -2085,10 +2107,12 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
                                        zone_min_snps = 2L,
                                        full_read_loh = NULL) {
   out <- copy(snp_peaks)
-  if (!"haplotype_label"   %in% names(out)) out[, haplotype_label   := NA_character_]
-  if (!"n_read_support"    %in% names(out)) out[, n_read_support    := NA_integer_]
-  if (!"phase_call"        %in% names(out)) out[, phase_call        := NA_character_]
-  if (!"phase_switch_frac" %in% names(out)) out[, phase_switch_frac := NA_real_]
+  if (!"haplotype_label"    %in% names(out)) out[, haplotype_label    := NA_character_]
+  if (!"n_read_support"     %in% names(out)) out[, n_read_support     := NA_integer_]
+  if (!"phase_call"         %in% names(out)) out[, phase_call         := NA_character_]
+  if (!"phase_switch_frac"  %in% names(out)) out[, phase_switch_frac  := NA_real_]
+  if (!"phase_island_start" %in% names(out)) out[, phase_island_start := NA_integer_]
+  if (!"phase_island_end"   %in% names(out)) out[, phase_island_end   := NA_integer_]
   if (nrow(out) == 0) return(out)
 
   out[, .row_idx := .I]
@@ -2112,10 +2136,12 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
       .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps,
                                       full_read_loh = full_read_loh)
       out[.row_idx == .pk$.row_idx, `:=`(
-        haplotype_label   = .hap$label,
-        n_read_support    = .hap$n_support,
-        phase_call        = .hap$phase_call %||% NA_character_,
-        phase_switch_frac = .hap$phase_frac %||% NA_real_
+        haplotype_label    = .hap$label,
+        n_read_support     = .hap$n_support,
+        phase_call         = .hap$phase_call   %||% NA_character_,
+        phase_switch_frac  = .hap$phase_frac   %||% NA_real_,
+        phase_island_start = .hap$island_start %||% NA_integer_,
+        phase_island_end   = .hap$island_end   %||% NA_integer_
       )]
     }
   }

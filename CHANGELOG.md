@@ -17,9 +17,15 @@ read by `app.R` and `chimera_cli.R`.
   `gene_conversion` (NCO); otherwise the peak stays `undefined`. This uses all
   reads (`full_read_loh`), so non-switching reads stay in the denominator —
   the ratio that separates a crossover from a fixed conversion patch on a het
-  background. New `phase_call` / `phase_switch_frac` columns are surfaced in
-  the peak table and the switch fraction is carried into the Recombination
-  Events table. `full_read_loh` is threaded through
+  background. The island is located in the full-read consensus (not the
+  chimeric subset), so only a genuine population-level fixed LOH tract — the
+  same signal the LOH HMM sees — triggers a rescue; a fixed tract merely
+  abutting a HET region is not misread as a het-bounded island. A rescued
+  event's reported footprint is recalculated to that excised island tract
+  rather than the broad smoothed peak window or a neighbouring LOH tract the
+  motif scanner happened to anchor to. New `phase_call` / `phase_switch_frac`
+  columns are surfaced in the peak table and the switch fraction is carried
+  into the Recombination Events table. `full_read_loh` is threaded through
   `label_snp_peaks_haplotypes()` / `compute_peak_pairs()`; when absent the
   prior `undefined` behaviour is unchanged.
 - Added an interstitial hemizygous-deletion call (`DELETION`, rendered as a

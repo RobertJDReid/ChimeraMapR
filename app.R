@@ -916,14 +916,16 @@ server <- function(input, output, session) {
           # Record label for writing back to snp_peaks later (keyed by .row_idx
           # so skipped peaks safely receive NA on the join)
           hap_label_rows[[length(hap_label_rows) + 1L]] <<- data.table(
-            .row_idx          = pk$.row_idx,
-            haplotype_label   = hap$label,
-            hap_win_start     = hap$win_start,
-            hap_win_end       = hap$win_end,
-            hap_win_expanded  = hap$expanded,
-            n_read_support    = hap$n_support,
-            phase_call        = hap$phase_call %||% NA_character_,
-            phase_switch_frac = hap$phase_frac %||% NA_real_
+            .row_idx           = pk$.row_idx,
+            haplotype_label    = hap$label,
+            hap_win_start      = hap$win_start,
+            hap_win_end        = hap$win_end,
+            hap_win_expanded   = hap$expanded,
+            n_read_support     = hap$n_support,
+            phase_call         = hap$phase_call   %||% NA_character_,
+            phase_switch_frac  = hap$phase_frac   %||% NA_real_,
+            phase_island_start = hap$island_start %||% NA_integer_,
+            phase_island_end   = hap$island_end   %||% NA_integer_
           )
 
           # seg_data now comes from the classifier (window may be expanded)
