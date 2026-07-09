@@ -30,13 +30,37 @@ read by `app.R` and `chimera_cli.R`.
   prior `undefined` behaviour is unchanged.
 - Added an interstitial hemizygous-deletion call (`DELETION`, rendered as a
   `Δ` on the overview map). A HET-bounded fixed-allele LOH tract whose
-  SNP-site read depth drops below `depth_drop` (default 0.60) of its higher
-  HET flank is labeled a deletion of the missing homolog rather than a
+  SNP-site read depth drops below `depth_drop` (default 0.60) of its HET
+  flanks is labeled a deletion of the missing homolog rather than a
   copy-neutral LOH tract. Uses the existing SNP-position coverage map only
   (no BAM/CNV/breakpoint modelling), so it is reported at `review`
-  confidence. The higher of the two flanks is used as the diploid reference
-  so a short depth-depressed (e.g. sub-telomeric) flank does not mask a real
-  drop. Complements the existing terminal-deletion rule (R01).
+  confidence. The *lower* of the two flanks is used as the diploid reference,
+  so the ratio only falls below threshold when the tract is depth-depressed
+  against BOTH flanks — a single anomalously HIGH flank (common for short
+  sub-telomeric HET islands, whose repetitive content inflates mapped depth)
+  no longer manufactures a false deletion out of a full-depth tract. A
+  resolved haplotype-switch junction peak (binary / crossover / gene
+  conversion, with real spanning support) also vetoes the call: such a peak
+  requires both homologs across the junction, which is incompatible with a
+  hemizygous deletion, so the tract is deferred to the recombination rules
+  (crossover / gene-conversion). Complements the existing terminal-deletion
+  rule (R01).
+- `rule_tel_adjacent_het_loh` (R02c, `CO_TERM_PROBABLE`) now recognises a
+  subtelomeric MISALIGNMENT pileup interposed between an LOH tract and the
+  telomere. Previously the interposed HET had to be within `tel_tol_bp` (5 kb)
+  of the chromosome end for the tract to count as terminal; a wider island
+  deferred the call to `rule_one_sided_binary` (`GC_ONE_SIDED`) — or, if the
+  island's inflated depth dragged the tract's flank ratio below threshold, to a
+  false `DELETION`. Yeast subtelomeres are repetitive, so reads from paralogous
+  ends pile up there and manufacture a spurious HET island with anomalously
+  HIGH depth. Such an island (depth ratio `>= subtel_misalign_depth`, default
+  1.4, AND narrower than `subtel_misalign_max_bp`, default 25 kb — the width
+  gate keeps a genuine wide diploid arm with globally elevated depth from being
+  swallowed) is now treated as artifactual: the LOH tract behind it is called a
+  probable terminal crossover (`CO_TERM_PROBABLE`, review confidence) rather
+  than a one-sided gene conversion or a deletion. Thresholds calibrated on
+  TEL-adjacent HET depth ratios across the test panel (real arms 0.77–1.26;
+  thin subtelomeric pileups 1.4–1.9).
 
 ## [0.7.0] - 2026-07-07
 

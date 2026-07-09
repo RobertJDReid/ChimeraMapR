@@ -62,6 +62,20 @@ default_chain_params <- function() {
     # homolog; 0.60 leaves margin above that for noise.
     depth_drop      = 0.60,
 
+    # A TEL-adjacent HET token is treated as a subtelomeric MISALIGNMENT
+    # artifact — not a real diploid arm — when it is both anomalously
+    # high-depth AND narrow. Yeast subtelomeres are repetitive/duplicated, so
+    # reads from paralogous ends pile up there, inflating depth (ratio well
+    # above the ~1.0 diploid mode) and manufacturing spurious HET calls. Such
+    # an interposed HET should not block a terminal LOH/crossover call: the
+    # real sequence effectively reaches the telomere. The depth gate
+    # (>= subtel_misalign_depth) separates a pileup from a normal arm; the
+    # width gate (< subtel_misalign_max_bp) keeps a genuinely WIDE arm that
+    # merely has globally elevated depth from being swallowed. Both must hold.
+    # Used by rule_tel_adjacent_het_loh (R02c) → CO_TERM_PROBABLE.
+    subtel_misalign_depth  = 1.4,
+    subtel_misalign_max_bp = 25000L,
+
     # Fixed-LOH tokens with fewer SNPs than this threshold may be too short
     # for any individual chimeric read to span with enough consecutive
     # same-haplotype calls to generate a peak.  Such tokens are classified
@@ -344,10 +358,12 @@ build_raw_chains <- function(loh_segments, chr_span, params,
 
     # ── Interstitial fixed tokens: flank-relative depth ratio ─────────────────
     # For every HET-bounded (non-terminal) fixed tract, store the ratio of its
-    # depth to the higher of its two HET flanks. The interstitial-deletion rule
-    # (Rd) uses this to separate a hemizygous deletion (depth ~halved) from a
-    # copy-neutral LOH tract (depth preserved). Computed from the same
-    # coverage_table the terminal ratios use; skipped (NA) when unavailable.
+    # depth to the lower of its two HET flanks (so the ratio only drops when the
+    # tract is depth-depressed against BOTH flanks — see
+    # .interstitial_flank_depth_ratio). The interstitial-deletion rule (Rd) uses
+    # this to separate a hemizygous deletion (depth ~halved) from a copy-neutral
+    # LOH tract (depth preserved). Computed from the same coverage_table the
+    # terminal ratios use; skipped (NA) when unavailable.
     for (fi in which(vapply(tokens, `[[`, character(1), "type") == "F")) {
       fr <- .interstitial_flank_depth_ratio(tokens, fi, chr_name, coverage_table)
       if (!is.na(fr)) tokens[[fi]]$meta$flank_depth_ratio <- fr
@@ -930,15 +946,19 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 }
 
 # Flank-relative depth ratio for an INTERSTITIAL fixed token: the token's mean
-# real read depth divided by the *higher* of its two nearest non-fixed (HET)
+# real read depth divided by the *lower* of its two nearest non-fixed (HET)
 # flank depths (skipping unscored G gaps). A hemizygous deletion of one homolog
 # yields a fixed-allele tract whose total depth is ~half its flanking diploid
 # regions; a copy-neutral LOH tract (gene conversion / crossover) keeps full
-# depth, giving a ratio near 1. The MAX flank — not the average — is the
-# reference so a genuine ~half-depth deletion is still detected when one flank
-# is itself depth-depressed (e.g. a short sub-telomeric HET stretch that
-# sequences shallow for reasons unrelated to copy number). Returns NA unless a
-# coverage_table was supplied and both flanks are HET-resolvable.
+# depth, giving a ratio near 1. The MIN flank — not the max or the average — is
+# the reference so the ratio only falls below threshold when the tract is
+# depth-depressed against BOTH flanks, i.e. a genuine hemizygous drop. Using the
+# max flank instead lets a single anomalously HIGH flank (very common for short
+# sub-telomeric HET islands, where repetitive/duplicated content inflates the
+# mapped depth) drag a full-depth tract's ratio below threshold and manufacture
+# a false deletion call (see RAD5_3 chrIII: tract 81.8 == left flank 82.0, but
+# right sub-telomeric flank inflated to 139 → 0.59 vs max, 1.00 vs min). Returns
+# NA unless a coverage_table was supplied and both flanks are HET-resolvable.
 .interstitial_flank_depth_ratio <- function(tokens, idx, chr_name, coverage_table) {
   li <- .nearest_nonfixed_left(tokens, idx)
   ri <- .nearest_nonfixed_right(tokens, idx)
@@ -949,7 +969,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
                             tokens[[li]]$start, tokens[[li]]$end)
   d_r <- .lookup_mean_depth(coverage_table, chr_name,
                             tokens[[ri]]$start, tokens[[ri]]$end)
-  ref <- suppressWarnings(max(d_l, d_r, na.rm = TRUE))
+  ref <- suppressWarnings(min(d_l, d_r, na.rm = TRUE))
   if (is.na(d_f) || !is.finite(ref) || ref <= 0) return(NA_real_)
   d_f / ref
 }
@@ -988,6 +1008,46 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   if (length(candidates) == 0) return(NULL)
   spans <- sapply(candidates, .ns)
   candidates[[which.max(spans)]]
+}
+
+# TRUE if a fixed tract carries a resolved haplotype-switch junction peak with
+# real spanning support. A binary / crossover / gene-conversion peak requires
+# reads bearing BOTH homologs across the junction — which is incompatible with a
+# hemizygous deletion (one homolog absent ⇒ nothing to switch to). Such a peak
+# is instead the positive signature of a copy-neutral recombination event, so
+# its presence vetoes the interstitial-deletion call (Rd) and defers to the
+# recombination rules. The edge-type set mirrors R02's `known_switch`; the
+# min_span gate reuses the coverage floor applied elsewhere so a spurious
+# low-support peak can't suppress a genuine deletion.
+.has_resolved_switch_peak <- function(token, params) {
+  peaks <- Filter(Negate(is.null),
+                  list(token$peak_over, token$peak_left, token$peak_right))
+  for (pk in peaks) {
+    et <- pk$best_edge_type %||% pk$edge_type
+    if (is.null(et) || is.na(et)) next
+    if (!(et %in% c("binary", "compound_binary", "crossover",
+                    "internal_crossover", "gene_conversion"))) next
+    if (.ns(pk) >= params$min_span) return(TRUE)
+  }
+  FALSE
+}
+
+# TRUE if a TEL-adjacent non-fixed (HET) token looks like a subtelomeric
+# misalignment pileup rather than a real diploid arm: anomalously high depth
+# (reads from paralogous chromosome ends stacking up) AND narrow (a real arm
+# with globally elevated depth is wide and must not be swallowed). Both gates
+# must hold. Lets rule_tel_adjacent_het_loh (R02c) see through such an island
+# and treat the LOH tract behind it as terminal — see that rule and the
+# subtel_misalign_* params. Calibrated on TEL-adjacent HET depth ratios across
+# the test panel: real arms cluster 0.77–1.26; thin subtelomeric pileups run
+# 1.4–1.9, while the only wide high-depth tokens (>230 kb) are real arms.
+.is_subtel_misalignment_het <- function(token, params) {
+  if (!.is_non_fixed(token)) return(FALSE)
+  dr <- token$depth_ratio
+  if (is.null(dr) || is.na(dr)) return(FALSE)
+  len <- token$length_bp %||% (token$end - token$start + 1L)
+  isTRUE(dr >= params$subtel_misalign_depth) &&
+    isTRUE(len <  params$subtel_misalign_max_bp)
 }
 
 .is_roughly_centered <- function(token, center_tol) {
@@ -1107,9 +1167,16 @@ rule_terminal_deletion <- list(
 # is what separates it from a copy-neutral LOH tract (gene conversion /
 # crossover), which keeps full depth. Uses SNP-site coverage only — no CNV or
 # breakpoint modelling — so it fires only on a clear drop below params$depth_drop
-# vs. the higher HET flank, and is reported at "review" confidence. Placed above
+# vs. the lower HET flank, and is reported at "review" confidence. Placed above
 # the recombination rules so a genuinely deleted tract is not mis-called as a
 # gene conversion when a coincident peak sits inside it.
+#
+# A resolved haplotype-switch junction peak (binary / crossover / gene
+# conversion, with real spanning support) VETOES the deletion call: such a peak
+# proves both homologs are present across the junction, which is incompatible
+# with a hemizygous deletion, and is instead the signature of a copy-neutral
+# terminal/interstitial crossover. Deferring to the recombination rules lets
+# them make the (TCO/GC) call — see .has_resolved_switch_peak.
 rule_interstitial_deletion <- list(
   id = "Rd_interstitial_deletion",
   match_fn = function(tokens, i, chain, params) {
@@ -1121,6 +1188,10 @@ rule_interstitial_deletion <- list(
         is.null(.nearest_nonfixed_right(tokens, i))) return(NULL)
     dr <- tok$meta$flank_depth_ratio
     if (is.null(dr) || is.na(dr) || dr >= params$depth_drop) return(NULL)
+    # A robust haplotype-switch peak on this tract is positive recombination
+    # evidence — a deletion has no second homolog to switch to. Defer to the
+    # recombination rules instead of over-calling a deletion.
+    if (.has_resolved_switch_peak(tok, params)) return(NULL)
     list(span = i, f_tok = tok, ratio = dr)
   },
   fire_fn = function(m, chain, params) {
@@ -1406,6 +1477,15 @@ rule_tel_adjacent_het_loh <- list(
       # far from the telomere — that is an interstitial LOH flanked on one side
       # by a peak, not a terminal event; let a downstream interstitial rule
       # (R11b → GC_ONE_SIDED) handle it rather than over-calling CO_TERM_PROBABLE.
+      #
+      # Exception: when the interposed HET is itself flagged a subtelomeric
+      # misalignment pileup (high-depth AND narrow — see
+      # .is_subtel_misalignment_het), F need NOT reach within tel_tol_bp. The
+      # island's SNPs are artifactual, so the real sequence effectively runs to
+      # the telomere even though a depth-inflated island (e.g. 10.8 kb on RAD5_3
+      # chrIII, ratio 1.6) pushes F's measured end well short of the last SNP.
+      # The width gate on the island is what keeps a genuine wide diploid arm
+      # with merely elevated depth from being swallowed here.
       f_reaches_tel <- if (direction == "fwd") {
         ref_start <- if (!is.null(chain$snp_start) && !is.na(chain$snp_start))
           chain$snp_start else 1L
@@ -1415,7 +1495,7 @@ rule_tel_adjacent_het_loh <- list(
           chain$snp_end else chain$chr_len
         ftk$end >= ref_end - params$tel_tol_bp
       }
-      if (!f_reaches_tel) return(NULL)
+      if (!f_reaches_tel && !.is_subtel_misalignment_het(htk, params)) return(NULL)
       # Depth must be consistent with LOH, not a deletion.
       if (is.na(.terminal_depth_ratio(ftk)) ||
           .terminal_depth_ratio(ftk) < params$depth_drop) return(NULL)
