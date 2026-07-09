@@ -1384,7 +1384,10 @@ rule_terminal_no_peak <- list(
 # LOH (F) starts just inside this artifactual HET zone and has a binary peak on
 # its distal boundary, the standard TEL [F●] H (R02) pattern cannot fire because
 # the HET layer sits between TEL and F.  This rule recognises the extended
-# TEL [H] [F●] pattern and calls it CO_TERM_PROBABLE (review confidence).
+# TEL [H] [F●] pattern and calls it CO_TERM_PROBABLE (review confidence) — but
+# only when F itself reaches within tel_tol_bp of the telomere, i.e. the
+# interposed HET is a thin subtelomeric artifact. A wide interposed HET leaves
+# F interstitial, and the event is left to R11b (GC_ONE_SIDED) instead.
 # G-transparent variants (G gap between H and F) are also checked to handle
 # cases where an unscored coordinate gap separates the HET from the LOH token.
 rule_tel_adjacent_het_loh <- list(
@@ -1397,6 +1400,22 @@ rule_tel_adjacent_het_loh <- list(
       htk <- tokens[[h_i]]
       ftk <- tokens[[f_i]]
       if (tel$type != "TEL" || !.is_non_fixed(htk) || ftk$type != "F") return(NULL)
+      # The interposed HET must be a THIN subtelomeric misalignment artifact, so
+      # the LOH (F) itself has to sit within tel_tol_bp of the chromosome end on
+      # the TEL-facing side. A wide interposed HET (real diploid arm) leaves F
+      # far from the telomere — that is an interstitial LOH flanked on one side
+      # by a peak, not a terminal event; let a downstream interstitial rule
+      # (R11b → GC_ONE_SIDED) handle it rather than over-calling CO_TERM_PROBABLE.
+      f_reaches_tel <- if (direction == "fwd") {
+        ref_start <- if (!is.null(chain$snp_start) && !is.na(chain$snp_start))
+          chain$snp_start else 1L
+        ftk$start <= ref_start + params$tel_tol_bp
+      } else {
+        ref_end <- if (!is.null(chain$snp_end) && !is.na(chain$snp_end))
+          chain$snp_end else chain$chr_len
+        ftk$end >= ref_end - params$tel_tol_bp
+      }
+      if (!f_reaches_tel) return(NULL)
       # Depth must be consistent with LOH, not a deletion.
       if (is.na(.terminal_depth_ratio(ftk)) ||
           .terminal_depth_ratio(ftk) < params$depth_drop) return(NULL)
