@@ -1390,11 +1390,37 @@ rule_terminal_loh_gapped <- list(
   fire_fn = function(m, chain, params) {
     n_raw      <- m$peak$n_spanning %||% NA_integer_
     n_spanning <- if (is.null(n_raw) || is.na(n_raw)) NA_integer_ else as.integer(n_raw)
-    ev <- .make_event("CO_TERM", chain$chrom, m$f_toks,
-                      evidence_peaks = list(m$peak),
-                      n_support = n_spanning,
-                      notes = paste0("terminal LOH; internal allele switch in a ",
-                                     "SNP-gap (no junction peak); proximal boundary binary"))
+
+    # Count the internal haplotype switches across the walked F run. Each
+    # allele-state change between consecutive F tokens is a recombination
+    # junction that fell in a SNP-gap (no peak). A wide gap that merely SPLIT a
+    # single same-state LOH tract carries no switch (n_internal == 0) and is one
+    # ordinary terminal crossover; one or more switches means several terminal
+    # crossovers fused across the gap(s) — surfaced and enumerated as such.
+    states     <- vapply(m$f_toks, function(t) t$state %||% NA_character_, character(1))
+    n_internal <- if (length(states) > 1L)
+      sum(head(states, -1L) != tail(states, -1L), na.rm = TRUE) else 0L
+    n_fused    <- 1L + n_internal   # proximal peak-confirmed CO + internal gap COs
+
+    if (n_internal == 0L) {
+      ev <- .make_event("CO_TERM", chain$chrom, m$f_toks,
+                        evidence_peaks = list(m$peak),
+                        n_support = n_spanning,
+                        notes = paste0("terminal LOH split by a SNP-gap (no internal ",
+                                       "allele switch); proximal boundary binary"))
+    } else {
+      # Enumerate the switches distal-to-proximal-agnostic (walk order): each
+      # "X->Y" transition marks one fused terminal crossover's junction.
+      trans <- paste(vapply(seq_len(length(states) - 1L), function(k)
+        paste0(states[k], "->", states[k + 1L]), character(1)), collapse = ", ")
+      ev <- .make_event("CO_TERM_GAPPED", chain$chrom, m$f_toks,
+                        evidence_peaks = list(m$peak),
+                        n_support = n_spanning,
+                        notes = paste0(n_fused, " fused terminal crossovers; ",
+                                       n_internal, " internal gap-switch(es) [", trans,
+                                       "] with no junction peak; proximal boundary binary"))
+      ev$n_fused <- n_fused
+    }
     list(event = ev, rewrite = NULL,
          claims = list(peak = m$peak, loh = m$f_toks))
   }
@@ -2834,13 +2860,14 @@ build_event_table <- function(events) {
     return(data.table(
       event_class = character(), chrom = character(),
       start = integer(), end = integer(), length_kb = numeric(),
-      n_support = integer(), peak_edge_types = character(),
+      n_support = integer(), n_fused = integer(), peak_edge_types = character(),
       phase_switch_frac = numeric(),
       confidence = character(), notes = character()
     ))
 
   rows <- lapply(events, function(ev) {
     confidence <- if (ev$event_class %in% c("NCO_GC", "CO_GC", "CO_TERM",
+                                             "CO_TERM_GAPPED",
                                              "CROSSOVER_NO_TRACT", "DOUBLE_GC",
                                              "TCO_CAPTURED_TCO"))
       "high"
@@ -2854,6 +2881,9 @@ build_event_table <- function(events) {
       end             = as.integer(ev$end),
       length_kb       = round((as.integer(ev$end) - as.integer(ev$start)) / 1000, 3),
       n_support       = as.integer(ev$n_support),
+      # Number of terminal crossovers fused across SNP-gap(s) into one call
+      # (CO_TERM_GAPPED, R02g); NA for every other event class.
+      n_fused         = as.integer(ev$n_fused %||% NA_integer_),
       peak_edge_types = ev$peak_edge_types %||% NA_character_,
       phase_switch_frac = ev$phase_switch_frac %||% NA_real_,
       confidence      = confidence,

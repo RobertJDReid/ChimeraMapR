@@ -6,6 +6,33 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [Unreleased]
 
+- Provisional terminal-crossover calling for peakless, gap-masked terminal LOH
+  (`CO_TERM_PROBABLE`, rendered `TCO*`, `review` confidence). New rule
+  `rule_terminal_loh_gapped_nopeak` (R02d) fires on `H {G:wide} [F]{tel}`: a
+  terminal LOH tract reaching the telomere at diploid (2N) depth with no
+  chimeric peak on its proximal boundary, where a wide SNP-desert gap (default
+  `>= provisional_tco_min_gap_bp = 10000` bp) separates the bounding HET from
+  the LOH. A recombination junction inside a gap that wide leaves no read able
+  to span it, so no binary peak can form even though the tract is a genuine
+  terminal crossover. The wide gap is the positive evidence for the missing
+  peak; without it (HET abutting F) the tract stays `UNCATEGORIZED_LOH`, as the
+  disabled `rule_terminal_no_peak` (R02b) intended.
+- Fused gapped terminal crossovers are now surfaced and enumerated. When R02g
+  (`rule_terminal_loh_gapped`) walks a binary-peaked proximal LOH across a wide
+  gap to a telomere-reaching tract and the haplotype *switches* across the gap
+  (e.g. `REF_fixed -> ALT_fixed`), the event is reported as the new class
+  `CO_TERM_GAPPED` (`high` confidence) instead of a single `CO_TERM`. The number
+  of fused terminal crossovers (proximal peak-confirmed junction + one per
+  internal gap-switch) is carried in a new `n_fused` events-table column and
+  rendered on the overview map as `N X TCO*`; the notes enumerate each
+  transition. A wide gap that merely splits one *same-state* tract (no switch)
+  stays a plain `CO_TERM`.
+- Overview-map symbols: removed all `?` marks. `CO_TERM_PROBABLE` is now `TCO*`
+  and `AMBIGUOUS(low_coverage)` is now `*`; the asterisk consistently marks a
+  gap-inferred junction across the terminal-crossover family (`TCO*`,
+  `N X TCO*`). To keep the two gene-conversion review classes distinct without
+  a `?`, `GC_ONE_SIDED` is now a bold omicron with a superscript one and
+  `GC_UNRESOLVED` a bold omicron with a degree sign.
 - Phase-based rescue of `undefined` peaks. When a peak's consensus run pattern
   is a HET-bounded fixed-allele island (e.g. the `REF-HET-ALT-HET` signature a
   broad smoothed peak produces when it straddles an LOH island plus a

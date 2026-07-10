@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.4"
+APP_VERSION <- "0.8.5"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -964,16 +964,17 @@ EVENT_SYMBOL_MAP <- c(
   NCO_GC                   = "𝝤", # CAPTIAL OMICRON
   NCO_GC_subres            = "𝝤", # CAPTIAL OMICRON (no flanking LOH tract)
   NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
-  GC_UNRESOLVED            = "𝝤?", # confirmed GC-type tract (LOH flanked by two binary peaks); NCO/CO undetermined
-  GC_ONE_SIDED             = "𝝤*", # one confirmed binary junction peak; other boundary has no peak at all
+  GC_UNRESOLVED            = "𝝤°", # confirmed GC-type tract (LOH flanked by two binary peaks); NCO/CO undetermined
+  GC_ONE_SIDED             = "𝝤¹", # one confirmed binary junction peak; other boundary has no peak at all
   CROSSOVER_NO_TRACT       = "✖", # HEAVY MULTIPLICATION X (crossover, tract below LOH resolution)
   DOUBLE_GC                = "𝝤𝝤", # two NCO gene conversions in one token
   CO_TERM                  = "TCO",
-  CO_TERM_PROBABLE         = "TCO?",
+  CO_TERM_PROBABLE         = "TCO*",   # provisional terminal CO; sole junction gap-masked (no peak)
+  CO_TERM_GAPPED           = "TCO*",   # fused terminal COs across a SNP-gap; enumerated ("N X TCO*") at plot time
   TCO_CAPTURED_TCO         = "2 X TCO",
   TERMINAL_DELETION        = "Δ",  # GREEK CAPITAL LETTER DELTA
   DELETION                 = "Δ",  # interstitial hemizygous deletion (HET-bounded, ~half depth)
-  `AMBIGUOUS(low_coverage)` = "?"  # low spanning reads; shown as review marker
+  `AMBIGUOUS(low_coverage)` = "*"  # low spanning reads; shown as review marker
 )
 
 #' add_event_symbols()
@@ -1004,6 +1005,13 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
   ev[, x     := (start + end) / 2 / 1000]
   ev[, y     := (band_ymin + band_ymax) / 2]
   ev[, label := EVENT_SYMBOL_MAP[event_class]]
+  # Fused gapped terminal crossovers enumerate their component count in the
+  # label (e.g. "2 X TCO*"): the asterisk marks the gap-inferred internal
+  # junction(s); the number counts the fused terminal crossovers. Falls back to
+  # the static "TCO*" when no count is available (older tables lacking n_fused).
+  if ("n_fused" %in% names(ev))
+    ev[event_class == "CO_TERM_GAPPED" & !is.na(n_fused),
+       label := paste0(n_fused, " X TCO*")]
 
   p + geom_text(
     data        = ev,
