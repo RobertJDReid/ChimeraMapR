@@ -76,6 +76,15 @@ default_chain_params <- function() {
     subtel_misalign_depth  = 1.4,
     subtel_misalign_max_bp = 25000L,
 
+    # Minimum width of the proximal SNP-desert gap that separates a peakless
+    # terminal LOH tract from its bounding HET for rule_terminal_loh_gapped_nopeak
+    # (R02d) to call a provisional terminal crossover (CO_TERM_PROBABLE / "TCO?").
+    # A recombination junction falling inside a gap this wide leaves no chimeric
+    # read able to span it, so no binary peak can mark the HET->LOH boundary even
+    # though the tract runs to the telomere at diploid (2N) depth. Wide enough
+    # that a normal inter-SNP spacing never trips it; ~2x tel_tol_bp.
+    provisional_tco_min_gap_bp = 10000L,
+
     # Fixed-LOH tokens with fewer SNPs than this threshold may be too short
     # for any individual chimeric read to span with enough consecutive
     # same-haplotype calls to generate a peak.  Such tokens are classified
@@ -1572,6 +1581,81 @@ rule_tel_adjacent_het_loh <- list(
   }
 )
 
+# Rule 2d: Provisional terminal LOH whose HET->LOH junction fell in a wide gap.
+#
+# Pattern (forward):  H {G:wide} [F]{tel}      (reverse): {tel}[F] {G:wide} H
+#
+# A terminal LOH tract can reach the telomere at full (2N) depth with NO
+# chimeric-read peak on its proximal (HET-facing) boundary because the
+# recombination junction landed inside a wide SNP-desert gap: no read carries
+# both alleles across the switch, so no peak can ever form there. This differs
+# from every peak-based terminal rule:
+#   * R02  needs TEL [F●] H  — a peak directly on F.
+#   * R02g needs a *binary* peak on the proximal F plus >=2 gap-split F tokens.
+#   * R02c needs an interposed HET artifact plus a *distal* binary peak.
+#   * R02b (peakless terminal, H directly adjacent to F) is disabled: with the
+#     HET abutting F there is no positive evidence the missing peak is a
+#     gap artifact rather than a genuine absence.
+# Here the WIDE proximal gap is that positive evidence — it is exactly where an
+# unobservable junction would hide — so the tract is surfaced as a PROVISIONAL
+# terminal crossover (CO_TERM_PROBABLE / "TCO?", review confidence) instead of
+# being dropped as UNCATEGORIZED_LOH. Requires: F reaches the telomere, F is
+# peakless with no junction peak on the proximal side, depth is consistent with
+# LOH (not a deletion), and the proximal HET is separated from F by a gap of at
+# least params$provisional_tco_min_gap_bp.
+rule_terminal_loh_gapped_nopeak <- list(
+  id = "R02d_terminal_loh_gapped_nopeak",
+  match_fn = function(tokens, i, chain, params) {
+    ftk <- tokens[[i]]
+    if (ftk$type != "F") return(NULL)
+    if (.has_peak(ftk)) return(NULL)                                 # peak-based rules handle this
+    if (is.na(.terminal_depth_ratio(ftk)) ||
+        .terminal_depth_ratio(ftk) < params$depth_drop) return(NULL) # R01 handles real deletions
+
+    ref_start <- if (!is.null(chain$snp_start) && !is.na(chain$snp_start))
+      chain$snp_start else 1L
+    ref_end   <- if (!is.null(chain$snp_end)   && !is.na(chain$snp_end))
+      chain$snp_end   else chain$chr_len
+
+    # Which chromosome end does F reach? The proximal (HET-facing) side is the
+    # opposite one. A tract abutting BOTH tel_tol margins is a whole-arm LOH with
+    # no interior HET to recombine against — not a terminal crossover.
+    reaches_right <- ftk$end   >= ref_end   - params$tel_tol_bp
+    reaches_left  <- ftk$start <= ref_start + params$tel_tol_bp
+    if (reaches_right == reaches_left) return(NULL)                  # exactly one end
+
+    if (reaches_right) {
+      h_i <- .nearest_nonfixed_left(tokens, i)
+      if (is.null(h_i) || tokens[[h_i]]$type != "H") return(NULL)
+      htk <- tokens[[h_i]]
+      if (!is.null(.left_junction_peak(ftk, htk, params))) return(NULL)  # a peak → not this rule
+      gap_bp <- ftk$start - htk$end - 1L
+      direction <- "fwd"
+    } else {
+      h_i <- .nearest_nonfixed_right(tokens, i)
+      if (is.null(h_i) || tokens[[h_i]]$type != "H") return(NULL)
+      htk <- tokens[[h_i]]
+      if (!is.null(.right_junction_peak(ftk, htk, params))) return(NULL)
+      gap_bp <- htk$start - ftk$end - 1L
+      direction <- "rev"
+    }
+    if (is.na(gap_bp) || gap_bp < params$provisional_tco_min_gap_bp) return(NULL)
+
+    list(f_tok = ftk, h_tok = htk, gap_bp = gap_bp, direction = direction)
+  },
+  fire_fn = function(m, chain, params) {
+    ev <- .make_event("CO_TERM_PROBABLE", chain$chrom, list(m$f_tok),
+                      notes = sprintf(
+                        paste0("no_chimera_peak; depth_ratio=%.2f >= %.2f; ",
+                               "proximal HET->LOH junction masked by a %.1f kb SNP-gap; ",
+                               "terminal LOH reaches telomere at 2N depth ",
+                               "(provisional terminal crossover, review)"),
+                        .terminal_depth_ratio(m$f_tok), params$depth_drop,
+                        m$gap_bp / 1000))
+    list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
+  }
+)
+
 # Rule 3: TCO-captured-TCO — H ●[F]● F̄→TEL (opposite fixed reaches telomere,
 #         peaks on both sides)
 rule_tco_captured_tco <- list(
@@ -2399,7 +2483,9 @@ MOTIF_RULES <- list(
   rule_terminal_loh,             # R02
   rule_terminal_loh_gapped,      # R02g — terminal LOH whose internal switch falls in a SNP gap
   rule_tel_adjacent_het_loh,     # R02c — CO_TERM_PROBABLE: TEL [H] [F●], HET interposed by misalignment
+  rule_terminal_loh_gapped_nopeak, # R02d — CO_TERM_PROBABLE: peakless terminal LOH, proximal junction in a wide SNP-gap
   # rule_terminal_no_peak disabled: without a chimeric peak at the TEL boundary
+  # AND no wide proximal gap to explain its absence (R02d handles that case)
   # there is no positive evidence for a crossover mechanism.  Leave unclaimed →
   # UNCATEGORIZED_LOH → no symbol on the overview map.
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
