@@ -1665,6 +1665,8 @@ server <- function(input, output, session) {
       brush_id <- paste0("chr_cov_brush_", chr_name)
       btn_id   <- paste0("chr_plot_btn_", chr_name)
       txt_id   <- paste0("chr_region_text_", chr_name)
+      png_id   <- paste0("dl_chr_png_", chr_name)
+      rds_id   <- paste0("dl_chr_rds_", chr_name)
 
       tabPanel(
         chr_name,
@@ -1673,6 +1675,11 @@ server <- function(input, output, session) {
           plot_id,
           height = "400px",
           brush  = brushOpts(id = brush_id, direction = "x", resetOnNew = TRUE, clip = FALSE)
+        ),
+        br(),
+        fluidRow(
+          column(3, downloadButton(png_id, "Download Plot Image (.png)", class = "btn-sm btn-default")),
+          column(4, downloadButton(rds_id, "Download Plot Data (.rds)", class = "btn-sm btn-default"))
         ),
         br(),
         fluidRow(
@@ -1730,12 +1737,16 @@ server <- function(input, output, session) {
       brush_id <- paste0("chr_cov_brush_", chr_c)
       btn_id   <- paste0("chr_plot_btn_",  chr_c)
       txt_id   <- paste0("chr_region_text_", chr_c)
+      png_id   <- paste0("dl_chr_png_", chr_c)
+      rds_id   <- paste0("dl_chr_rds_", chr_c)
       local({
         .chr           <- chr_c
         .plot_id       <- plot_id
         .brush_id      <- brush_id
         .btn_id        <- btn_id
         .txt_id        <- txt_id
+        .png_id        <- png_id
+        .rds_id        <- rds_id
         # Per-chromosome x-axis upper limit (Kbp), rounded to nearest 100 Kb
         .x_max_kb      <- chr_x_max_kb[.chr] %||%
                           ceiling(ceiling(max(snp_cov_all[chrom == .chr, pos_kb])) / 25) * 25
@@ -1746,11 +1757,14 @@ server <- function(input, output, session) {
         .snp_peaks_chr <- if (!is.null(snp_peaks_all) && nrow(snp_peaks_all) > 0)
                             snp_peaks_all[chrom == .chr]
                           else NULL
-        # LOH data is read inside renderPlot (not captured here) so that it
-        # picks up results$loh_map reactively after analysis completes, and
-        # so that copy() prevents in-place pos mutation across renders.
+        # LOH data is read inside build_chr_cov_plot() (not captured here) so
+        # that it picks up results$loh_map reactively after analysis completes,
+        # and so that copy() prevents in-place pos mutation across renders.
 
-        output[[.plot_id]] <- renderPlot({
+        # Build the per-chromosome coverage plot.  Defined as a local helper so
+        # both renderPlot (for the on-screen view) and the .png download handler
+        # render an identical figure without duplicating the ggplot code.
+        build_chr_cov_plot <- function() {
           y_ceil <- max(30, max(.snp$n))
 
           # Compute x-axis limit reactively inside renderPlot so it always
@@ -1873,7 +1887,72 @@ server <- function(input, output, session) {
           }
 
           p
-        })
+        }
+
+        output[[.plot_id]] <- renderPlot({ build_chr_cov_plot() })
+
+        # ── Per-chromosome plot downloads ──────────────────────────────────────
+        output[[.png_id]] <- downloadHandler(
+          filename = function() {
+            paste0(input$sample_name, "_chr", .chr, "_coverage_", Sys.Date(), ".png")
+          },
+          content = function(file) {
+            ggsave(file, plot = build_chr_cov_plot(), width = 12, height = 4.5, dpi = 300)
+          }
+        )
+
+        output[[.rds_id]] <- downloadHandler(
+          filename = function() {
+            paste0(input$sample_name, "_chr", .chr, "_coverage_", Sys.Date(), ".rds")
+          },
+          content = function(file) {
+            # SNP coverage and fitted Whittaker curve for this chromosome.
+            snp_data  <- as.data.table(copy(.snp))
+            fit_data  <- as.data.table(copy(.fits))
+            peak_data <- if (!is.null(.peaks) && nrow(.peaks) > 0)
+              as.data.table(copy(.peaks)) else data.table()
+            snp_peak_data <- if (!is.null(.snp_peaks_chr) && nrow(.snp_peaks_chr) > 0)
+              as.data.table(copy(.snp_peaks_chr)) else data.table()
+
+            # LOH strip data (fixed-haplotype segments on this chromosome); empty
+            # data.table if the LOH analysis has not been run or none overlap.
+            loh_data <- if (!is.null(results$loh_segments) && nrow(results$loh_segments) > 0) {
+              segs <- copy(results$loh_segments)
+              segs[, chrom := as.character(chrom)]
+              segs[chrom == .chr & loh_state %in% c("REF_fixed", "ALT_fixed")]
+            } else data.table()
+
+            # Event labels for this chromosome (empty data.table if the chain
+            # event caller has not been run yet).
+            event_data <- if (!is.null(results$event_table) && nrow(results$event_table) > 0) {
+              ev <- as.data.table(copy(results$event_table))
+              if ("chrom" %in% names(ev))
+                ev[as.character(chrom) == .chr] else ev
+            } else data.table()
+
+            s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
+              results$strain_ref else "REF"
+            s_alt <- if (!is.null(results$strain_alt) && nzchar(results$strain_alt))
+              results$strain_alt else "ALT"
+
+            saveRDS(
+              list(
+                snp_coverage = snp_data,
+                curve_fit    = fit_data,
+                peaks        = peak_data,
+                snp_peaks    = snp_peak_data,
+                loh_data     = loh_data,
+                event_data   = event_data,
+                strain_ref   = s_ref,
+                strain_alt   = s_alt,
+                chromosome   = .chr,
+                sample_name  = input$sample_name,
+                app_version  = APP_VERSION
+              ),
+              file
+            )
+          }
+        )
 
         observeEvent(input[[.brush_id]], {
           brush <- input[[.brush_id]]
