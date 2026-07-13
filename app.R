@@ -704,6 +704,7 @@ server <- function(input, output, session) {
     selected_regions      = list(),
     selected_region_plot  = NULL,
     selected_region_data  = NULL,
+    selected_region_loh   = NULL,   # LOH segments (clipped to display window) shown in the region-plot strip; included in the .rds download
     # Fusion results (non-destructive — sit alongside originals)
     peak_pairs              = NULL,
     fused_peaks             = NULL,
@@ -783,6 +784,7 @@ server <- function(input, output, session) {
     results$selected_region        <- NULL
     results$selected_region_plot   <- NULL
     results$selected_region_data   <- NULL
+    results$selected_region_loh    <- NULL
     results$selected_regions       <- list()
     results$peak_pairs             <- NULL
     results$fused_peaks            <- NULL
@@ -2040,6 +2042,9 @@ server <- function(input, output, session) {
     }
     has_loh_strip <- nrow(loh_win) > 0
 
+    # Persist the LOH strip data so it can be bundled into the .rds download.
+    results$selected_region_loh <- if (has_loh_strip) copy(loh_win) else data.table()
+
     p <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
       geom_vline(xintercept = reg$start / 1000,
                  color = "grey60", linewidth = 0.8, linetype = 2) +
@@ -2149,6 +2154,7 @@ server <- function(input, output, session) {
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
     results$selected_region_plot <- NULL
     results$selected_region_data <- NULL
+    results$selected_region_loh  <- NULL
   })
 
   # ── Post Fusion Peak Summary table ──────────────────────────────────────────
@@ -2564,9 +2570,23 @@ server <- function(input, output, session) {
       reg       <- results$selected_region
       plot_data <- as.data.table(results$selected_region_data)
       plot_data <- plot_data[, .(chrom, pos, read_id, IS_REF, ALLELE)]
+
+      # LOH strip data shown beneath the reads (empty data.table if the LOH
+      # analysis has not been run or no fixed segment overlaps the window).
+      loh_data <- if (!is.null(results$selected_region_loh))
+        as.data.table(results$selected_region_loh) else data.table()
+
+      s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
+        results$strain_ref else "REF"
+      s_alt <- if (!is.null(results$strain_alt) && nzchar(results$strain_alt))
+        results$strain_alt else "ALT"
+
       saveRDS(
         list(
           plot_data       = plot_data,
+          loh_data        = loh_data,
+          strain_ref      = s_ref,
+          strain_alt      = s_alt,
           selected_region = reg,
           sample_name     = input$sample_name,
           app_version     = APP_VERSION
