@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.8.5_
+_version 0.8.6_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 

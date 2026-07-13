@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.5"
+APP_VERSION <- "0.8.6"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by

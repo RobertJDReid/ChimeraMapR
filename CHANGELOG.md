@@ -4,8 +4,19 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.6] - 2026-07-13
 
+- Single-chromosome coverage views now offer image and data downloads. Each
+  per-chromosome tab in the "Chromosome plots" panel gains a **Download Plot
+  Image (.png)** link and a **Download Plot Data (.rds)** link. The PNG renders
+  the exact on-screen figure (shared `build_chr_cov_plot()` helper), and the
+  `.rds` bundles the SNP coverage, fitted curve, peaks, and SNP peaks for the
+  chromosome plus its LOH strip data (fixed-haplotype `REF_fixed`/`ALT_fixed`
+  segments) and event labels when available, with `strain_ref`/`strain_alt`
+  labels and metadata.
+- Selected-region read plots now include their LOH strip data in the downloaded
+  `.rds`. The LOH band that was drawn on the plot is persisted (`loh_data`)
+  alongside `strain_ref`/`strain_alt` so the download reflects everything shown.
 - Provisional terminal-crossover calling for peakless, gap-masked terminal LOH
   (`CO_TERM_PROBABLE`, rendered `TCO*`, `review` confidence). New rule
   `rule_terminal_loh_gapped_nopeak` (R02d) fires on `H {G:wide} [F]{tel}`: a
