@@ -86,27 +86,58 @@ For batch processing without the Shiny UI, `chimera_cli.R` runs the same analysi
 Rscript chimera_cli.R [options] <read_data> <snp_data> <chr_size.fai>
 ```
 
-Output mode is one of (default: PNG overview plot):
+Three positional arguments are required, in order: the **read data** file (`.csv`/`.csv.gz`), the **SNP data** file (`.csv`/`.vcf`/`.vcf.gz`), and the **chromosome size** file (`.fai`).
 
-| Flag | Output |
-|---|---|
-| _(default)_ | Genome-wide overview plot (PNG) |
-| `--peak-list` | Detected peaks, including haplotype classification, as CSV |
-| `--overview-rds` | Overview plot object as RDS (re-plot later with `readRDS()` + `print()`) |
+#### Output-mode flags
 
-Additional flags layer on extra outputs or tune analysis parameters:
+Pick at most one; the default (no flag) is the PNG overview plot. These are mutually exclusive.
+
+| Flag | Default | Output |
+|---|:---:|---|
+| _(none)_ | ✓ | Genome-wide overview plot (PNG) |
+| `--peak-list` | | Detected peaks, including haplotype classification, as CSV |
+| `--overview-rds` | | Overview plot object as RDS (re-plot later with `readRDS()` + `print()`) |
+| `--events-table` | | Runs the chain-based caller and writes **only** the final events table as CSV (no intermediate step CSVs, no plot). Mutually exclusive with `--chain-all` |
+
+#### Additional output flags
+
+Layer extra outputs on top of the selected output mode.
 
 | Flag | Description |
 |---|---|
-| `-n, --sample-name` | Sample name used in output filenames and plot titles |
-| `--mapq-cutoff`, `--baseq-cutoff`, `--del-rate-cutoff` | Read/base filtering cutoffs (see [Analysis parameters](#analysis-parameters)) |
-| `--min-run`, `--min-peak-height`, `-l, --lambda` | Run-length, peak height, and Whittaker smoothing parameters |
 | `--coverage-map` | Also write the per-position coverage table and collapsed coverage segments as CSVs |
-| `--chain-all` | Run the chain-based LOH recombination-event caller and write one CSV per pass (requires `loh_chain_analysis.R` alongside `chimera_functions.R`) |
-| `--tel-tol`, `--merge-gap`, `--min-span`, `--peak-pad` | Chain-analysis tuning parameters (telomere tolerance, same-state merge gap, minimum spanning reads, peak-association padding) |
-| `-o, --output` | Output file path or directory; a dated filename is auto-generated if omitted or a directory is given |
+| `--chain-all` | Run the chain-based LOH recombination-event caller and write one CSV per pass (steps 0–4); in the default PNG mode this also annotates the overview plot with the LOH band and event symbols. Requires `loh_chain_analysis.R` alongside `chimera_functions.R` |
 
-Run `Rscript chimera_cli.R --help` for the full list with defaults.
+#### Analysis parameters
+
+| Flag | Default | Description |
+|---|:---:|---|
+| `-n, --sample-name NAME` | `Sample_01` | Sample name used in output filenames and plot titles |
+| `--mapq-cutoff INT` | `20` | Minimum MAPQ value; reads below this are excluded |
+| `--baseq-cutoff INT` | `10` | Minimum base quality at the SNP position; calls below this are excluded |
+| `--del-rate-cutoff FLOAT` | `0.10` | SNPs where more than this fraction of confidently-mapped reads register a deletion are excluded |
+| `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run |
+| `--min-peak-height INT` | `10` | Minimum transition count at a SNP to qualify as a peak |
+| `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
+
+#### Chain-analysis tuning parameters
+
+Apply only when `--chain-all` or `--events-table` is used.
+
+| Flag | Default | Description |
+|---|:---:|---|
+| `--tel-tol KB` | `5` | Telomere tolerance in kb |
+| `--merge-gap KB` | `5` | Same-state NA-gap merge threshold in kb |
+| `--min-span INT` | `3` | Minimum spanning reads required for a read-based chain call |
+| `--peak-pad BP` | `200` | Peak association padding in bp; a peak is attached to a token junction if its SNP position falls within this distance of the token boundary |
+
+#### Output path
+
+| Flag | Default | Description |
+|---|:---:|---|
+| `-o, --output PATH` | _cwd_ | Output file path or directory. If a directory (or omitted), a dated filename is auto-generated; the extension (`.png`/`.csv`/`.rds`) follows the output mode |
+
+Run `Rscript chimera_cli.R --help` for the same list from the terminal.
 
 ---
 
