@@ -45,6 +45,8 @@ Exported read IDs can be used to filter the original alignment file, producing a
   - data.table ≥ 1.15.0
   - ggplot2 ≥ 3.4.0
   - pracma ≥ 2.4.4
+  - R.utils _for some installs_
+  - patchwork
   - Matrix
   - Rcpp
   - igraph
