@@ -356,6 +356,11 @@ results$snp_peaks <- label_snp_peaks_haplotypes(
 # ── Print run summary ─────────────────────────────────────────────────────────
 n_chimeric  <- length(results$chimeric_read_ids)
 n_peaks     <- nrow(results$peaks_genomic)
+# Peaks that mapped to a qualifying SNP (raw count >= --min-peak-height); the
+# rest carry snp_pos = NA and are excluded from the reported peak list, exactly
+# as in the app's "Peak Summary" table.
+n_peaks_qual <- if (!is.null(results$snp_peaks))
+  sum(!is.na(results$snp_peaks$snp_pos)) else 0L
 n_chr       <- uniqueN(results$snp_coverage$chrom)
 aneuploid   <- ploidy_map[estimated_ploidy != 2L]
 cat("\nResults:\n")
@@ -373,6 +378,7 @@ if (nrow(aneuploid) > 0) {
 }
 cat("  Chimeric reads       :", n_chimeric, "\n")
 cat("  Peaks detected       :", n_peaks, "\n")
+cat("  Peaks above min height:", n_peaks_qual, "\n")
 if (!is.null(results$snp_peaks) && "haplotype_label" %in% names(results$snp_peaks)) {
   label_counts <- results$snp_peaks[!is.na(snp_pos), .N, by = haplotype_label]
   setorder(label_counts, -N)
@@ -387,10 +393,15 @@ cat("\n")
 # ── Write output ──────────────────────────────────────────────────────────────
 if (output_mode == "csv") {
 
-  # Peak list
+  # Peak list — same rows the app's "Peak Summary" table shows: peaks whose
+  # interval contained at least one SNP with raw count >= --min-peak-height.
+  # Peaks with snp_pos = NA ("None above cutoff") are dropped here, matching
+  # app.R's output$peaks_table.
+  peak_list <- results$snp_peaks[!is.na(snp_pos)]
   message("Writing peak list → ", out_path)
-  data.table::fwrite(results$snp_peaks, out_path)
-  cat("Peak list written to:", out_path, "\n")
+  data.table::fwrite(peak_list, out_path)
+  cat("Peak list written to:", out_path,
+      sprintf("(%d peaks above min height)\n", nrow(peak_list)))
 
 } else if (output_mode == "rds") {
 

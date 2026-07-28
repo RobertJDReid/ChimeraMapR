@@ -683,7 +683,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
 
   # Set max upload size to 200 MB
-  options(shiny.maxRequestSize = 200 * 1024^2)
+  options(shiny.maxRequestSize = 300 * 1024^2)
 
   # Shared trigger for region plot building
   rv_trigger_region <- reactiveVal(0L)

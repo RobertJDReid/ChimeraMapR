@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.8.6_
+_version 0.8.7_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -95,7 +95,7 @@ Pick at most one; the default (no flag) is the PNG overview plot. These are mutu
 | Flag | Default | Output |
 |---|:---:|---|
 | _(none)_ | ✓ | Genome-wide overview plot (PNG) |
-| `--peak-list` | | Detected peaks, including haplotype classification, as CSV |
+| `--peak-list` | | Detected peaks, including haplotype classification, as CSV. Restricted to peaks with a qualifying SNP at or above `--min-peak-height`, matching the app's "Peak Summary" table |
 | `--overview-rds` | | Overview plot object as RDS (re-plot later with `readRDS()` + `print()`) |
 | `--events-table` | | Runs the chain-based caller and writes **only** the final events table as CSV (no intermediate step CSVs, no plot). Mutually exclusive with `--chain-all` |
 

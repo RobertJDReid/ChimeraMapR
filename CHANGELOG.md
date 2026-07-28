@@ -4,6 +4,17 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.7] - 2026-07-28
+
+- `chimera_cli.R --peak-list` now writes only peaks that mapped to a qualifying
+  SNP (raw chimeric-read count at or above `--min-peak-height`), matching the
+  rows shown in the app's "Peak Summary" table. Previously the CLI exported
+  every detected peak, including those whose interval held no SNP above the
+  cutoff (`snp_pos = NA`, shown as "None above cutoff" in the app). The run
+  summary gains a `Peaks above min height` line so the reported count and the
+  CSV row count agree. Chain/fusion analysis is unaffected — it continues to
+  receive the unfiltered peak table and applies its own filtering internally.
+
 ## [0.8.6] - 2026-07-13
 
 - Single-chromosome coverage views now offer image and data downloads. Each
