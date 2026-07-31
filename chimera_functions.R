@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.7"
+APP_VERSION <- "0.8.8"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -420,7 +420,10 @@ run_chimera_analysis <- function(
           candidates[, dist_to_peak := NULL]
         }
 
-        best <- if (nrow(candidates) == 1L) candidates else candidates[sample(.N, 1L)]
+        # Any candidates still tied here are equal in height and equidistant
+        # from the peak; take the leftmost so repeat runs on identical input
+        # give identical results.
+        best <- if (nrow(candidates) == 1L) candidates else candidates[which.min(pos)]
 
         data.table(
           chrom       = row$chrom,

@@ -4,6 +4,20 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.8] - 2026-07-31
+
+- Peak-to-SNP mapping is now deterministic. When several SNPs inside a peak
+  interval tied on raw chimeric-read count *and* on distance to the smoothed
+  peak position, `run_chimera_analysis()` broke the tie with an unseeded
+  `sample()`, so repeat runs on identical input could assign different SNPs to
+  the same peak — changing `snp_pos`/`snp_n` in the peak table and, through
+  peak association, the downstream chain analysis. The remaining tie is now
+  resolved by taking the leftmost candidate (`which.min(pos)`), chosen over
+  first-row order so the result does not depend on the row order of the
+  upstream coverage table. Candidates reaching this branch are equal in height
+  and equidistant from the peak, so the choice among them is arbitrary; only
+  its stability across runs changes.
+
 ## [0.8.7] - 2026-07-28
 
 - `chimera_cli.R --peak-list` now writes only peaks that mapped to a qualifying
