@@ -4,6 +4,41 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.10] - 2026-08-03
+
+- Per-read zone calls now require read evidence. `classify_zone_state()`
+  resolved a zone by majority vote with no floor on the evidence behind it, and
+  because the test was `majority >= 0.5` a dead tie (a read contributing 1 REF
+  and 1 ALT SNP) always resolved to REF — a directional artefact that
+  manufactures spurious REF calls and never spurious ALT ones, so it does not
+  cancel out with depth. A zone now returns `NA` unless the read contributes at
+  least `min_evidence_snps` SNPs to it *and* the vote clears `min_margin`,
+  letting the existing `classifiable` filters drop the read as they already do
+  when it has no SNPs in the zone at all. The new thresholds live in
+  `ZONE_CALL_HEURISTICS` (3 SNPs, 0.15 margin — which keeps 3-SNP 2:1 splits at
+  0.167 while rejecting ties).
+- Edge calls are now weighted by read count. `classify_edge_type()` tested its
+  motifs against `unique(patterns)`, the *set* of distinct L-M-R patterns, so
+  one stray read vetoed an otherwise unanimous verdict. Patterns are now
+  filtered to those held by at least `(1 - homog_frac)` of classifiable reads,
+  and the survivors must account for `homog_frac` of the population before any
+  positive call is made; otherwise the edge stays "ambiguous".
+- `homog_frac` (0.80) moves into `FUSION_HEURISTICS` as the single source of
+  truth and is threaded through the `compute_peak_pairs()` call sites. It was
+  previously replicated as a literal function-argument default in three places.
+  A `NULL` or out-of-range value now errors instead of silently collapsing
+  every comparison to zero length and calling everything "ambiguous".
+- Effect on results: clean gene conversions previously reported as
+  `AMBIGUOUS(pair_edge:ambiguous)` now classify as `NCO_GC`. On the simulated
+  swap sets every such AMBIGUOUS call resolves, with no events gained or lost
+  and no unmatched calls; results are identical across `--min-run 1` and `2`,
+  removing a sensitivity that previously changed the verdict on three tracts.
+  Regression-checked on `test_data` chrXI and chrI (byte-identical) and RAD5_01
+  (48 events, unchanged, its one ambiguous pair edge resolving to `NCO_GC`);
+  crossover classes (`CO_GC`, `CO_TERM`, `TCO_CAPTURED_TCO`) are preserved.
+  Remaining misses are tracts with ≤ 1 SNP, a resolution floor rather than a
+  classification failure.
+
 ## [0.8.9] - 2026-08-03
 
 - `chimera_cli.R` output flags are now combinable instead of mutually
