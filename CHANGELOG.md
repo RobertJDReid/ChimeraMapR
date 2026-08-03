@@ -4,6 +4,28 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.9] - 2026-08-03
+
+- `chimera_cli.R` output flags are now combinable instead of mutually
+  exclusive. `--peak-list`, `--overview-rds`, `--events-table` and the new
+  `--peak-plot` each request one file, and any combination may be given in a
+  single run (e.g. `--peak-list --peak-plot`). Previously choosing more than
+  one was an error, so producing several outputs meant re-running the whole
+  analysis per file.
+- The default (no output flag) is now the three-file set `--peak-plot
+  --peak-list --events-table`, where it was the overview PNG alone. Because the
+  events table comes from the chain-based caller, a default run now also runs
+  chain analysis and the PNG is the annotated overview (LOH band + event
+  symbols). Pass `--peak-plot` alone for the previous peaks-only PNG behaviour.
+- `--events-table` and `--chain-all` are no longer mutually exclusive. Given
+  both, the events table is written to the `--output` path *and* as the
+  `_step4_final_events.csv` step file, so each flag still delivers its
+  documented output.
+- `-o/--output` handling follows the multi-file outputs: a directory (or no
+  `--output`) auto-names each file with its own suffix, a file path is used
+  verbatim when exactly one output is selected, and with several outputs it is
+  treated as a name stem.
+
 ## [0.8.8] - 2026-07-31
 
 - Peak-to-SNP mapping is now deterministic. When several SNPs inside a peak

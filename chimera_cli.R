@@ -6,15 +6,19 @@
 #    Rscript chimera_cli.R [options] <read_data> <snp_data> <chr_size.fai>
 #
 #  Examples:
-#    # Default: save overview PNG
+#    # Default: overview PNG + peak list CSV + events table CSV
 #    Rscript chimera_cli.R reads.csv.gz snps.vcf.gz genome.fa.fai
 #
-#    # Named output path
-#    Rscript chimera_cli.R --output results/my_overview.png \
+#    # Named output directory
+#    Rscript chimera_cli.R --output results/ \
 #                          reads.csv.gz snps.vcf.gz genome.fa.fai
 #
-#    # Peak list CSV
+#    # Peak list CSV only
 #    Rscript chimera_cli.R --peak-list reads.csv.gz snps.vcf.gz genome.fa.fai
+#
+#    # Any combination of output flags: peak list + overview PNG
+#    Rscript chimera_cli.R --peak-list --peak-plot \
+#                          reads.csv.gz snps.vcf.gz genome.fa.fai
 #
 #    # Overview plot saved as an RDS object (for re-plotting in R)
 #    Rscript chimera_cli.R --overview-rds reads.csv.gz snps.vcf.gz genome.fa.fai
@@ -133,11 +137,17 @@ option_list <- list(
               metavar = "FLOAT",
               help    = "Whittaker smoothing penalty lambda (lower = tighter fit) [default: %default]"),
 
-  # Output mode — mutually exclusive; default is PNG overview plot
+  # Output selection — freely combinable. With none of these given, the default
+  # set is --peak-plot --peak-list --events-table.
+  make_option("--peak-plot",
+              action  = "store_true",
+              default = FALSE,
+              help    = "Write the genome-wide overview plot as a PNG"),
+
   make_option("--peak-list",
               action  = "store_true",
               default = FALSE,
-              help    = "Write a CSV of detected peaks instead of the overview plot"),
+              help    = "Write a CSV of detected peaks"),
 
   make_option("--overview-rds",
               action  = "store_true",
@@ -147,8 +157,8 @@ option_list <- list(
   make_option("--events-table",
               action  = "store_true",
               default = FALSE,
-              help    = paste("Run the chain-based caller and write ONLY the final events",
-                              "table as a CSV (no intermediate step CSVs, no plot)")),
+              help    = paste("Run the chain-based caller and write the final events",
+                              "table as a CSV (no intermediate step CSVs)")),
 
   # Coverage map (sequencing depth)
   make_option("--coverage-map",
@@ -156,7 +166,7 @@ option_list <- list(
               default = FALSE,
               help    = paste("Also write the per-position coverage table and collapsed",
                               "coverage segments from compute_coverage_map() as CSVs",
-                              "(in addition to the primary output mode)")),
+                              "(in addition to the selected outputs)")),
 
   # Chain-based LOH event calling
   make_option("--chain-all",
@@ -197,8 +207,10 @@ option_list <- list(
               default = NULL,
               metavar = "PATH",
               help    = paste("Output file path or directory.",
-                              "If a directory (or omitted), a dated filename is auto-generated.",
-                              "Default extension: .png / .csv / .rds depending on output mode."))
+                              "If a directory (or omitted), dated filenames are auto-generated.",
+                              "A file path is used verbatim when exactly one output is",
+                              "selected; with several it is treated as a name stem and each",
+                              "output gets its own .png / .csv / .rds suffix."))
 )
 
 parser <- OptionParser(
@@ -214,11 +226,14 @@ parser <- OptionParser(
     sep = "\n"
   ),
   epilogue = paste(
-    "Output modes (pick one; default is PNG overview plot):",
-    "  [default]       Genome-wide overview plot saved as PNG",
+    "Outputs (combine freely; with none given the default set is",
+    "--peak-plot --peak-list --events-table):",
+    "  --peak-plot     Genome-wide overview plot saved as PNG",
     "  --peak-list     Detected peaks as CSV",
     "  --overview-rds  Overview plot object saved as RDS (re-plot with readRDS + print)",
-    "  --events-table  Final chain-caller events table as CSV (only the events)",
+    "  --events-table  Final chain-caller events table as CSV",
+    "",
+    "Example: --peak-list --peak-plot  writes both the peak CSV and the PNG.",
     sep = "\n"
   )
 )
@@ -239,65 +254,74 @@ for (f in c(read_path, snp_path, fai_path)) {
     stop("Input file not found: ", f)
 }
 
-# Validate output mode — the primary output modes are mutually exclusive
-n_modes <- sum(opts[["peak-list"]], opts[["overview-rds"]], opts[["events-table"]])
-if (n_modes > 1)
-  stop("--peak-list, --overview-rds and --events-table are mutually exclusive. Choose one.")
+# ── Select outputs ────────────────────────────────────────────────────────────
+# The four output flags are independent and may be combined in any way. When
+# none is given we fall back to the default set: overview PNG + peak list +
+# events table.
+DEFAULT_OUTPUTS <- c("plot", "peaks", "events")
 
-# --events-table produces the chain caller's final events table only; asking for
-# --chain-all at the same time (which writes every step CSV + the annotated PNG)
-# is contradictory.
-if (opts[["events-table"]] && opts[["chain-all"]])
-  stop("--events-table and --chain-all are mutually exclusive. Use --chain-all for the full output set.")
+wanted <- c(
+  plot   = opts[["peak-plot"]],
+  peaks  = opts[["peak-list"]],
+  rds    = opts[["overview-rds"]],
+  events = opts[["events-table"]]
+)
+using_defaults <- !any(wanted)
+if (using_defaults) wanted[DEFAULT_OUTPUTS] <- TRUE
+wanted <- names(wanted)[wanted]
 
-# Both the full chain run and the events-only mode need the chain analysis code.
-run_chain <- opts[["chain-all"]] || opts[["events-table"]]
+# The events table comes out of the chain pipeline, so it (like --chain-all)
+# needs the chain analysis code.
+run_chain <- opts[["chain-all"]] || "events" %in% wanted
 if (run_chain && is.null(chain_found))
-  stop("--chain-all / --events-table requires loh_chain_analysis.R but it was not found next to chimera_functions.R")
+  stop("--events-table / --chain-all requires loh_chain_analysis.R but it was not found next to chimera_functions.R")
 
 
-# ── Resolve output path ───────────────────────────────────────────────────────
-resolve_output <- function(opts_output, sample_name, mode) {
-  ext <- switch(mode,
-    png    = ".png",
-    csv    = "_peaks.csv",
-    rds    = "_overview.rds",
-    events = "_events.csv"
-  )
-  stem <- paste0(sample_name, "_chimera_", Sys.Date())
+# ── Resolve output paths ──────────────────────────────────────────────────────
+OUTPUT_SUFFIX <- c(plot   = ".png",
+                   peaks  = "_peaks.csv",
+                   rds    = "_overview.rds",
+                   events = "_events.csv")
+
+# Returns a named character vector of file paths, one per requested output.
+# --output may be a directory (auto-named files inside it), or a file path:
+# used verbatim for a single output, or as a name stem when several are asked
+# for, since one path cannot name three files.
+resolve_outputs <- function(opts_output, sample_name, wanted) {
+  auto_stem <- paste0(sample_name, "_chimera_", Sys.Date())
 
   if (is.null(opts_output)) {
-    # Default: write to current directory
-    return(paste0(stem, ext))
-  }
-
-  if (dir.exists(opts_output) || grepl("/$", opts_output)) {
-    # It's a directory: auto-name the file inside it
+    # Default: dated names in the current directory
+    stem <- auto_stem
+  } else if (dir.exists(opts_output) || grepl("/$", opts_output)) {
+    # A directory: auto-name the files inside it
     dir.create(opts_output, recursive = TRUE, showWarnings = FALSE)
-    return(file.path(opts_output, paste0(stem, ext)))
+    stem <- file.path(sub("/+$", "", opts_output), auto_stem)
+  } else {
+    # A file path — create the parent directory either way
+    dir.create(dirname(opts_output), recursive = TRUE, showWarnings = FALSE)
+    if (length(wanted) == 1L) {
+      out <- setNames(opts_output, wanted)
+      return(out)
+    }
+    # Several outputs requested: strip any extension and use the rest as a stem
+    stem <- sub("\\.[^./]+$", "", opts_output)
   }
 
-  # Treat as a full file path — create parent directory if needed
-  dir.create(dirname(opts_output), recursive = TRUE, showWarnings = FALSE)
-  opts_output
+  setNames(paste0(stem, OUTPUT_SUFFIX[wanted]), wanted)
 }
 
-# Resolve a directory for "extra" per-run outputs (coverage map, chain CSVs)
-# that sit alongside the main --output, independent of its mode/extension.
-resolve_extra_dir <- function(opts_output, out_path) {
+out_paths <- resolve_outputs(opts[["output"]], opts[["sample-name"]], wanted)
+
+# Resolve a directory for "extra" per-run outputs (coverage map, chain step
+# CSVs) that sit alongside the requested outputs, independent of their names.
+resolve_extra_dir <- function(opts_output, out_paths) {
   if (!is.null(opts_output) && (dir.exists(opts_output) || grepl("/$", opts_output))) {
     opts_output
   } else {
-    dirname(normalizePath(out_path, mustWork = FALSE))
+    dirname(normalizePath(out_paths[[1]], mustWork = FALSE))
   }
 }
-
-output_mode <- if (opts[["peak-list"]])    "csv"    else
-               if (opts[["overview-rds"]]) "rds"    else
-               if (opts[["events-table"]]) "events" else
-                                           "png"
-
-out_path <- resolve_output(opts[["output"]], opts[["sample-name"]], output_mode)
 
 
 # ── Run analysis ──────────────────────────────────────────────────────────────
@@ -314,7 +338,13 @@ cat("  Del rate cutoff :", opts[["del-rate-cutoff"]], "\n")
 cat("  Min run         :", opts[["min-run"]],         "\n")
 cat("  Min peak height :", opts[["min-peak-height"]], "\n")
 cat("  Lambda (λ)      :", opts[["lambda"]],          "\n")
-cat("Output mode       :", output_mode, "→", out_path, "\n")
+OUTPUT_LABEL <- c(plot   = "Overview plot (PNG)",
+                  peaks  = "Peak list (CSV)",
+                  rds    = "Overview object (RDS)",
+                  events = "Events table (CSV)")
+cat(if (using_defaults) "Outputs (default set):\n" else "Outputs:\n")
+for (w in wanted)
+  cat(sprintf("  %-22s → %s\n", OUTPUT_LABEL[[w]], out_paths[[w]]))
 if (opts[["coverage-map"]]) cat("Coverage map      : enabled\n")
 if (opts[["chain-all"]]) {
   cat("Chain analysis    : enabled\n")
@@ -344,8 +374,9 @@ results$ploidy_map  <- ploidy_map
 # Classify each peak's haplotype run-pattern (binary / gene_conversion /
 # internal_crossover / undefined) from its own read evidence, before any
 # fusion or event calling -- the same per-peak classification shown on the
-# app's individual peak plots. Included in --peak-list / --overview-rds, and
-# reused (not recomputed) by --chain-all's compute_peak_pairs() below.
+# app's individual peak plots. Included in the --peak-list / --overview-rds
+# outputs, and reused (not recomputed) by the chain pipeline's
+# compute_peak_pairs() below.
 results$snp_peaks <- label_snp_peaks_haplotypes(
   results$snp_peaks, results$rt_df, results$transition_pos,
   zone_min_snps = opts[["min-run"]],
@@ -390,23 +421,40 @@ if (!is.null(results$snp_peaks) && "haplotype_label" %in% names(results$snp_peak
 cat("\n")
 
 
-# ── Write output ──────────────────────────────────────────────────────────────
-if (output_mode == "csv") {
+# ── Write outputs ─────────────────────────────────────────────────────────────
+# Each requested output is written independently. Two are deferred to the chain
+# block below: the events table (produced there) and, when the chain pipeline
+# runs, the PNG — build_overview_plot() overlays the LOH band and event symbols
+# from results$loh_segments / results$event_table, so rendering here would give
+# a peaks-only plot.
+render_overview_png <- function(out_path, annotated) {
+  message(if (annotated) "Building annotated overview plot ..."
+          else           "Building overview plot ...")
+  p     <- build_overview_plot(results)
+  n_chr <- length(unique(results$snp_coverage$chrom))
+  png_h <- max(3, min(16, n_chr * 1.2))
 
+  message("Saving PNG → ", out_path)
+  ggplot2::ggsave(out_path, plot = p, width = 12, height = png_h, dpi = 300)
+  cat(if (annotated) "Annotated overview plot (LOH + events) saved to:"
+      else           "Overview plot saved to:", out_path, "\n")
+}
+
+if ("peaks" %in% wanted) {
   # Peak list — same rows the app's "Peak Summary" table shows: peaks whose
   # interval contained at least one SNP with raw count >= --min-peak-height.
   # Peaks with snp_pos = NA ("None above cutoff") are dropped here, matching
   # app.R's output$peaks_table.
   peak_list <- results$snp_peaks[!is.na(snp_pos)]
-  message("Writing peak list → ", out_path)
-  data.table::fwrite(peak_list, out_path)
-  cat("Peak list written to:", out_path,
+  message("Writing peak list → ", out_paths[["peaks"]])
+  data.table::fwrite(peak_list, out_paths[["peaks"]])
+  cat("Peak list written to:", out_paths[["peaks"]],
       sprintf("(%d peaks above min height)\n", nrow(peak_list)))
+}
 
-} else if (output_mode == "rds") {
-
+if ("rds" %in% wanted) {
   # Overview plot RDS — same payload as the Shiny download_plot_rds handler
-  message("Saving overview RDS → ", out_path)
+  message("Saving overview RDS → ", out_paths[["rds"]])
   saveRDS(
     list(
       snp_coverage    = data.table::copy(results$snp_coverage),
@@ -416,47 +464,23 @@ if (output_mode == "csv") {
       sample_name     = opts[["sample-name"]],
       app_version     = APP_VERSION
     ),
-    out_path
+    out_paths[["rds"]]
   )
-  cat("Overview RDS saved to:", out_path, "\n")
+  cat("Overview RDS saved to:", out_paths[["rds"]], "\n")
   cat("Re-plot with:\n")
   cat('  library(ggplot2); source("R/chimera_functions.R")\n')
-  cat('  d <- readRDS("', out_path, '")\n', sep = "")
+  cat('  d <- readRDS("', out_paths[["rds"]], '")\n', sep = "")
   cat('  print(build_overview_plot(d))\n')
-
-} else if (output_mode == "events") {
-
-  # Events-only mode: the events table is produced by the chain pipeline below,
-  # so defer writing until the chain block has built final_events.
-  message("Events table will be written after chain analysis ...")
-
-} else if (opts[["chain-all"]]) {
-
-  # PNG overview plot, but --chain-all is also requested: defer the render.
-  # The chain block below populates results$loh_segments and
-  # results$event_table, which build_overview_plot() overlays as the LOH band
-  # and event symbols. Building here would produce a peaks-only plot, so we
-  # wait and render the annotated overview at the end of the chain block.
-  message("Overview plot will be rendered after chain analysis (annotated) ...")
-
-} else {
-
-  # Default: PNG overview plot
-  message("Building overview plot ...")
-  p       <- build_overview_plot(results)
-  n_chr   <- length(unique(results$snp_coverage$chrom))
-  png_h   <- max(3, min(16, n_chr * 1.2))
-
-  message("Saving PNG → ", out_path)
-  ggplot2::ggsave(out_path, plot = p, width = 12, height = png_h, dpi = 300)
-  cat("Overview plot saved to:", out_path, "\n")
 }
 
-# When output is produced by the chain block below (deferred annotated PNG for
-# --chain-all, or the events table for --events-table), defer "Done." too so it
-# prints after that output is actually written.
-if (!(output_mode == "png" && opts[["chain-all"]]) && output_mode != "events")
-  cat("Done.\n")
+if ("plot" %in% wanted && !run_chain) {
+  render_overview_png(out_paths[["plot"]], annotated = FALSE)
+} else if ("plot" %in% wanted) {
+  message("Overview plot will be rendered after chain analysis (annotated) ...")
+}
+
+if ("events" %in% wanted)
+  message("Events table will be written after chain analysis ...")
 
 
 # ── Coverage map (sequencing depth) ─────────────────────────────────────────────
@@ -472,7 +496,7 @@ if (opts[["coverage-map"]] || run_chain) {
 }
 
 if (opts[["coverage-map"]]) {
-  cov_dir  <- resolve_extra_dir(opts[["output"]], out_path)
+  cov_dir  <- resolve_extra_dir(opts[["output"]], out_paths)
   dir.create(cov_dir, recursive = TRUE, showWarnings = FALSE)
   cov_stem <- file.path(cov_dir, paste0(opts[["sample-name"]], "_", Sys.Date()))
   cov_table_path <- paste0(cov_stem, "_coverage_table.csv")
@@ -491,11 +515,11 @@ if (opts[["coverage-map"]]) {
 }
 
 
-# ── Chain-based LOH event calling (--chain-all / --events-table) ──────────────
+# ── Chain-based LOH event calling (--events-table / --chain-all) ──────────────
 # The full pipeline (steps 0–4) always runs; `full_chain` decides how much is
-# written. Under --chain-all we emit every intermediate step CSV and the
-# annotated overview PNG. Under --events-table we run the same pipeline but write
-# only the final events table (to out_path).
+# written. Under --chain-all we emit every intermediate step CSV; --events-table
+# writes the final events table to its own path. Either way, a requested PNG is
+# rendered here so it carries the LOH band and event annotations.
 if (run_chain) {
 
   full_chain <- opts[["chain-all"]]
@@ -561,8 +585,8 @@ if (run_chain) {
     data.table::rbindlist(rows, fill = TRUE)
   }
 
-  # Resolve the output directory — place chain CSVs alongside the main output
-  out_dir <- resolve_extra_dir(opts[["output"]], out_path)
+  # Resolve the output directory — place chain CSVs alongside the main outputs
+  out_dir <- resolve_extra_dir(opts[["output"]], out_paths)
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   stem <- file.path(out_dir,
                     paste0(opts[["sample-name"]], "_", Sys.Date(), "_chain"))
@@ -700,15 +724,24 @@ if (run_chain) {
     snp_peaks    = results$snp_peaks
   )
 
-  # Under --chain-all the events table is one of many step CSVs (stem-named);
-  # under --events-table it is the single requested output, written to out_path.
-  step4_ev <- if (full_chain) paste0(stem, "_step4_final_events.csv") else out_path
   final_events <- build_event_table(rec$events)
-  data.table::fwrite(final_events, step4_ev)
-  cat(sprintf("  Final events     → %s (%d total; %d high, %d review)\n",
-              step4_ev, nrow(final_events),
-              sum(final_events$confidence == "high"),
-              sum(final_events$confidence == "review")))
+  ev_summary   <- sprintf("(%d total; %d high, %d review)",
+                          nrow(final_events),
+                          sum(final_events$confidence == "high"),
+                          sum(final_events$confidence == "review"))
+
+  # --chain-all names the events table as one of its step CSVs; --events-table
+  # writes it to its own requested path. With both flags each gets its file, so
+  # neither flag's documented output goes missing.
+  if (full_chain) {
+    step4_ev <- paste0(stem, "_step4_final_events.csv")
+    data.table::fwrite(final_events, step4_ev)
+    cat(sprintf("  Final events     → %s %s\n", step4_ev, ev_summary))
+  }
+  if ("events" %in% wanted) {
+    data.table::fwrite(final_events, out_paths[["events"]])
+    cat(sprintf("  Events table     → %s %s\n", out_paths[["events"]], ev_summary))
+  }
 
   if (full_chain && length(rec$unclaimed_loh) > 0) {
     step4_ul <- paste0(stem, "_step4_other_events_loh.csv")
@@ -740,29 +773,17 @@ if (run_chain) {
   }
 
   # ── Annotated overview PNG ────────────────────────────────────────────────────
-  # In the default (PNG) output mode the overview render was deferred above so
-  # it could be annotated. Feed the chain results back into `results` — the LOH
-  # segment table and the final event table — so build_overview_plot() draws the
-  # LOH band and event symbols, matching the app's annotated overview. Skipped
-  # for --peak-list / --overview-rds, where out_path is a CSV/RDS file.
-  if (output_mode == "png") {
+  # A requested PNG was deferred above so it could be annotated. Feed the chain
+  # results back into `results` — the LOH segment table and the final event
+  # table — so build_overview_plot() draws the LOH band and event symbols,
+  # matching the app's annotated overview.
+  if ("plot" %in% wanted) {
     results$loh_segments <- loh_segs
     results$event_table  <- final_events
-
-    message("Building annotated overview plot ...")
-    p     <- build_overview_plot(results)
-    n_chr <- length(unique(results$snp_coverage$chrom))
-    png_h <- max(3, min(16, n_chr * 1.2))
-
-    message("Saving PNG → ", out_path)
-    ggplot2::ggsave(out_path, plot = p, width = 12, height = png_h, dpi = 300)
-    cat(sprintf("Annotated overview plot (LOH + events) saved to: %s\n", out_path))
+    render_overview_png(out_paths[["plot"]], annotated = TRUE)
   }
 
   cat("\n── Chain analysis complete ───────────────────────────────────────────────────\n")
-
-  # Deferred "Done." — the non-chain path prints this right after writing the
-  # main output; here the PNG (deferred --chain-all) or the events table
-  # (--events-table) is written above, so print it now.
-  if (output_mode %in% c("png", "events")) cat("Done.\n")
 }
+
+cat("Done.\n")

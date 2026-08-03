@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.8.8_
+_version 0.8.9_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -88,25 +88,29 @@ Rscript chimera_cli.R [options] <read_data> <snp_data> <chr_size.fai>
 
 Three positional arguments are required, in order: the **read data** file (`.csv`/`.csv.gz`), the **SNP data** file (`.csv`/`.vcf`/`.vcf.gz`), and the **chromosome size** file (`.fai`).
 
-#### Output-mode flags
+#### Output flags
 
-Pick at most one; the default (no flag) is the PNG overview plot. These are mutually exclusive.
+These may be combined freely — each flag adds its own file. With none of them given, the default set is `--peak-plot --peak-list --events-table` (three files).
 
-| Flag | Default | Output |
+| Flag | In default set | Output |
 |---|:---:|---|
-| _(none)_ | ✓ | Genome-wide overview plot (PNG) |
-| `--peak-list` | | Detected peaks, including haplotype classification, as CSV. Restricted to peaks with a qualifying SNP at or above `--min-peak-height`, matching the app's "Peak Summary" table |
+| `--peak-plot` | ✓ | Genome-wide overview plot (PNG) |
+| `--peak-list` | ✓ | Detected peaks, including haplotype classification, as CSV. Restricted to peaks with a qualifying SNP at or above `--min-peak-height`, matching the app's "Peak Summary" table |
+| `--events-table` | ✓ | Runs the chain-based caller and writes the final events table as CSV (no intermediate step CSVs) |
 | `--overview-rds` | | Overview plot object as RDS (re-plot later with `readRDS()` + `print()`) |
-| `--events-table` | | Runs the chain-based caller and writes **only** the final events table as CSV (no intermediate step CSVs, no plot). Mutually exclusive with `--chain-all` |
+
+For example, `--peak-list --peak-plot` writes just the peak CSV and the PNG.
+
+Whenever the chain-based caller runs (`--events-table` or `--chain-all`), a requested `--peak-plot` is rendered from its results, so the PNG carries the LOH band and event annotations. Without the chain caller the PNG shows peaks only.
 
 #### Additional output flags
 
-Layer extra outputs on top of the selected output mode.
+Layer extra outputs on top of the flags above.
 
 | Flag | Description |
 |---|---|
 | `--coverage-map` | Also write the per-position coverage table and collapsed coverage segments as CSVs |
-| `--chain-all` | Run the chain-based LOH recombination-event caller and write one CSV per pass (steps 0–4); in the default PNG mode this also annotates the overview plot with the LOH band and event symbols. Requires `loh_chain_analysis.R` alongside `chimera_functions.R` |
+| `--chain-all` | Run the chain-based LOH recombination-event caller and write one CSV per pass (steps 0–4). Requires `loh_chain_analysis.R` alongside `chimera_functions.R` |
 
 #### Analysis parameters
 
@@ -135,7 +139,7 @@ Apply only when `--chain-all` or `--events-table` is used.
 
 | Flag | Default | Description |
 |---|:---:|---|
-| `-o, --output PATH` | _cwd_ | Output file path or directory. If a directory (or omitted), a dated filename is auto-generated; the extension (`.png`/`.csv`/`.rds`) follows the output mode |
+| `-o, --output PATH` | _cwd_ | Output file path or directory. If a directory (or omitted), dated filenames are auto-generated (`.png`, `_peaks.csv`, `_events.csv`, `_overview.rds`). A file path is used verbatim when exactly one output is selected; with several it is treated as a name stem and each output gets its own suffix |
 
 Run `Rscript chimera_cli.R --help` for the same list from the terminal.
 
