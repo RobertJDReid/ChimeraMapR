@@ -1779,16 +1779,48 @@ classify_fused_peak_haplotype <- function(fg, chr_name, rt_df, touching_ids,
 # =============================================================================
 
 # ---------------------------------------------------------------------------
+#  ZONE-CALL EVIDENCE THRESHOLDS
+#
+#  A per-read zone call is a majority vote over the read's SNPs inside the
+#  zone. With very few SNPs that vote is not informative, and a dead tie
+#  (equal REF and ALT counts) used to resolve to REF purely because the
+#  comparison was `majority >= 0.5` -- a directional artefact that
+#  manufactures spurious REF zone calls and never spurious ALT ones.
+#
+#  Such calls are indistinguishable from real evidence downstream, where they
+#  enter classify_edge_type() as extra distinct L-M-R patterns and push an
+#  otherwise-clean gene conversion to "ambiguous". Returning NA instead lets
+#  the existing `classifiable` filters drop the read, which is the mechanism
+#  already relied on when a read simply has no SNPs in a zone.
+#
+#    min_evidence_snps : SNPs the read must contribute to the zone before a
+#                        call is attempted at all
+#    min_margin        : required |REF fraction - 0.5|; below this the zone is
+#                        too close to call and returns NA (0.15 keeps 3-SNP
+#                        2:1 splits, which sit at 0.167, while rejecting ties)
+# ---------------------------------------------------------------------------
+ZONE_CALL_HEURISTICS <- list(
+  min_evidence_snps = 3L,
+  min_margin        = 0.15
+)
+
+# ---------------------------------------------------------------------------
 # classify_zone_state()
 #   For a single read's RLE-smoothed IS_REF vector and positions, return the
 #   majority-vote haplotype ("REF" / "ALT") for a defined genomic interval.
-#   Returns NA if fewer than min_snps positions fall in the interval.
+#   Returns NA if fewer than min_snps positions fall in the interval, if the
+#   read contributes fewer than min_evidence SNPs to the zone, or if the vote
+#   is too close to call (see ZONE_CALL_HEURISTICS).
 # ---------------------------------------------------------------------------
-classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_snps) {
+classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_snps,
+                                min_evidence = ZONE_CALL_HEURISTICS$min_evidence_snps,
+                                min_margin   = ZONE_CALL_HEURISTICS$min_margin) {
   idx <- pos_vec >= zone_start & pos_vec <= zone_end
-  if (sum(idx) < min_snps) return(NA_character_)
+  n_zone <- sum(idx)
+  if (n_zone < min_snps || n_zone < min_evidence) return(NA_character_)
   majority <- mean(is_ref_vec[idx], na.rm = TRUE)
   if (is.na(majority)) return(NA_character_)
+  if (abs(majority - 0.5) < min_margin) return(NA_character_)
   if (majority >= 0.5) "REF" else "ALT"
 }
 
@@ -1800,9 +1832,35 @@ classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_s
 #
 #   state_df: data.frame with columns read_id, state_L, state_M, state_R
 #             (each is "REF", "ALT", or NA)
+#   homog_frac: the surviving (non-noise) patterns must be held by at least
+#             this fraction of classifiable reads for a positive call. Reads
+#             are the unit of evidence: the pattern SET alone treats one
+#             dissenting read the same as ten, so a single stray read used to
+#             veto an otherwise unanimous verdict.
 #   Returns a character scalar.
 # ---------------------------------------------------------------------------
-classify_edge_type <- function(state_df) {
+
+# Drops patterns held by less than (1 - homog_frac) of reads as noise and
+# reports what fraction of reads the survivors account for, so the set-based
+# motif tests below can run on the supported patterns while still refusing to
+# call anything when the survivors do not carry the population.
+.supported_patterns <- function(patterns, homog_frac) {
+  n <- length(patterns)
+  if (n == 0) return(list(pats = character(0), kept_frac = 0))
+  tab        <- table(patterns)
+  keep       <- names(tab)[(tab / n) >= (1 - homog_frac)]
+  list(pats = keep, kept_frac = sum(tab[keep]) / n)
+}
+
+classify_edge_type <- function(state_df,
+                               homog_frac = FUSION_HEURISTICS$homog_frac) {
+
+  # A NULL/NA homog_frac would make every fraction comparison zero-length and
+  # silently collapse each call to "ambiguous" rather than erroring, so fail loudly.
+  if (length(homog_frac) != 1L || !is.finite(homog_frac) ||
+      homog_frac <= 0 || homog_frac > 1)
+    stop("classify_edge_type(): homog_frac must be a single value in (0, 1]; got ",
+         paste(format(homog_frac), collapse = ", "))
 
   classifiable <- state_df[!is.na(state_df$state_L) &
                            !is.na(state_df$state_R), ]
@@ -1811,34 +1869,30 @@ classify_edge_type <- function(state_df) {
 
   if (nrow(classifiable) == 0) return("unresolvable")
 
-  if (no_middle) {
-    lr_patterns <- paste(classifiable$state_L, classifiable$state_R, sep = "-")
-    unique_pats <- unique(lr_patterns)
-    if (length(unique_pats) == 2) {
-      sorted <- sort(unique_pats)
+  classify_lr <- function(df) {
+    sup <- .supported_patterns(paste(df$state_L, df$state_R, sep = "-"), homog_frac)
+    if (sup$kept_frac >= homog_frac && length(sup$pats) == 2) {
+      sorted <- sort(sup$pats)
       if (sorted[1] == "ALT-REF" && sorted[2] == "REF-ALT")
         return("crossover")
     }
-    return("ambiguous")
+    "ambiguous"
   }
+
+  if (no_middle) return(classify_lr(classifiable))
 
   classifiable_3 <- classifiable[!is.na(classifiable$state_M), ]
 
-  if (nrow(classifiable_3) == 0) {
-    lr_patterns <- paste(classifiable$state_L, classifiable$state_R, sep = "-")
-    unique_pats <- unique(lr_patterns)
-    if (length(unique_pats) == 2) {
-      sorted <- sort(unique_pats)
-      if (sorted[1] == "ALT-REF" && sorted[2] == "REF-ALT")
-        return("crossover")
-    }
-    return("ambiguous")
-  }
+  if (nrow(classifiable_3) == 0) return(classify_lr(classifiable))
 
   patterns <- paste(classifiable_3$state_L,
                     classifiable_3$state_M,
                     classifiable_3$state_R, sep = "-")
-  unique_pats <- unique(patterns)
+
+  sup         <- .supported_patterns(patterns, homog_frac)
+  unique_pats <- sup$pats
+  # Not enough of the reads agree on any supported pattern to call anything.
+  if (sup$kept_frac < homog_frac || length(unique_pats) == 0) return("ambiguous")
 
   is_return <- function(p) {
     parts <- strsplit(p, "-")[[1]]
@@ -1880,7 +1934,13 @@ FUSION_HEURISTICS <- list(
   loh_min_depth    = 5L,
   loh_alt_max      = 0.15,
   loh_ref_min      = 0.85,
-  loh_gap_min_frac = 0.5
+  loh_gap_min_frac = 0.5,
+
+  # Fraction of classifiable reads that must agree before a positive edge call
+  # is made. Single source of truth for both classify_edge_type() (standard
+  # 3-zone path) and classify_loh_crossover_edge() (LOH-crossover path), which
+  # previously carried this only as a function-argument default.
+  homog_frac       = 0.80
 )
 
 # ---------------------------------------------------------------------------
@@ -2024,7 +2084,8 @@ flanking_tracts_share_state <- function(loh_segments, chr_name,
 #   classify_edge_type() requires both ALT-REF and REF-ALT patterns, it misses
 #   cases where only one crossing direction is observed due to read-length limits.
 # ---------------------------------------------------------------------------
-classify_loh_crossover_edge <- function(state_list, loh_state, homog_frac = 0.80) {
+classify_loh_crossover_edge <- function(state_list, loh_state,
+                                        homog_frac = FUSION_HEURISTICS$homog_frac) {
   loh_allele <- if (isTRUE(loh_state == "REF_fixed")) "REF" else "ALT"
   het_allele <- if (isTRUE(loh_state == "REF_fixed")) "ALT" else "REF"
 
@@ -2179,7 +2240,7 @@ compute_peak_pairs <- function(snp_peaks,
                                jaccard_threshold  = 0.20,
                                zone_min_snps      = 2L,
                                supervised_override = NULL,
-                               homog_frac          = 0.80,
+                               homog_frac          = FUSION_HEURISTICS$homog_frac,
                                full_read_loh       = NULL) {
 
   if (is.null(snp_peaks) || nrow(snp_peaks) == 0)
@@ -2354,7 +2415,7 @@ compute_peak_pairs <- function(snp_peaks,
             classify_loh_crossover_edge(as.data.frame(state_list), loh_state_in_gap,
                                         homog_frac = homog_frac)
           } else {
-            classify_edge_type(as.data.frame(state_list))
+            classify_edge_type(as.data.frame(state_list), homog_frac = homog_frac)
           }
         }
 
@@ -2377,7 +2438,8 @@ compute_peak_pairs <- function(snp_peaks,
             }, by = read_id]
 
             n_spanning <- nrow(state_list)
-            edge_type  <- classify_edge_type(as.data.frame(state_list))
+            edge_type  <- classify_edge_type(as.data.frame(state_list),
+                                             homog_frac = homog_frac)
           }
         }
       }
