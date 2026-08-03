@@ -1,1 +1,46 @@
-Eilers P, Bloemberg T, Wehrens R (2026). _ptw: Parametric Time Warping_. doi:10.32614/CRAN.package.ptw
+ChimeraMapR — citations
+
+Generated with utils::citation() on 2026-07-31. VERSION NUMBERS BELOW ARE
+THOSE INSTALLED ON THE GENERATING MACHINE — replace with the versions
+actually used for the published analyses before submission.
+
+## Method
+
+R Core Team (2025). _R: A Language and Environment for Statistical Computing_. R Foundation for Statistical Computing, Vienna, Austria. <https://www.R-project.org/>.
+
+Eilers PHC (2003). "A perfect smoother." _Analytical Chemistry_, *75*(14), 3631-3636. doi:10.1021/ac034173t
+
+## R packages
+
+Chang W, Cheng J, Allaire J, Sievert C, Schloerke B, Aden-Buie G, Xie Y, Allen J, McPherson J, Dipert A, Borges B (2026). _shiny: Web Application Framework for R_. doi:10.32614/CRAN.package.shiny <https://doi.org/10.32614/CRAN.package.shiny>, R package version 1.13.0, <https://CRAN.R-project.org/package=shiny>.
+
+Barrett T, Dowle M, Srinivasan A, Gorecki J, Chirico M, Hocking T, Schwendinger B, Krylov I (2025). _data.table: Extension of `data.frame`_. doi:10.32614/CRAN.package.data.table <https://doi.org/10.32614/CRAN.package.data.table>, R package version 1.17.2, <https://CRAN.R-project.org/package=data.table>.
+
+Wickham H (2016). _ggplot2: Elegant Graphics for Data Analysis_. Springer-Verlag New York. ISBN 978-3-319-24277-4, <https://ggplot2.tidyverse.org>.
+
+Borchers H (2025). _pracma: Practical Numerical Math Functions_. doi:10.32614/CRAN.package.pracma <https://doi.org/10.32614/CRAN.package.pracma>, R package version 2.4.6, <https://CRAN.R-project.org/package=pracma>.
+
+Bates D, Maechler M, Jagan M (2025). _Matrix: Sparse and Dense Matrix Classes and Methods_. doi:10.32614/CRAN.package.Matrix <https://doi.org/10.32614/CRAN.package.Matrix>, R package version 1.7-3, <https://CRAN.R-project.org/package=Matrix>.
+
+Eddelbuettel D, François R (2011). “Rcpp: Seamless R and C++ Integration.” _Journal of Statistical Software_, *40*(8), 1-18. doi:10.18637/jss.v040.i08 <https://doi.org/10.18637/jss.v040.i08>.
+    [Rcpp: JSS 2011 paper is the canonical citation; citation('Rcpp') also
+     offers the package, the 2013 book, and Eddelbuettel & Balamuta 2018.]
+
+Csárdi G, Nepusz T (2006). “The igraph software package for complex network research.” _InterJournal_, *Complex Systems*, 1695. <https://igraph.org>.
+    [igraph: InterJournal 2006 is the canonical citation; citation('igraph')
+     also offers the 2023 arXiv paper and the package itself.]
+
+Pedersen T (2025). _patchwork: The Composer of Plots_. doi:10.32614/CRAN.package.patchwork <https://doi.org/10.32614/CRAN.package.patchwork>, R package version 1.3.2, <https://CRAN.R-project.org/package=patchwork>.
+
+Davis T (2024). _optparse: Command Line Option Parser_. doi:10.32614/CRAN.package.optparse <https://doi.org/10.32614/CRAN.package.optparse>, R package version 1.7.5, <https://CRAN.R-project.org/package=optparse>.
+
+Bengtsson H (2025). _R.utils: Various Programming Utilities_. doi:10.32614/CRAN.package.R.utils <https://doi.org/10.32614/CRAN.package.R.utils>, R package version 2.13.0, <https://CRAN.R-project.org/package=R.utils>.
+
+## Not from citation()
+
+pysam has no published paper; cite the software (https://github.com/pysam-developers/pysam)
+together with the htslib/samtools papers already in the Methods draft
+(@danecekTwelveYearsSAMtools2021, @bonfieldHTSlibLibraryReading2021).
+
+Still to source by hand: Viterbi (1967) for the decoding algorithm, and a
+beta-binomial mixture precedent for the LOH emission model.

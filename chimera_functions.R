@@ -44,8 +44,13 @@ sourceCpp(file.path(.chimera_script_dir, "src", "loh_hmm.cpp"),
 #  lambda : smoothness penalty — smaller = tighter fit, larger = smoother
 #  d      : penalty derivative order (2 = standard, penalises curvature)
 #
-#  Based on Eilers P, Bloemberg T, Wehrens R (2026).
-#  _ptw: Parametric Time Warping_. doi:10.32614/CRAN.package.ptw
+#  Eilers PHC (2003). A perfect smoother. Anal Chem 75(14):3631-3636.
+#  doi:10.1021/ac034173t
+#
+#  Solves (I + lambda * D'D) z = y with sparse matrices. Algebraically
+#  identical to pracma::whittaker() and (for d = 2) ptw::whit2(); both agree
+#  to ~1e-14. pracma's is dense, so it is O(n^2) in memory and ~1000x slower
+#  by n = 4000 — unusable at chromosome-scale SNP counts, hence this version.
 # -----------------------------------------------------------------------------
 whittaker <- function(y, lambda = 1, d = 2) {
   n <- length(y)
