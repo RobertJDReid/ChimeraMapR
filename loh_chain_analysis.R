@@ -2791,9 +2791,11 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   # so it's added to `events` and removed from `unclaimed_peaks` — showing
   # the same peak simultaneously as a called event *and* as "unclaimed" is
   # exactly the confusing double-reporting this reconciliation used to do.
-  # They're named "_subres" (sub-resolution) and fall to "review" confidence
-  # in build_event_table(), distinguishing them from the better-supported
-  # CO_GC/NCO_GC calls fired by the motif rules. Peaks that classify_tract()
+  # They're named "_subres" (sub-resolution) to distinguish them from the
+  # tract-corroborated CO_GC/NCO_GC calls fired by the motif rules. The suffix
+  # records that no fixed tract was resolvable, not that the call is doubtful:
+  # build_event_table() scores them "high" once they clear the min_span read
+  # floor, and "review" only below it. Peaks that classify_tract()
   # genuinely cannot resolve (binary singleton, independent_events, no
   # edge_type, low coverage, ...) are not events — they stay in
   # `unclaimed_peaks` for manual review, tagged with the reason.
@@ -2855,7 +2857,27 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
 #  BUILD EVENT TABLE  (flat data.table for display/export)
 # =============================================================================
 
-build_event_table <- function(events) {
+#  Confidence assignment
+#
+#  HIGH_CONF_CLASSES are fired by the motif rules, where the surrounding chain
+#  context is itself the evidence — they are high confidence unconditionally.
+#
+#  SUBRES_CLASSES are promoted from a single self-classifying peak
+#  (gene_conversion / internal_crossover) that never attached to a token, so
+#  there is no flanking LOH tract to corroborate them. That makes them
+#  sub-resolution, not uncertain: classify_peak_haplotype()'s per-read pattern
+#  is the authoritative call for these edge types, which is exactly why
+#  classify_tract() exempts them from its min_span gate. A crossover whose
+#  conversion tract is shorter than the LOH map can resolve still leaves an
+#  unambiguous junction signature in the reads. The gate is therefore applied
+#  here instead: with min_span or more supporting reads the call is high
+#  confidence; below that the peak is too thin to stand on its own and stays
+#  in "review".
+HIGH_CONF_CLASSES <- c("NCO_GC", "CO_GC", "CO_TERM", "CO_TERM_GAPPED",
+                        "CROSSOVER_NO_TRACT", "DOUBLE_GC", "TCO_CAPTURED_TCO")
+SUBRES_CLASSES    <- c("CO_GC_subres", "NCO_GC_subres")
+
+build_event_table <- function(events, params = default_chain_params()) {
   if (length(events) == 0)
     return(data.table(
       event_class = character(), chrom = character(),
@@ -2865,14 +2887,18 @@ build_event_table <- function(events) {
       confidence = character(), notes = character()
     ))
 
+  min_span <- as.integer(params$min_span %||% 3L)
+
   rows <- lapply(events, function(ev) {
-    confidence <- if (ev$event_class %in% c("NCO_GC", "CO_GC", "CO_TERM",
-                                             "CO_TERM_GAPPED",
-                                             "CROSSOVER_NO_TRACT", "DOUBLE_GC",
-                                             "TCO_CAPTURED_TCO"))
+    ns <- as.integer(ev$n_support %||% NA_integer_)
+
+    confidence <- if (ev$event_class %in% HIGH_CONF_CLASSES) {
       "high"
-    else
+    } else if (ev$event_class %in% SUBRES_CLASSES) {
+      if (!is.na(ns) && ns >= min_span) "high" else "review"
+    } else {
       "review"
+    }
 
     data.table(
       event_class     = ev$event_class,
@@ -2923,8 +2949,9 @@ build_event_table <- function(events) {
 #'   $events          flat list of event objects. Self-classifying peaks
 #'                    (gene_conversion/crossover/internal_crossover) that never
 #'                    attached to a motif-scanned token are included here too
-#'                    (as *_subres, "review" confidence) -- they ARE events,
-#'                    just not shown twice by also appearing below.
+#'                    (as *_subres, scored "high" at or above the min_span read
+#'                    floor and "review" below it) -- they ARE events, just not
+#'                    shown twice by also appearing below.
 #'   $unclaimed_peaks "Other events": peaks classify_tract() could not resolve
 #'                    (binary singleton, independent_events, low coverage, ...),
 #'                    for manual review. Not included in $events/$event_table.
@@ -2966,7 +2993,7 @@ run_chain_analysis <- function(loh_segments,
   rec <- reconcile(scan_results, chains, fused_peaks, peak_pairs, snp_peaks,
                    params = params)
 
-  event_table <- build_event_table(rec$events)
+  event_table <- build_event_table(rec$events, params = params)
 
   message(sprintf("  [chain] Done. %d events called (%d high confidence, %d review).",
     nrow(event_table),

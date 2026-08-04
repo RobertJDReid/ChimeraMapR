@@ -4,6 +4,41 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.11] - 2026-08-04
+
+- Event symbols no longer depend on the LOH band. `build_overview_plot()` and
+  the app's per-chromosome coverage plot both called `add_event_symbols()` from
+  *inside* their LOH block, so a sample with no `REF_fixed`/`ALT_fixed` segment
+  had every symbol silently dropped — the events were still called, still in
+  the events table, and still visible on the individual peak plots, but the
+  overview showed a bare coverage trace. `build_overview_plot()` compounded it
+  with an early `return()` when the fill legend was empty, which on a 2N
+  chromosome with no LOH bailed out before the symbol layer entirely. The
+  symbol layer is now unconditional in both places and the fill-legend block is
+  conditional rather than terminal.
+- The classes most affected are exactly the ones that cannot produce an LOH
+  tract by construction — `CO_GC_subres`, `NCO_GC_subres`,
+  `CROSSOVER_NO_TRACT`, `GC_ONE_SIDED` — so the plot was hiding events
+  precisely where the tract was too short for the LOH map to resolve.
+- Sub-resolution calls are no longer automatically "review". `CO_GC_subres` and
+  `NCO_GC_subres` are promoted from a self-classifying peak
+  (`gene_conversion` / `internal_crossover`) whose per-read haplotype pattern
+  is the authoritative evidence — which is why `classify_tract()` deliberately
+  exempts these edge types from its `min_span` gate. Scoring them "review"
+  regardless of depth meant a crossover with 60 supporting reads was flagged
+  the same as one with 2. `build_event_table()` now applies the `min_span`
+  floor itself: at or above it the call is "high", below it "review". The
+  `_subres` suffix is unchanged and still records that no fixed tract was
+  resolvable. Every other class keeps its previous confidence.
+- Effect on results: on the synthetic crossover sets (`test_data/co_1bp.csv.gz`
+  and `co_100bp.csv.gz`, 20 known crossovers each) all 20 events now plot and
+  score high, where `co_1bp` previously plotted none and scored 0 high / 20
+  review. `co_100bp` had been labelling correctly only by accident — a single
+  junction resolved a 2 bp `REF_fixed` island, which flipped the LOH gate on
+  and let all 20 symbols through. Regression-checked on `test_data` chrIII: 4
+  events, LOH band, legend, caption and symbols unchanged, with
+  `TERMINAL_DELETION` correctly still "review".
+
 ## [0.8.10] - 2026-08-03
 
 - Per-read zone calls now require read evidence. `classify_zone_state()`

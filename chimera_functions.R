@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.10"
+APP_VERSION <- "0.8.11"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -1237,30 +1237,33 @@ build_overview_plot <- function(results) {
       )
   }
 
-  if (length(fill_values) == 0) {
-    return(p_main)   # nothing to add - return the plain overview
+  if (length(fill_values) > 0) {
+    p_main <- p_main +
+      scale_fill_manual(
+        values = fill_values,
+        labels = fill_labels,
+        name   = "Panel key",
+        drop   = FALSE
+      ) +
+      theme(
+        legend.position  = "bottom",
+        legend.title     = element_text(size = rel(1), face = "bold"),
+        legend.text      = element_text(size = rel(1))
+      )
   }
-
-  p_main <- p_main +
-    scale_fill_manual(
-      values = fill_values,
-      labels = fill_labels,
-      name   = "Panel key",
-      drop   = FALSE
-    ) +
-    theme(
-      legend.position  = "bottom",
-      legend.title     = element_text(size = rel(1), face = "bold"),
-      legend.text      = element_text(size = rel(1))
-    )
 
   if (has_loh) {
     p_main <- p_main +
       labs(caption = loh_caption) +
       theme(plot.caption = element_text(size = rel(1), colour = "grey40"))
-
-    p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h)
   }
+
+  # Event symbols are independent of the LOH band. Sub-resolution classes
+  # (CO_GC_subres, CROSSOVER_NO_TRACT, GC_ONE_SIDED, ...) are called from peak
+  # evidence alone and by definition leave no fixed tract, so a chromosome can
+  # carry events while compute_loh_map() reports nothing but HET. Gating this
+  # layer on has_loh silently dropped every symbol on such samples.
+  p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h)
 
   p_main
 }

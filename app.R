@@ -1837,11 +1837,14 @@ server <- function(input, output, session) {
           # Drawn as a thin geom_rect strip (4 % of y ceiling) flush with the
           # x-axis baseline.  REF-fixed = dodgerblue, ALT-fixed = firebrick.
           # Uses pre-collapsed loh_segments — no inline rleid/half_step needed.
+          # Band height is resolved outside the block because the event symbol
+          # layer below shares this baseline whether or not any LOH is present.
+          loh_band_h <- y_ceil * -0.10 # negative to put under number line
+
           if (!is.null(.loh_chr) && nrow(.loh_chr) > 0) {
             .loh_chr[, xmin := start / 1000]
             .loh_chr[, xmax := end   / 1000]
 
-            loh_band_h  <- y_ceil * -0.10 # negative to put under number line
             loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
 
             # Resolve strain display names from results (fall back to generic)
@@ -1881,10 +1884,16 @@ server <- function(input, output, session) {
                 legend.title    = element_text(size = rel(1.1), face = "bold"),
                 legend.text     = element_text(size = rel(1.1))
               )
-
-            p <- add_event_symbols(p, .events_chr, band_ymin = 0, band_ymax = loh_band_h,
-                                    chrom_filter = .chr)
           }
+
+          # Event symbols are independent of the LOH band. Sub-resolution
+          # classes (CO_GC_subres, CROSSOVER_NO_TRACT, GC_ONE_SIDED, ...) are
+          # called from peak evidence alone and by definition leave no fixed
+          # tract, so a chromosome can carry events while compute_loh_map()
+          # reports nothing but HET. Gating this layer on the LOH band silently
+          # dropped every symbol on such samples.
+          p <- add_event_symbols(p, .events_chr, band_ymin = 0, band_ymax = loh_band_h,
+                                  chrom_filter = .chr)
 
           p
         }
