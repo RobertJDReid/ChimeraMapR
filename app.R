@@ -1786,6 +1786,27 @@ server <- function(input, output, session) {
         build_chr_cov_plot <- function() {
           y_ceil <- max(30, max(.snp$n))
 
+          # ── LOH band / event label geometry ─────────────────────────────────
+          # Mirrors build_overview_plot(): the band hangs below the x-axis
+          # baseline (negative height, ymin = 0) and event symbols hang beneath
+          # the band rather than sitting on top of the coloured rectangles,
+          # which they used to obscure. The band is 20% shorter than before
+          # (0.10 → 0.08 of the y ceiling) to offset the label lane.
+          #
+          # That lane has to be reserved explicitly by lowering the y floor:
+          # geom_text extents are physical, not data units, so an unreserved
+          # label is clipped at the panel edge. This plot is a single panel
+          # ~2.9 in tall on screen (400 px) and ~3.3 in in the .png download
+          # (height = 4.5 in less axis chrome), so size the lane against a
+          # conservative 2.6 in; ggplot text size is in mm and ~0.85 of the em
+          # is the usable cap height for these glyphs.
+          loh_band_h   <- y_ceil * -0.08  # negative to put under number line
+          ev_label_gap <- y_ceil * 0.02   # band edge → near edge of the text
+          ev_size      <- 5
+          ev_f         <- min(0.4, (ev_size / 25.4 * 0.85) / 2.6)
+          ev_lane      <- (y_ceil - loh_band_h + ev_label_gap) * ev_f / (1 - ev_f)
+          y_floor      <- loh_band_h - ev_label_gap - ev_lane
+
           # Compute x-axis limit reactively inside renderPlot so it always
           # reflects the live chr_span value rather than a value captured
           # at observer-construction time (which may be NULL / stale).
@@ -1821,7 +1842,7 @@ server <- function(input, output, session) {
             scale_x_continuous(limits = c(0, x_max_kb_live), minor_breaks = seq(0, x_max_kb_live, 100)) +
             xlab("Position (Kbp)") +
             ylab("Number of Reads") +
-            ylim(NA, y_ceil) +
+            ylim(y_floor, y_ceil) +
             ggtitle(paste("Chromosome", .chr)) +
             theme_bw() +
             theme(
@@ -1853,13 +1874,11 @@ server <- function(input, output, session) {
           }
 
           # ── LOH band at the base of the plot ──────────────────────────────
-          # Drawn as a thin geom_rect strip (4 % of y ceiling) flush with the
-          # x-axis baseline.  REF-fixed = dodgerblue, ALT-fixed = firebrick.
-          # Uses pre-collapsed loh_segments — no inline rleid/half_step needed.
-          # Band height is resolved outside the block because the event symbol
-          # layer below shares this baseline whether or not any LOH is present.
-          loh_band_h <- y_ceil * -0.10 # negative to put under number line
-
+          # Drawn as a thin geom_rect strip flush with the x-axis baseline.
+          # REF-fixed = dodgerblue, ALT-fixed = firebrick.  Uses pre-collapsed
+          # loh_segments — no inline rleid/half_step needed.  Band height is
+          # resolved at the top of this function because the event symbol layer
+          # below shares this baseline whether or not any LOH is present.
           if (!is.null(.loh_chr) && nrow(.loh_chr) > 0) {
             .loh_chr[, xmin := start / 1000]
             .loh_chr[, xmax := end   / 1000]
@@ -1911,8 +1930,12 @@ server <- function(input, output, session) {
           # tract, so a chromosome can carry events while compute_loh_map()
           # reports nothing but HET. Gating this layer on the LOH band silently
           # dropped every symbol on such samples.
+          #
+          # place = "below": symbols hang under the LOH band instead of sitting
+          # on top of the coloured rectangles, which they used to obscure.
           p <- add_event_symbols(p, .events_chr, band_ymin = 0, band_ymax = loh_band_h,
-                                  chrom_filter = .chr)
+                                  chrom_filter = .chr, size = ev_size,
+                                  place = "below", gap = ev_label_gap)
 
           p
         }

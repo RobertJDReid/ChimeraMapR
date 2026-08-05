@@ -6,24 +6,24 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [0.8.13] - 2026-08-05
 
-- **Event labels on the overview map moved below the LOH band.** Symbols were
-  drawn centred inside the coloured band, so on a short LOH region the glyph
-  covered the region it was annotating and on a long one it read as text
-  printed over a solid colour. They now hang just beneath the band, clear of
-  the rectangles.
-- To keep the vertical footprint of each facet close to what it was, the LOH
-  band itself is 20% shorter (0.15 → 0.12 of the y ceiling).
+- **Event labels moved below the LOH band**, on both the genome-wide overview
+  map and the app's per-chromosome coverage tab. Symbols were drawn centred
+  inside the coloured band, so on a short LOH region the glyph covered the
+  region it was annotating and on a long one it read as text printed over a
+  solid colour. They now hang just beneath the band, clear of the rectangles.
+- To keep the vertical footprint close to what it was, the band itself is 20%
+  shorter on both plots: 0.15 → 0.12 of the y ceiling on the overview, 0.10 →
+  0.08 on the per-chromosome tab.
 - The label lane below the band is reserved explicitly by lowering the y-axis
   floor. `geom_text` extents are physical rather than data units, so they
   neither grow the scale nor shrink with it; without a reserved lane the
   symbols are simply clipped at the panel edge. The lane is sized from the
-  estimated facet panel height (derived from the chromosome count, matching
-  how the app and CLI size the export) and the glyph height, and the symbol
-  size drops from 5 to 4 on plots with more than two chromosomes.
+  glyph height against the estimated panel height — on the overview that comes
+  from the chromosome count (matching how the app and CLI size the export),
+  and the symbol size drops from 5 to 4 above two chromosomes; the
+  per-chromosome tab is a single panel and keeps size 5.
 - `add_event_symbols()` gained `place = c("center", "below")` and `gap`. The
-  default is `"center"`, so the app's per-chromosome coverage plots — which
-  have a full-height panel per chromosome and no crowding problem — are
-  unchanged.
+  default remains `"center"`, so any other caller is unaffected.
 
 ## [0.8.12] - 2026-08-05
 
