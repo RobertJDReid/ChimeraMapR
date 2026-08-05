@@ -4,6 +4,54 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.12] - 2026-08-05
+
+- Interstitial hemizygous deletions are detected again. Two independent gates
+  were suppressing them, and both had to be lifted before a known 5 kb deletion
+  on `test_data/SYNv1_delta_test.csv.gz` (chrXI 500.2–505.3 kb) would call.
+- **The SNP-level deletion-rate QC was erasing its own evidence.** A hemizygous
+  deletion leaves one homolog absent, so at every SNP it spans ~50% of
+  MAPQ-passing reads register a deletion instead of a base call — 36–46% across
+  the SYNv1 block. That is the same per-SNP signature `del_rate_cutoff` (0.10)
+  exists to catch in repeats/homopolymers, so all 38 informative SNPs were
+  dropped, the region collapsed into a single 128 kb HET segment, and the
+  chain caller saw an unremarkable `G` gap instead of a fixed tract. Nothing
+  was drawn and nothing was called. The two cases differ in *distribution*, not
+  in `del_frac`: an artifact hits a random subset of reads at isolated
+  positions, whereas a deletion hits the same reads at every position across a
+  contiguous block. New `find_hemizygous_del_blocks()` applies that test —
+  a run of `del_block_min_snps` (5) consecutive over-cutoff SNPs spanning
+  `del_block_min_bp` (500) with `del_block_read_coherence` (0.50) of its
+  deletion calls coming from reads deleted across the block — and exempts
+  qualifying blocks from exclusion. The SYNv1 block scores 0.99 coherence
+  (21 reads deleted at all 38 positions; 7 stray single-position calls).
+- **The deletion rule's depth test was biased upward by long flanks.**
+  `.interstitial_flank_depth_ratio()` averaged real depth over the *entire*
+  flanking token. Flank tokens run 50–100 kb and coverage drifts across them,
+  so the 68 kb left flank averaged 51.2 against ~59 immediately beside the
+  tract, putting the ratio at 0.62 and missing `depth_drop` (0.60) even once
+  the SNPs were retained. It now measures each flank over the coverage segment
+  *abutting* the tract — `compute_coverage_map()` has already located the
+  changepoints, so that segment is the local diploid baseline by construction
+  and no window width has to be guessed. SYNv1 chrXI: 31.7 against the
+  abutting 491.0–499.8 kb segment (mean 54.5) → 0.58, a clear call. The `min()`
+  of the two flanks is unchanged, so the sub-telomeric false-positive guard
+  from 0.8.7 (RAD5_3 chrIII) still holds.
+- Effect on results: `SYNv1_delta_test` now reports `DELETION S288C_chrXI
+  500217–505314` (5.097 kb, `flank_depth_ratio=0.58`, review confidence)
+  alongside its four pre-existing events, and the Δ symbol appears on the
+  overview. Regression-checked on `test_data` chrI, chrII, chrIII, chrXI,
+  chrXIII and chrXV: events tables byte-identical to 0.8.11, and the
+  high-`del_frac` SNPs on those chromosomes (2–29 per chromosome, all isolated
+  artifacts) are still excluded — no block qualified for the exemption on any
+  real dataset.
+- New parameters, exposed on both interfaces: `--del-block-min-snps`,
+  `--del-block-min-bp`, `--del-block-read-coherence` in `chimera_cli.R`, and
+  Min SNPs / Min Read Coherence inputs in the app sidebar. Setting
+  `del_block_min_snps` arbitrarily high restores 0.8.11 behaviour exactly.
+  `run_chimera_analysis()` also returns `$del_blocks` listing any exempted
+  blocks.
+
 ## [0.8.11] - 2026-08-04
 
 - Event symbols no longer depend on the LOH band. `build_overview_plot()` and

@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.8.11_
+_version 0.8.12_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -120,6 +120,9 @@ Layer extra outputs on top of the flags above.
 | `--mapq-cutoff INT` | `20` | Minimum MAPQ value; reads below this are excluded |
 | `--baseq-cutoff INT` | `10` | Minimum base quality at the SNP position; calls below this are excluded |
 | `--del-rate-cutoff FLOAT` | `0.10` | SNPs where more than this fraction of confidently-mapped reads register a deletion are excluded |
+| `--del-block-min-snps INT` | `5` | Consecutive SNPs above `--del-rate-cutoff` needed to treat a run as a hemizygous deletion and exempt it from exclusion |
+| `--del-block-min-bp BP` | `500` | Minimum bp span for such a hemizygous-deletion block |
+| `--del-block-read-coherence FLOAT` | `0.50` | Minimum fraction of a block's deletion calls that must come from reads deleted across the block, rather than scattered single-position misalignments |
 | `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run |
 | `--min-peak-height INT` | `10` | Minimum transition count at a SNP to qualify as a peak |
 | `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
@@ -233,6 +236,8 @@ Collapsed by default in the sidebar; also exposed as `chimera_cli.R` flags.
 | **Minimum MAPQ Value** | `20` | Minimum mapping quality score; reads below this threshold are excluded |
 | **Base Quality Minimum** | `10` | Minimum base quality score at the SNP position; calls below this are excluded |
 | **Max Local Deletion Rate** | `0.10` | SNPs where more than this fraction of confidently-mapped reads register a deletion (rather than a base call) are excluded — typically a sign of a nearby repeat/homopolymer destabilizing alignment |
+| **Hemizygous Deletion Block: Min SNPs** | `5` | A real hemizygous deletion trips the cutoff above at every SNP it spans, so the plain filter would erase the evidence for it. A run of at least this many consecutive over-cutoff SNPs, spanning at least 500 bp, whose deletion calls come consistently from the same reads, is kept instead of excluded. Raise to disable the exemption |
+| **Hemizygous Deletion Block: Min Read Coherence** | `0.50` | Fraction of a block's deletion calls that must come from reads deleted across the whole block, rather than scattered single-position misalignments |
 | **Whittaker Lambda (λ)** | `1` | Smoothness penalty for the Whittaker smoother. Lower = tighter fit (preserves sharp peaks); higher = smoother curve |
 | **Jaccard Threshold for Auto-Fusion** | `0.20` | Minimum Jaccard index of peak-associated reads to trigger automatic peak fusion |
 | **Telomere Tolerance (Kb)** | `5` | LOH regions within this distance of a chromosome end are treated as terminal |

@@ -422,6 +422,21 @@ ui <- fluidPage(
                      step = 0.01),
         helpText("SNPs where more than this fraction of confidently-mapped reads register a deletion (rather than a base call) are excluded — typically a sign of a nearby repeat/homopolymer destabilizing alignment."),
 
+        numericInput("del_block_min_snps",
+                     "Hemizygous Deletion Block: Min SNPs:",
+                     value = 5,
+                     min   = 2,
+                     step  = 1),
+        helpText("A true hemizygous deletion trips the cutoff above at every SNP it spans, so the plain filter would erase the evidence for it. A run of at least this many consecutive over-cutoff SNPs, spanning at least 500 bp, whose deletion calls come consistently from the same reads, is kept instead of excluded. Raise to disable the exemption."),
+
+        numericInput("del_block_read_coherence",
+                     "Hemizygous Deletion Block: Min Read Coherence:",
+                     value = 0.50,
+                     min   = 0,
+                     max   = 1,
+                     step  = 0.05),
+        helpText("Fraction of a block's deletion calls that must come from reads deleted across the whole block, rather than scattered single-position misalignments. Separates a genuine missing homolog from alignment noise."),
+
         numericInput("lambda",
                      "Whittaker Lambda (\u03bb):",
                      value = 1,
@@ -830,6 +845,8 @@ server <- function(input, output, session) {
         min_peak_height = input$min_peak_height,
         lambda          = input$lambda,
         del_rate_cutoff = input$del_rate_cutoff,
+        del_block_min_snps       = input$del_block_min_snps,
+        del_block_read_coherence = input$del_block_read_coherence,
         warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)
       )
 
@@ -2055,6 +2072,9 @@ server <- function(input, output, session) {
       "  MAPQ Cutoff: ",              input$mapq_cutoff,     "\n",
       "  Base Quality Cutoff: ",      input$baseq_cutoff,    "\n",
       "  Max Local Deletion Rate: ",  input$del_rate_cutoff, "\n",
+      "  Hemizygous Del Block: ",     input$del_block_min_snps,
+                                      " SNPs, coherence ",
+                                      input$del_block_read_coherence, "\n",
       "  Min Run Length: ",           input$min_run,         "\n",
       "  Min Peak Height: ",          input$min_peak_height, "\n",
       "  Whittaker Lambda (\u03bb): ",input$lambda,          "\n",

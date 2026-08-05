@@ -119,6 +119,28 @@ option_list <- list(
               help    = paste("SNPs where more than this fraction of confidently-mapped",
                               "reads register a deletion are excluded [default: %default]")),
 
+  make_option("--del-block-min-snps",
+              type    = "integer",
+              default = 5L,
+              metavar = "INT",
+              help    = paste("Consecutive SNPs above --del-rate-cutoff needed to treat a run as a",
+                              "hemizygous deletion and exempt it from exclusion [default: %default]")),
+
+  make_option("--del-block-min-bp",
+              type    = "integer",
+              default = 500L,
+              metavar = "BP",
+              help    = paste("Minimum bp span for such a hemizygous-deletion block",
+                              "[default: %default]")),
+
+  make_option("--del-block-read-coherence",
+              type    = "double",
+              default = 0.50,
+              metavar = "FLOAT",
+              help    = paste("Minimum fraction of a block's deletion calls that must come from reads",
+                              "deleted across the block, rather than scattered single-position",
+                              "misalignments [default: %default]")),
+
   make_option("--min-run",
               type    = "integer",
               default = 2L,
@@ -335,6 +357,9 @@ cat("Parameters:\n")
 cat("  MAPQ cutoff     :", opts[["mapq-cutoff"]],     "\n")
 cat("  BaseQ cutoff    :", opts[["baseq-cutoff"]],    "\n")
 cat("  Del rate cutoff :", opts[["del-rate-cutoff"]], "\n")
+cat("  Del block gates :", opts[["del-block-min-snps"]], "SNPs,",
+                           opts[["del-block-min-bp"]], "bp, coherence",
+                           opts[["del-block-read-coherence"]], "\n")
 cat("  Min run         :", opts[["min-run"]],         "\n")
 cat("  Min peak height :", opts[["min-peak-height"]], "\n")
 cat("  Lambda (λ)      :", opts[["lambda"]],          "\n")
@@ -363,6 +388,9 @@ results <- run_chimera_analysis(
   mapq_cutoff     = opts[["mapq-cutoff"]],
   baseq_cutoff    = opts[["baseq-cutoff"]],
   del_rate_cutoff = opts[["del-rate-cutoff"]],
+  del_block_min_snps       = opts[["del-block-min-snps"]],
+  del_block_min_bp         = opts[["del-block-min-bp"]],
+  del_block_read_coherence = opts[["del-block-read-coherence"]],
   min_run         = opts[["min-run"]],
   min_peak_height = opts[["min-peak-height"]],
   lambda          = opts[["lambda"]]

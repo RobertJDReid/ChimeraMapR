@@ -374,7 +374,8 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     # LOH tract (depth preserved). Computed from the same coverage_table the
     # terminal ratios use; skipped (NA) when unavailable.
     for (fi in which(vapply(tokens, `[[`, character(1), "type") == "F")) {
-      fr <- .interstitial_flank_depth_ratio(tokens, fi, chr_name, coverage_table)
+      fr <- .interstitial_flank_depth_ratio(tokens, fi, chr_name, coverage_table,
+                                            coverage_segments)
       if (!is.na(fr)) tokens[[fi]]$meta$flank_depth_ratio <- fr
     }
 
@@ -966,18 +967,52 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 # sub-telomeric HET islands, where repetitive/duplicated content inflates the
 # mapped depth) drag a full-depth tract's ratio below threshold and manufacture
 # a false deletion call (see RAD5_3 chrIII: tract 81.8 == left flank 82.0, but
-# right sub-telomeric flank inflated to 139 → 0.59 vs max, 1.00 vs min). Returns
-# NA unless a coverage_table was supplied and both flanks are HET-resolvable.
-.interstitial_flank_depth_ratio <- function(tokens, idx, chr_name, coverage_table) {
+# right sub-telomeric flank inflated to 139 → 0.59 vs max, 1.00 vs min).
+#
+# Each flank depth is measured over the coverage segment ABUTTING the tract, not
+# over the whole flank token. Flank tokens are routinely 50-100 kb wide and
+# sequencing depth drifts substantially across that distance, so a whole-token
+# mean averages across coverage changepoints far from the event and can sit well
+# below the depth immediately beside the tract — inflating the ratio past the
+# deletion threshold. (SYNv1 chrXI: the real 5 kb hemizygous deletion at
+# 500.2-505.3 kb measures 31.7 against a 68 kb left flank averaging 51.2 → 0.62,
+# missing depth_drop=0.60; against the 8.8 kb coverage segment actually abutting
+# it (491.0-499.8 kb, mean 54.5) → 0.58, a clear call.) compute_coverage_map()
+# has already located those changepoints, so the abutting segment is the local
+# diploid baseline by construction — no arbitrary window width to choose. Falls
+# back to the whole flank token when no segmentation is available. Returns NA
+# unless a coverage_table was supplied and both flanks are HET-resolvable.
+.interstitial_flank_depth_ratio <- function(tokens, idx, chr_name, coverage_table,
+                                            coverage_segments = NULL) {
   li <- .nearest_nonfixed_left(tokens, idx)
   ri <- .nearest_nonfixed_right(tokens, idx)
   if (is.null(li) || is.null(ri)) return(NA_real_)   # not HET-bounded both sides
-  d_f <- .lookup_mean_depth(coverage_table, chr_name,
-                            tokens[[idx]]$start, tokens[[idx]]$end)
-  d_l <- .lookup_mean_depth(coverage_table, chr_name,
-                            tokens[[li]]$start, tokens[[li]]$end)
-  d_r <- .lookup_mean_depth(coverage_table, chr_name,
-                            tokens[[ri]]$start, tokens[[ri]]$end)
+
+  tract <- tokens[[idx]]
+  d_f <- .lookup_mean_depth(coverage_table, chr_name, tract$start, tract$end)
+
+  # Mean depth of the coverage segment nearest the tract on `side`, restricted
+  # to segments that overlap the flank token so an unrelated region beyond the
+  # flank can never become the reference. NA when no segment qualifies.
+  abutting_depth <- function(flank_tok, side) {
+    if (is.null(coverage_segments) || nrow(coverage_segments) == 0)
+      return(NA_real_)
+    cs <- coverage_segments[as.character(chrom) == chr_name &
+                              end >= flank_tok$start & start <= flank_tok$end]
+    cs <- if (side == "left") cs[end <= tract$start] else cs[start >= tract$end]
+    if (nrow(cs) == 0) return(NA_real_)
+    pick <- if (side == "left") which.max(cs$end) else which.min(cs$start)
+    cs$depth_mean[pick]
+  }
+
+  flank_depth <- function(flank_tok, side) {
+    d <- abutting_depth(flank_tok, side)
+    if (!is.na(d) && d > 0) return(d)
+    .lookup_mean_depth(coverage_table, chr_name, flank_tok$start, flank_tok$end)
+  }
+
+  d_l <- flank_depth(tokens[[li]], "left")
+  d_r <- flank_depth(tokens[[ri]], "right")
   ref <- suppressWarnings(min(d_l, d_r, na.rm = TRUE))
   if (is.na(d_f) || !is.finite(ref) || ref <= 0) return(NA_real_)
   d_f / ref

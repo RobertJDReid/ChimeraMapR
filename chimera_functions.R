@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.11"
+APP_VERSION <- "0.8.12"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -113,6 +113,103 @@ load_chr_size <- function(path) {
 
 
 # -----------------------------------------------------------------------------
+#  find_hemizygous_del_blocks()
+#
+#  Separates a genuine hemizygous deletion from the alignment artifacts that
+#  the local-deletion-rate QC filter is meant to remove.
+#
+#  Both produce the same per-SNP signature — a high fraction of MAPQ-passing
+#  reads registering a deletion instead of a base call — so del_frac alone
+#  cannot tell them apart, and the plain filter therefore discards exactly the
+#  positions that carry the evidence for a real deletion. The two differ in
+#  how those deletion calls are distributed:
+#
+#    artifact  — a repeat/homopolymer destabilizes alignment for a random
+#                subset of reads at one or two isolated positions; the reads
+#                affected differ from position to position.
+#    deletion  — one homolog is absent, so the SAME subset of reads registers
+#                a deletion at EVERY informative SNP across a contiguous
+#                multi-kb block, at ~50% of local depth.
+#
+#  This function keeps only high-del_frac positions that sit in a run long
+#  enough, wide enough, and read-coherent enough to be the second case; the
+#  caller drops the rest as before.
+#
+#  Arguments
+#    read_data       : full read table (chrom, pos, read_id, is_del, mapq)
+#    high_del        : data.table of candidate positions (chrom, pos) whose
+#                      del_frac exceeded the cutoff, restricted to SNP sites
+#    mapq_cutoff     : MAPQ floor, applied to match del_frac's denominator
+#    min_snps        : minimum consecutive high-del_frac SNPs in a block
+#    min_bp          : minimum bp span of a block
+#    min_read_coherence : minimum fraction of the block's deletion calls that
+#                      must come from deletion-consistent reads (a read that
+#                      registers a deletion at >= 80% of the block positions
+#                      it actually covers, over >= 2 covered positions)
+#
+#  Returns a data.table of accepted blocks with columns
+#  chrom, start, end, n_snps, read_coherence — empty if none qualify.
+# -----------------------------------------------------------------------------
+find_hemizygous_del_blocks <- function(read_data, high_del, mapq_cutoff,
+                                       min_snps           = 5L,
+                                       min_bp             = 500L,
+                                       min_read_coherence = 0.50) {
+
+  empty <- data.table(chrom = character(), start = integer(), end = integer(),
+                      n_snps = integer(), read_coherence = numeric())
+  if (is.null(high_del) || nrow(high_del) == 0L) return(empty)
+
+  # ── Contiguous runs of high-del_frac SNPs ──────────────────────────────────
+  # "Contiguous" means consecutive in the *informative SNP* ordering, not in
+  # bp: an intervening SNP with a normal deletion rate breaks the run, because
+  # a homolog that is present at that SNP is not deleted across the block.
+  cand <- unique(high_del[, .(chrom, pos)])
+  setorder(cand, chrom, pos)
+  cand[, snp_idx := seq_len(.N), by = chrom]
+
+  blocks <- cand[, {
+    # Runs of consecutive snp_idx values.
+    brk <- c(TRUE, diff(snp_idx) != 1L)
+    .(block_id = cumsum(brk), pos = pos)
+  }, by = chrom][, .(start = min(pos), end = max(pos), n_snps = .N),
+                 by = .(chrom, block_id)]
+
+  blocks <- blocks[n_snps >= min_snps & (end - start) >= min_bp]
+  if (nrow(blocks) == 0L) return(empty)
+
+  # ── Read coherence ─────────────────────────────────────────────────────────
+  # Pull every MAPQ-passing pileup row at the candidate SNP positions inside
+  # the surviving blocks, then ask, per read, what fraction of the block
+  # positions it covers are deletions. A read that is missing the homolog
+  # answers ~1.0; a read caught by a local misalignment answers ~1/n.
+  blk_pos <- merge(cand[, .(chrom, pos)], blocks,
+                   by = "chrom", allow.cartesian = TRUE)
+  blk_pos <- blk_pos[pos >= start & pos <= end, .(chrom, pos, block_id)]
+
+  rows <- merge(
+    read_data[mapq >= mapq_cutoff, .(chrom, pos, read_id, is_del)],
+    blk_pos, by = c("chrom", "pos")
+  )
+  if (nrow(rows) == 0L) return(empty)
+
+  per_read <- rows[, .(n_cov = .N, n_del = sum(is_del == 1L)),
+                   by = .(chrom, block_id, read_id)]
+  per_read[, consistent := n_cov >= 2L & (n_del / n_cov) >= 0.80]
+
+  coherence <- per_read[n_del > 0L, .(
+    read_coherence = sum(n_del[consistent]) / sum(n_del)
+  ), by = .(chrom, block_id)]
+
+  blocks <- merge(blocks, coherence, by = c("chrom", "block_id"), all.x = TRUE)
+  blocks <- blocks[!is.na(read_coherence) & read_coherence >= min_read_coherence]
+  blocks[, block_id := NULL]
+
+  setorder(blocks, chrom, start)
+  blocks[]
+}
+
+
+# -----------------------------------------------------------------------------
 #  Core analysis pipeline
 #
 #  Returns a named list that mirrors the `results` reactiveValues in app.R:
@@ -137,6 +234,12 @@ run_chimera_analysis <- function(
     min_peak_height = 10L,
     lambda          = 1,
     del_rate_cutoff = 0.10,
+    # Gates that exempt a contiguous hemizygous deletion from del_rate_cutoff
+    # — see find_hemizygous_del_blocks(). Set del_block_min_snps to Inf to
+    # restore the previous behaviour (every high-del_frac SNP excluded).
+    del_block_min_snps      = 5L,
+    del_block_min_bp        = 500L,
+    del_block_read_coherence = 0.50,
     warn_fn         = function(msg) message("WARNING: ", msg)
 ) {
 
@@ -176,16 +279,54 @@ run_chimera_analysis <- function(
     allele_data_used, del_stats,
     by.x = c("CHROM", "POS"), by.y = c("chrom", "pos"), all.x = TRUE
   )
-  n_high_del <- sum(!is.na(allele_data_used$del_frac) &
-                       allele_data_used$del_frac > del_rate_cutoff)
+  allele_data_used[, high_del := !is.na(del_frac) & del_frac > del_rate_cutoff]
+
+  # ── Rescue contiguous hemizygous deletions from that filter ────────────────
+  # A real hemizygous deletion trips the del_frac cutoff at every SNP it spans
+  # (the absent homolog's reads all register a deletion, ~50% of local depth),
+  # so the plain filter would delete the only evidence the deletion exists and
+  # leave a SNP desert the downstream caller reads as an unremarkable gap.
+  # find_hemizygous_del_blocks() distinguishes the two cases by contiguity and
+  # read coherence; positions inside an accepted block are kept so the retained
+  # homolog's calls form the fixed tract that rule_interstitial_deletion needs.
+  del_blocks <- find_hemizygous_del_blocks(
+    read_data          = read_data,
+    high_del           = allele_data_used[high_del == TRUE,
+                                          .(chrom = CHROM, pos = POS)],
+    mapq_cutoff        = mapq_cutoff,
+    min_snps           = del_block_min_snps,
+    min_bp             = del_block_min_bp,
+    min_read_coherence = del_block_read_coherence
+  )
+
+  allele_data_used[, in_del_block := FALSE]
+  if (nrow(del_blocks) > 0L) {
+    for (b in seq_len(nrow(del_blocks))) {
+      allele_data_used[CHROM == del_blocks$chrom[b] &
+                       POS   >= del_blocks$start[b] &
+                       POS   <= del_blocks$end[b], in_del_block := TRUE]
+    }
+    for (b in seq_len(nrow(del_blocks))) {
+      message(sprintf(
+        paste0("  Hemizygous deletion candidate retained: %s:%d-%d ",
+               "(%.1f kb, %d SNPs, read coherence %.2f)"),
+        del_blocks$chrom[b], del_blocks$start[b], del_blocks$end[b],
+        (del_blocks$end[b] - del_blocks$start[b]) / 1000,
+        del_blocks$n_snps[b], del_blocks$read_coherence[b]
+      ))
+    }
+  }
+
+  n_high_del <- sum(allele_data_used$high_del & !allele_data_used$in_del_block)
   if (n_high_del > 0L) {
     warn_fn(paste0(
       n_high_del, " SNP position(s) excluded: local deletion rate exceeds ",
       round(del_rate_cutoff * 100), "% of confidently-mapped reads."
     ))
   }
-  allele_data_used <- allele_data_used[is.na(del_frac) | del_frac <= del_rate_cutoff]
-  allele_data_used[, c("n_total", "n_del", "del_frac") := NULL]
+  allele_data_used <- allele_data_used[high_del == FALSE | in_del_block == TRUE]
+  allele_data_used[, c("n_total", "n_del", "del_frac",
+                       "high_del", "in_del_block") := NULL]
 
   snp_number   <- nrow(allele_data_used)
   genome_size  <- sum(chr_size_used$length)
@@ -507,6 +648,8 @@ run_chimera_analysis <- function(
     snp_peaks         = snp_peaks,
     chromosome_fits   = chromosome_fits,
     chr_span          = chr_span,
+    del_blocks        = del_blocks,     # hemizygous-deletion blocks exempted
+                                        # from the del_rate_cutoff QC filter
     params = list(
       sample_name     = sample_name,
       mapq_cutoff     = mapq_cutoff,
@@ -515,6 +658,9 @@ run_chimera_analysis <- function(
       min_peak_height = min_peak_height,
       lambda          = lambda,
       del_rate_cutoff = del_rate_cutoff,
+      del_block_min_snps       = del_block_min_snps,
+      del_block_min_bp         = del_block_min_bp,
+      del_block_read_coherence = del_block_read_coherence,
       app_version     = APP_VERSION
     )
   )
