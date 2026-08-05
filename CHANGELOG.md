@@ -24,6 +24,20 @@ read by `app.R` and `chimera_cli.R`.
   per-chromosome tab is a single panel and keeps size 5.
 - `add_event_symbols()` gained `place = c("center", "below")` and `gap`. The
   default remains `"center"`, so any other caller is unaffected.
+- **New plot palette**, collected into a single `CHIMERA_COLOURS` constant in
+  `chimera_functions.R` so the overview map, the per-chromosome coverage tab
+  and the read-level haplotype views can no longer drift apart. REF is
+  `#3AA2FC` (was `dodgerblue`, `#1E90FF`) and ALT is `#A51301` (was
+  `firebrick`, `#B22222`), applied to the LOH bands, the haplotype segment
+  strips and the per-SNP read colours alike. SNP peak highlights are now
+  `#5BFB72` (they previously shared the REF blue, which made a peak marker
+  hard to tell from an LOH call at a glance) and the uniform-coverage fit line
+  is `#FCB036` (it previously shared the ALT red). Remaining colours — the
+  ploidy panel backgrounds, HET grey, gridlines, boundary and sub-peak
+  markers — are unchanged.
+- Read-level SNP colours no longer come from `scale_color_viridis_d(option =
+  "turbo", …)`; `IS_REF` is mapped through an explicit `scale_color_manual()`
+  instead, with `NA` calls still drawn in `grey50` as before.
 
 ## [0.8.12] - 2026-08-05
 

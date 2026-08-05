@@ -1108,6 +1108,19 @@ get_chromosome_ploidy <- function(full_read_loh,
 
 
 # -----------------------------------------------------------------------------
+#  Shared plot palette. The overview map, the per-chromosome coverage tab and
+#  the read-level haplotype views all draw from here so REF stays one colour
+#  and ALT another across every figure the app and the CLI produce.
+# -----------------------------------------------------------------------------
+CHIMERA_COLOURS <- c(
+  ref      = "#3AA2FC",  # REF-fixed LOH, REF SNPs/segments, fused-peak marker
+  alt      = "#A51301",  # ALT-fixed LOH, ALT SNPs/segments
+  het      = "gray60",   # heterozygous haplotype segments
+  snp_peak = "#5BFB72",  # detected SNP-density peak highlight
+  fit_line = "#FCB036"   # uniform-coverage fit line
+)
+
+# -----------------------------------------------------------------------------
 #  Recombination event symbols, overlaid on the LOH band at the bp midpoint
 #  of each event's recorded start/end span. One symbol per event_class
 #  recognised in EVENT_SYMBOL_MAP; event classes not listed are skipped.
@@ -1328,7 +1341,7 @@ build_overview_plot <- function(results) {
     geom_line(
       data  = fits,
       aes(x = uniform_pos / 1000, y = uniform_fit),
-      color = "firebrick", linewidth = 0.6, alpha = 0.7
+      color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.6, alpha = 0.7
     ) +
     geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
     scale_x_continuous(
@@ -1367,7 +1380,7 @@ build_overview_plot <- function(results) {
           data        = peak_highlight,
           aes(x = pos_kb, y = n),
           color       = "black",
-          fill        = "dodgerblue",
+          fill        = CHIMERA_COLOURS[["snp_peak"]],
           size        = 2.5,
           shape       = 21,
           alpha       = 0.9,
@@ -1396,7 +1409,8 @@ build_overview_plot <- function(results) {
   } else {
     has_loh <- FALSE
   }
-  loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
+  loh_colours <- c(REF_fixed = CHIMERA_COLOURS[["ref"]],
+                   ALT_fixed = CHIMERA_COLOURS[["alt"]])
 
   loh_labels <- c(
     REF_fixed = paste0(strain_ref), # will fix later

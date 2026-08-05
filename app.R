@@ -147,7 +147,7 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
         geom_vline(
           data        = peak_point_df,
           aes(xintercept = pos_kb),
-          colour      = "dodgerblue",
+          colour      = CHIMERA_COLOURS[["ref"]],
           linewidth   = 1,
           linetype    = 1,
           inherit.aes = FALSE
@@ -173,7 +173,12 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
 
       p_reads <- p_reads +
         facet_grid(read_id ~ .) +
-        scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+        # IS_REF is logical: FALSE = ALT allele, TRUE = REF allele.
+        scale_color_manual(
+          values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
+                       `TRUE`  = CHIMERA_COLOURS[["ref"]]),
+          na.value = "grey50"
+        ) +
         scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
         theme_bw() +
         theme(
@@ -211,7 +216,9 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
             alpha = 0.45
           ) +
           scale_fill_manual(
-            values   = c(ALT = "firebrick", HET = "gray60", REF = "dodgerblue"),
+            values   = c(ALT = CHIMERA_COLOURS[["alt"]],
+                         HET = CHIMERA_COLOURS[["het"]],
+                         REF = CHIMERA_COLOURS[["ref"]]),
             drop     = FALSE,
             na.value = "black"
           ) +
@@ -992,7 +999,7 @@ server <- function(input, output, session) {
             geom_vline(
               data        = peak_point_df,
               aes(xintercept = pos_kb),
-              colour      = "dodgerblue",
+              colour      = CHIMERA_COLOURS[["ref"]],
               linewidth   = 1,
               linetype    = 1,
               inherit.aes = FALSE
@@ -1004,7 +1011,11 @@ server <- function(input, output, session) {
             geom_vline(xintercept = pk_end / 1000,
                        color = "grey60", linewidth = 0.6, linetype = 2) +
             facet_grid(read_id ~ .) +
-            scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+            scale_color_manual(
+              values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
+                           `TRUE`  = CHIMERA_COLOURS[["ref"]]),
+              na.value = "grey50"
+            ) +
             scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
             theme_bw() +
             theme(
@@ -1044,7 +1055,9 @@ server <- function(input, output, session) {
                 alpha = 0.45
               ) +
               scale_fill_manual(
-                values   = c(ALT = "firebrick", HET = "gray60", REF = "dodgerblue"),
+                values   = c(ALT = CHIMERA_COLOURS[["alt"]],
+                             HET = CHIMERA_COLOURS[["het"]],
+                             REF = CHIMERA_COLOURS[["ref"]]),
                 drop     = FALSE,
                 na.value = "black"
               ) +
@@ -1836,7 +1849,7 @@ server <- function(input, output, session) {
             geom_line(
               data  = .fits,
               aes(x = uniform_pos / 1000, y = uniform_fit),
-              color = "firebrick", linewidth = 0.8, alpha = 0.7
+              color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.8, alpha = 0.7
             ) +
             geom_point(color = "black", alpha = 0.5, size = 0.8, shape = 21) +
             scale_x_continuous(limits = c(0, x_max_kb_live), minor_breaks = seq(0, x_max_kb_live, 100)) +
@@ -1865,7 +1878,7 @@ server <- function(input, output, session) {
                 data        = peak_highlight,
                 aes(x = pos_kb, y = n),
                 color       = "black",
-                fill        = "dodgerblue",
+                fill        = CHIMERA_COLOURS[["snp_peak"]],
                 size        = 3,
                 shape       = 21,
                 alpha       = 0.9,
@@ -1875,7 +1888,7 @@ server <- function(input, output, session) {
 
           # ── LOH band at the base of the plot ──────────────────────────────
           # Drawn as a thin geom_rect strip flush with the x-axis baseline.
-          # REF-fixed = dodgerblue, ALT-fixed = firebrick.  Uses pre-collapsed
+          # Colours come from CHIMERA_COLOURS (REF/ALT).  Uses pre-collapsed
           # loh_segments — no inline rleid/half_step needed.  Band height is
           # resolved at the top of this function because the event symbol layer
           # below shares this baseline whether or not any LOH is present.
@@ -1883,7 +1896,8 @@ server <- function(input, output, session) {
             .loh_chr[, xmin := start / 1000]
             .loh_chr[, xmax := end   / 1000]
 
-            loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
+            loh_colours <- c(REF_fixed = CHIMERA_COLOURS[["ref"]],
+                             ALT_fixed = CHIMERA_COLOURS[["alt"]])
 
             # Resolve strain display names from results (fall back to generic)
             s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
@@ -2185,7 +2199,11 @@ server <- function(input, output, session) {
                  color = "grey60", linewidth = 0.8, linetype = 2) +
       geom_point() +
       facet_grid(read_id ~ .) +
-      scale_color_viridis_d(option = "turbo", begin = 0.87, end = 0.2) +
+      scale_color_manual(
+        values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
+                     `TRUE`  = CHIMERA_COLOURS[["ref"]]),
+        na.value = "grey50"
+      ) +
       scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
       theme_bw() +
       theme(
@@ -2227,7 +2245,8 @@ server <- function(input, output, session) {
         geom_vline(xintercept = reg$end / 1000,
                    color = "grey60", linewidth = 0.8, linetype = 2) +
         scale_fill_manual(
-          values = c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick"),
+          values = c(REF_fixed = CHIMERA_COLOURS[["ref"]],
+                     ALT_fixed = CHIMERA_COLOURS[["alt"]]),
           labels = c(REF_fixed = s_ref, ALT_fixed = s_alt),
           name   = "LOH",
           drop   = FALSE
