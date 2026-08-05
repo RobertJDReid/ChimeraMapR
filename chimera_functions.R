@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.12"
+APP_VERSION <- "0.8.13"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -1132,22 +1132,34 @@ EVENT_SYMBOL_MAP <- c(
 )
 
 #' add_event_symbols()
-#'   Adds a bold, centered symbol layer for recombination events to an
-#'   existing chromosome-coverage plot. Symbols are centered horizontally on
-#'   the event's bp midpoint (start/end from event_tbl, converted to Kb) and
-#'   vertically in the middle of the LOH band, so they sit on the same line
-#'   as the LOH region rectangles.
+#'   Adds a bold symbol layer for recombination events to an existing
+#'   chromosome-coverage plot. Symbols are centered horizontally on the event's
+#'   bp midpoint (start/end from event_tbl, converted to Kb). Vertical
+#'   placement is controlled by `place`:
+#'
+#'     "center" — symbol centred inside the LOH band, on the same line as the
+#'                LOH region rectangles.
+#'     "below"  — symbol hangs just outside the far edge of the band, clear of
+#'                the coloured rectangles. Used by the overview plot, where a
+#'                symbol drawn on top of a short LOH region is unreadable.
 #'
 #' @param p            ggplot to add the layer to
 #' @param event_tbl    data.table with columns event_class, chrom, start, end
 #'                      (e.g. results$event_table); NULL/empty is a no-op
 #' @param band_ymin    numeric ymin of the LOH band (data units)
-#' @param band_ymax    numeric ymax of the LOH band (data units)
+#' @param band_ymax    numeric ymax of the LOH band (data units); may be less
+#'                      than band_ymin — the band hangs below the axis
 #' @param chrom_filter optional chromosome to restrict to (character); NULL
 #'                      keeps all rows, relying on facetting (overview plot)
 #' @param size         text size passed to geom_text
+#' @param place        "center" (default, previous behaviour) or "below"
+#' @param gap          for place = "below": clearance between the band edge and
+#'                      the near edge of the text, in data units. Defaults to
+#'                      15% of the band height.
 add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
-                               chrom_filter = NULL, size = 5) {
+                               chrom_filter = NULL, size = 5,
+                               place = c("center", "below"), gap = NULL) {
+  place <- match.arg(place)
   if (is.null(event_tbl) || nrow(event_tbl) == 0) return(p)
 
   ev <- copy(event_tbl)
@@ -1157,8 +1169,23 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
   if (nrow(ev) == 0) return(p)
 
   ev[, x     := (start + end) / 2 / 1000]
-  ev[, y     := (band_ymin + band_ymax) / 2]
   ev[, label := EVENT_SYMBOL_MAP[event_class]]
+
+  # Direction the band grows in: -1 when it hangs below the axis baseline
+  # (the usual case), +1 if a caller ever draws it upward. "below" means
+  # "further along that direction", so the text always ends up on the far
+  # side of the band from the coverage points.
+  band_dir <- if (band_ymax >= band_ymin) 1 else -1
+  if (place == "below") {
+    if (is.null(gap)) gap <- abs(band_ymax - band_ymin) * 0.15
+    ev[, y := band_ymax + band_dir * gap]
+    # vjust anchors the *near* edge of the text at y, so the label grows away
+    # from the band instead of overlapping it.
+    text_vjust <- if (band_dir < 0) 1 else 0
+  } else {
+    ev[, y := (band_ymin + band_ymax) / 2]
+    text_vjust <- 0.5
+  }
   # Fused gapped terminal crossovers enumerate their component count in the
   # label (e.g. "2 X TCO*"): the asterisk marks the gap-inferred internal
   # junction(s); the number counts the fused terminal crossovers. Falls back to
@@ -1172,6 +1199,7 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
     aes(x = x, y = y, label = label),
     fontface    = "bold",
     size        = size,
+    vjust       = text_vjust,
     inherit.aes = FALSE
   )
 }
@@ -1264,7 +1292,36 @@ build_overview_plot <- function(results) {
   })
 
   #browser()
-  
+
+  # ── LOH band / event label geometry ───────────────────────────────────────
+  # The band hangs below the x-axis baseline (negative height, ymin = 0) so it
+  # sits flush under the number line in every facet. Event symbols used to be
+  # drawn centred *inside* the band, where a symbol sitting on a short LOH
+  # rectangle was unreadable; they now hang beneath it. To keep the total
+  # vertical footprint close to what it was, the band itself is 20% shorter
+  # than before (0.15 → 0.12 of the y ceiling).
+  y_ceiling       <- max(30, max(snp_cov$n))
+  loh_band_h      <- y_ceiling * -0.12  # negative to put it below number line
+  event_label_gap <- y_ceiling * 0.02   # band edge → near edge of the text
+
+  # The label lane below the band has to be reserved explicitly: geom_text
+  # extents are physical, not data units, so they neither grow the scale nor
+  # shrink with it, and an unreserved label is simply clipped at the panel
+  # edge. How much of the y range that costs depends on how tall a facet panel
+  # ends up, so estimate that from the facet count — both the app and the CLI
+  # size the overview at ~1.2 in per chromosome (floor 3 in, cap 16 in), of
+  # which ~1.9 in is x-axis, legend and caption chrome. ggplot text size is in
+  # mm; ~0.85 of the em is the usable cap height for these glyphs.
+  n_facets   <- length(unique(snp_cov$chrom))
+  event_size <- if (n_facets <= 2) 5 else 4
+  panel_h_in <- max(0.5, (max(3, min(16, n_facets * 1.2)) - 1.9) / n_facets)
+  glyph_h_in <- event_size / 25.4 * 0.85
+  # lane = f * (band top → lane bottom); solved for lane, with f capped so a
+  # very short panel cannot demand an unbounded lane.
+  f          <- min(0.4, glyph_h_in / panel_h_in)
+  event_lane <- (y_ceiling - loh_band_h + event_label_gap) * f / (1 - f)
+  y_floor    <- loh_band_h - event_label_gap - event_lane
+
   # ── Main coverage panel ────────────────────────────────────────────────────
   p_main <- ggplot(snp_cov, aes(x = pos_kb, y = n)) +
     ploidy_bg_layers +
@@ -1280,7 +1337,7 @@ build_overview_plot <- function(results) {
     ) +
     xlab("Position (Kbp)") +
     ylab("Number of Reads") +
-    ylim(NA, max(30, max(snp_cov$n))) +
+    ylim(y_floor, y_ceiling) +
     facet_grid(chrom ~ ., switch = "y") +
     theme_bw() +
     theme(
@@ -1340,11 +1397,6 @@ build_overview_plot <- function(results) {
     has_loh <- FALSE
   }
   loh_colours <- c(REF_fixed = "dodgerblue", ALT_fixed = "firebrick")
-
-  # Height of the LOH band in data (read-count) units: 4% of the y ceiling.
-  # Placed at ymin = 0 so it sits flush with the x-axis baseline in every facet.
-  y_ceiling  <- max(30, max(snp_cov$n))
-  loh_band_h <- y_ceiling * -0.15 # negative to put it below number line
 
   loh_labels <- c(
     REF_fixed = paste0(strain_ref), # will fix later
@@ -1409,7 +1461,12 @@ build_overview_plot <- function(results) {
   # evidence alone and by definition leave no fixed tract, so a chromosome can
   # carry events while compute_loh_map() reports nothing but HET. Gating this
   # layer on has_loh silently dropped every symbol on such samples.
-  p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h)
+  #
+  # place = "below": symbols hang under the LOH band instead of sitting on top
+  # of the coloured rectangles, which they used to obscure.
+  p_main <- add_event_symbols(p_main, event_tbl, band_ymin = 0, band_ymax = loh_band_h,
+                              size = event_size, place = "below",
+                              gap = event_label_gap)
 
   p_main
 }
