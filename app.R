@@ -1849,7 +1849,7 @@ server <- function(input, output, session) {
             geom_line(
               data  = .fits,
               aes(x = uniform_pos / 1000, y = uniform_fit),
-              color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.8, alpha = 0.7
+              color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.8, alpha = 1.0
             ) +
             geom_point(color = "black", alpha = 0.5, size = 0.8, shape = 21) +
             scale_x_continuous(limits = c(0, x_max_kb_live), minor_breaks = seq(0, x_max_kb_live, 100)) +

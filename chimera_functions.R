@@ -1112,12 +1112,21 @@ get_chromosome_ploidy <- function(full_read_loh,
 #  the read-level haplotype views all draw from here so REF stays one colour
 #  and ALT another across every figure the app and the CLI produce.
 # -----------------------------------------------------------------------------
+# Hues are kept opaque here; the geoms that use them set their own alpha, and
+# baking a second alpha into the hex compounds the two (a "#RRGGBB3F" fit line
+# drawn at alpha = 0.7 renders at ~17% opacity, which vanished into the pale
+# 1N panel background). Amber and mid-green were both rejected for the fit
+# line: amber sits ~9 ΔE from the ALT red even for normal colour vision, and
+# mid-green lands within ~14 ΔE of the HET gray. Violet is the one hue that
+# adds no confusable pair to the four already here.
 CHIMERA_COLOURS <- c(
   ref      = "#3AA2FC",  # REF-fixed LOH, REF SNPs/segments, fused-peak marker
   alt      = "#A51301",  # ALT-fixed LOH, ALT SNPs/segments
   het      = "gray60",   # heterozygous haplotype segments
-  snp_peak = "#5BFB72",  # detected SNP-density peak highlight
-  fit_line = "#FCB036"   # uniform-coverage fit line
+  # Bright gold, legible only because these points carry a black shape-21 ring;
+  # do not reuse it for an unstroked fill.
+  snp_peak = "#a8ddb5",  # detected SNP-density peak highlight
+  fit_line = "grey70"   # uniform-coverage fit line
 )
 
 # -----------------------------------------------------------------------------
@@ -1341,7 +1350,7 @@ build_overview_plot <- function(results) {
     geom_line(
       data  = fits,
       aes(x = uniform_pos / 1000, y = uniform_fit),
-      color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.6, alpha = 0.7
+      color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.8, alpha = 1.0
     ) +
     geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
     scale_x_continuous(

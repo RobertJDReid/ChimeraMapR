@@ -30,10 +30,18 @@ read by `app.R` and `chimera_cli.R`.
   `#3AA2FC` (was `dodgerblue`, `#1E90FF`) and ALT is `#A51301` (was
   `firebrick`, `#B22222`), applied to the LOH bands, the haplotype segment
   strips and the per-SNP read colours alike. SNP peak highlights are now
-  `#5BFB72` (they previously shared the REF blue, which made a peak marker
+  `#FFC300` (they previously shared the REF blue, which made a peak marker
   hard to tell from an LOH call at a glance) and the uniform-coverage fit line
-  is `#FCB036` (it previously shared the ALT red). Remaining colours — the
-  ploidy panel backgrounds, HET grey, gridlines, boundary and sub-peak
+  is `#6D28D9` (it previously shared the ALT red). The two no longer share a
+  colour: a peak marker and the fit it sits on are different claims. Amber and
+  mid-green were both tried and dropped for the fit line — amber is ~9 ΔE from
+  the ALT red even for normal colour vision and mid-green is within ~14 ΔE of
+  the HET grey, while violet adds no confusable pair. Neither hue carries an
+  alpha channel any more; the geoms set their own alpha, and an `#RRGGBB3F`
+  line drawn at `alpha = 0.7` was compounding to ~17% opacity and disappearing
+  into the pale 1N panel background. The overview fit line also goes from
+  `linewidth` 0.6 to 0.8, matching the per-chromosome tab. Remaining colours —
+  the ploidy panel backgrounds, HET grey, gridlines, boundary and sub-peak
   markers — are unchanged.
 - Read-level SNP colours no longer come from `scale_color_viridis_d(option =
   "turbo", …)`; `IS_REF` is mapped through an explicit `scale_color_manual()`
