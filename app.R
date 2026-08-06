@@ -158,9 +158,9 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
         ) +
         # Fused boundary lines (grey dashed)
         geom_vline(xintercept = fused_start / 1000,
-                   color = "grey60", linewidth = 0.6, linetype = 2) +
+                   color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.6, linetype = 2) +
         geom_vline(xintercept = fused_end / 1000,
-                   color = "grey60", linewidth = 0.6, linetype = 2)
+                   color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.6, linetype = 2)
 
       # Individual sub-peak SNP positions (purple dotted) when group is fused
       if (n_sub > 1L && length(sub_snp_pos) > 0) {
@@ -168,7 +168,7 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
           geom_vline(
             data        = data.frame(xint = sub_snp_pos / 1000),
             aes(xintercept = xint),
-            colour      = "mediumpurple",
+            colour      = CHIMERA_COLOURS[["subpeak"]],
             linewidth   = 0.6,
             linetype    = 3,
             inherit.aes = FALSE
@@ -181,7 +181,7 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
         scale_color_manual(
           values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
                        `TRUE`  = CHIMERA_COLOURS[["ref"]]),
-          na.value = "grey50"
+          na.value = CHIMERA_COLOURS[["na_call"]]
         ) +
         scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
         theme_bw() +
@@ -207,9 +207,9 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
       if (hap$expanded) {
         p_reads <- p_reads +
           geom_vline(xintercept = hap$win_start / 1000,
-                     color = "darkorange", linewidth = 0.7, linetype = 3) +
+                     color = CHIMERA_COLOURS[["hap_window"]], linewidth = 0.7, linetype = 3) +
           geom_vline(xintercept = hap$win_end / 1000,
-                     color = "darkorange", linewidth = 0.7, linetype = 3)
+                     color = CHIMERA_COLOURS[["hap_window"]], linewidth = 0.7, linetype = 3)
       }
 
       if (!is.null(seg_data) && nrow(seg_data) > 0) {
@@ -224,14 +224,14 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
                          HET = CHIMERA_COLOURS[["het"]],
                          REF = CHIMERA_COLOURS[["ref"]]),
             drop     = FALSE,
-            na.value = "black"
+            na.value = CHIMERA_COLOURS[["na_state"]]
           ) +
           annotate("text",
                    x     = mean(c(hap$win_start, hap$win_end)) / 1000,
                    y     = 0.5,
                    label = hap_label_str,
                    size  = 3,
-                   color = "black",
+                   color = CHIMERA_COLOURS[["snp_point"]],
                    fontface = "bold") +
           coord_cartesian(
             xlim   = x_lims,
@@ -1015,14 +1015,14 @@ server <- function(input, output, session) {
             # Original peak boundary lines (solid grey if not expanded,
             # or kept as reference even when the analysis window widened)
             geom_vline(xintercept = pk_start / 1000,
-                       color = "grey60", linewidth = 0.6, linetype = 2) +
+                       color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.6, linetype = 2) +
             geom_vline(xintercept = pk_end / 1000,
-                       color = "grey60", linewidth = 0.6, linetype = 2) +
+                       color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.6, linetype = 2) +
             facet_grid(read_id ~ .) +
             scale_color_manual(
               values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
                            `TRUE`  = CHIMERA_COLOURS[["ref"]]),
-              na.value = "grey50"
+              na.value = CHIMERA_COLOURS[["na_call"]]
             ) +
             scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
             theme_bw() +
@@ -1050,9 +1050,9 @@ server <- function(input, output, session) {
           if (hap$expanded) {
             p_reads <- p_reads +
               geom_vline(xintercept = hap$win_start / 1000,
-                         color = "darkorange", linewidth = 0.7, linetype = 3) +
+                         color = CHIMERA_COLOURS[["hap_window"]], linewidth = 0.7, linetype = 3) +
               geom_vline(xintercept = hap$win_end / 1000,
-                         color = "darkorange", linewidth = 0.7, linetype = 3)
+                         color = CHIMERA_COLOURS[["hap_window"]], linewidth = 0.7, linetype = 3)
           }
 
           if (!is.null(seg_data) && nrow(seg_data) > 0) {
@@ -1067,7 +1067,7 @@ server <- function(input, output, session) {
                              HET = CHIMERA_COLOURS[["het"]],
                              REF = CHIMERA_COLOURS[["ref"]]),
                 drop     = FALSE,
-                na.value = "black"
+                na.value = CHIMERA_COLOURS[["na_state"]]
               ) +
               # Label the classification inside the segment bar
               annotate("text",
@@ -1075,7 +1075,7 @@ server <- function(input, output, session) {
                        y     = 0.5,
                        label = hap_label_str,
                        size  = 3,
-                       color = "black",
+                       color = CHIMERA_COLOURS[["snp_point"]],
                        fontface = "bold") +
               coord_cartesian(
                 xlim   = x_lims,
@@ -1859,7 +1859,8 @@ server <- function(input, output, session) {
               aes(x = uniform_pos / 1000, y = uniform_fit),
               color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.8, alpha = 1.0
             ) +
-            geom_point(color = "black", alpha = 0.5, size = 0.8, shape = 21) +
+            geom_point(color = CHIMERA_COLOURS[["snp_point"]], alpha = 0.5,
+                       size = 0.8, shape = 21) +
             scale_x_continuous(limits = c(0, x_max_kb_live), minor_breaks = seq(0, x_max_kb_live, 100)) +
             xlab("Position (Kbp)") +
             ylab("Number of Reads") +
@@ -1867,8 +1868,10 @@ server <- function(input, output, session) {
             ggtitle(paste("Chromosome", .chr)) +
             theme_bw() +
             theme(
-              panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
-              panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
+              panel.grid.minor.x = element_line(linewidth = 0.05,
+                                                color = CHIMERA_COLOURS[["grid_minor"]]),
+              panel.grid.major.x = element_line(linewidth = 0.05,
+                                                color = CHIMERA_COLOURS[["grid_major"]]),
               axis.text          = element_text(size = rel(1.2)),
               axis.title         = element_text(size = rel(1.5))
               
@@ -1885,7 +1888,7 @@ server <- function(input, output, session) {
               p <- p + geom_point(
                 data        = peak_highlight,
                 aes(x = pos_kb, y = n),
-                color       = "black",
+                color       = CHIMERA_COLOURS[["snp_point"]],
                 fill        = CHIMERA_COLOURS[["snp_peak"]],
                 size        = 3,
                 shape       = 21,
@@ -2208,15 +2211,15 @@ server <- function(input, output, session) {
 
     p <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
       geom_vline(xintercept = reg$start / 1000,
-                 color = "grey60", linewidth = 0.8, linetype = 2) +
+                 color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.8, linetype = 2) +
       geom_vline(xintercept = reg$end / 1000,
-                 color = "grey60", linewidth = 0.8, linetype = 2) +
+                 color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.8, linetype = 2) +
       geom_point() +
       facet_grid(read_id ~ .) +
       scale_color_manual(
         values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
                      `TRUE`  = CHIMERA_COLOURS[["ref"]]),
-        na.value = "grey50"
+        na.value = CHIMERA_COLOURS[["na_call"]]
       ) +
       scale_x_continuous(limits = x_lims, expand = expansion(mult = 0)) +
       theme_bw() +
@@ -2255,9 +2258,9 @@ server <- function(input, output, session) {
         geom_rect(aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = 1,
                       fill = loh_state), alpha = 0.85) +
         geom_vline(xintercept = reg$start / 1000,
-                   color = "grey60", linewidth = 0.8, linetype = 2) +
+                   color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.8, linetype = 2) +
         geom_vline(xintercept = reg$end / 1000,
-                   color = "grey60", linewidth = 0.8, linetype = 2) +
+                   color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.8, linetype = 2) +
         scale_fill_manual(
           values = c(REF_fixed = CHIMERA_COLOURS[["ref"]],
                      ALT_fixed = CHIMERA_COLOURS[["alt"]]),

@@ -1117,16 +1117,39 @@ get_chromosome_ploidy <- function(full_read_loh,
 # drawn at alpha = 0.7 renders at ~17% opacity, which vanished into the pale
 # 1N panel background). Amber and mid-green were both rejected for the fit
 # line: amber sits ~9 ΔE from the ALT red even for normal colour vision, and
-# mid-green lands within ~14 ΔE of the HET gray. Violet is the one hue that
-# adds no confusable pair to the four already here.
+# mid-green lands within ~14 ΔE of the HET gray.
+#
+# Every colour any plot draws lives in this vector — the app, the CLI and the
+# helper plot functions all index into it rather than naming a colour inline,
+# so a re-hue is a one-line edit here. Entries are grouped by role: the data
+# hues first, then annotation lines, then plot chrome.
 CHIMERA_COLOURS <- c(
-  ref      = "#3AA2FC",  # REF-fixed LOH, REF SNPs/segments, fused-peak marker
-  alt      = "#A51301",  # ALT-fixed LOH, ALT SNPs/segments
-  het      = "gray60",   # heterozygous haplotype segments
-  # Bright gold, legible only because these points carry a black shape-21 ring;
+  # ── Genotype / data hues ─────────────────────────────────────────────────
+  ref        = "#3AA2FC",  # REF-fixed LOH, REF SNPs/segments, fused-peak marker
+  alt        = "#A51301",  # ALT-fixed LOH, ALT SNPs/segments
+  het        = "gray60",   # heterozygous haplotype segments
+  # Pale green, legible only because these points carry a black shape-21 ring;
   # do not reuse it for an unstroked fill.
-  snp_peak = "#a8ddb5",  # detected SNP-density peak highlight
-  fit_line = "grey70"   # uniform-coverage fit line
+  snp_peak   = "#a8ddb5",  # detected SNP-density peak highlight
+  fit_line   = "grey70",   # uniform-coverage fit line
+
+  # ── Aneuploid panel backgrounds (drawn behind everything, alpha 0.5) ─────
+  ploidy_low  = "#FCFCDA", # <2N chromosome panel wash
+  ploidy_high = "#F6E3FC", # >2N chromosome panel wash
+  ploidy_edge = "black",   # border on the ploidy background rectangle
+
+  # ── Annotation / reference lines ─────────────────────────────────────────
+  peak_bound = "grey60",       # fused-peak span and selected-region bounds
+  subpeak    = "mediumpurple", # individual sub-peak SNPs inside a fused group
+  hap_window = "darkorange",   # expanded haplotype-window bounds
+
+  # ── Plot chrome ──────────────────────────────────────────────────────────
+  snp_point  = "black",   # SNP coverage point outline (shape 21) and hap label
+  grid_minor = "black",   # minor x gridline
+  grid_major = "red",     # major x gridline
+  caption    = "grey40",  # figure caption text
+  na_call    = "grey50",  # SNPs with no REF/ALT call
+  na_state   = "black"    # haplotype segments with no SNP_call
 )
 
 # -----------------------------------------------------------------------------
@@ -1326,7 +1349,8 @@ build_overview_plot <- function(results) {
   # 1N → #FAFBAC, 3N → #FEDBFF, 2N → white (no layer added).
   # fill is mapped through aes() (keyed on the display label) so these
   # backgrounds join the same fill legend as the LOH band colours below.
-  PLOIDY_BG     <- c("1" = "#FCFCDA", "3" = "#F6E3FC")
+  PLOIDY_BG     <- c("1" = CHIMERA_COLOURS[["ploidy_low"]],
+                     "3" = CHIMERA_COLOURS[["ploidy_high"]])
   PLOIDY_LABELS <- c("1" = "<2N", "3" = ">2N")
   ploidy_dt <- if (!is.null(results$ploidy_map)) {
     #warning("non-null ploidy_map")
@@ -1349,7 +1373,7 @@ build_overview_plot <- function(results) {
       data        = data.table(chrom       = as.character(aneuploid$chrom[i]),
                                 ploidy_call = PLOIDY_LABELS[[ploidy_key]]),
       aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, fill = ploidy_call),
-      color       = "black",
+      color       = CHIMERA_COLOURS[["ploidy_edge"]],
       alpha       = 0.5,
       inherit.aes = FALSE
     )
@@ -1394,7 +1418,8 @@ build_overview_plot <- function(results) {
       aes(x = uniform_pos / 1000, y = uniform_fit),
       color = CHIMERA_COLOURS[["fit_line"]], linewidth = 0.8, alpha = 1.0
     ) +
-    geom_point(color = "black", alpha = 0.5, size = 0.5, shape = 21) +
+    geom_point(color = CHIMERA_COLOURS[["snp_point"]], alpha = 0.5, size = 0.5,
+               shape = 21) +
     scale_x_continuous(
       limits       = c(0, x_max_kb),
       minor_breaks = seq(0, x_max_kb, 100)
@@ -1405,8 +1430,10 @@ build_overview_plot <- function(results) {
     facet_grid(chrom ~ ., switch = "y") +
     theme_bw() +
     theme(
-      panel.grid.minor.x = element_line(linewidth = 0.05, color = "black"),
-      panel.grid.major.x = element_line(linewidth = 0.05, color = "red"),
+      panel.grid.minor.x = element_line(linewidth = 0.05,
+                                        color = CHIMERA_COLOURS[["grid_minor"]]),
+      panel.grid.major.x = element_line(linewidth = 0.05,
+                                        color = CHIMERA_COLOURS[["grid_major"]]),
       strip.background   = element_blank(),
       strip.placement    = "outside",
       axis.text          = element_text(size = rel(1.2)),
@@ -1430,7 +1457,7 @@ build_overview_plot <- function(results) {
         geom_point(
           data        = peak_highlight,
           aes(x = pos_kb, y = n),
-          color       = "black",
+          color       = CHIMERA_COLOURS[["snp_point"]],
           fill        = CHIMERA_COLOURS[["snp_peak"]],
           size        = 2.5,
           shape       = 21,
@@ -1518,7 +1545,8 @@ build_overview_plot <- function(results) {
   if (has_loh) {
     p_main <- p_main +
       labs(caption = loh_caption) +
-      theme(plot.caption = element_text(size = rel(1), colour = "grey40"))
+      theme(plot.caption = element_text(size = rel(1),
+                                        colour = CHIMERA_COLOURS[["caption"]]))
   }
 
   # Event symbols are independent of the LOH band. Sub-resolution classes
