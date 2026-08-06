@@ -1227,6 +1227,48 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
 }
 
 # -----------------------------------------------------------------------------
+#  Read (facet row) ordering for the read-level plots
+#
+#  The read-level plots (peak, fused-peak and selected-region views in app.R)
+#  facet one row per read_id. Ordering those rows alphabetically scatters the
+#  REF/ALT junctions up and down the panel; ordering them by WHERE each read
+#  switches allele lines the junctions up into a staircase, which is what makes
+#  a crossover readable at a glance.
+#
+#  order_reads_by_junction() anchors on each read's LEADING allele and returns
+#  the midpoint between the last SNP of that leading run and the first SNP of
+#  the opposite call. Anchoring on the leading allele (rather than, say, "first
+#  ALT position") keeps the metric orientation-agnostic: REF->ALT and ALT->REF
+#  reads both sort by where they actually switch, instead of segregating into
+#  two blocks.
+#
+#  Reads with a single call throughout have no junction, so they sort by
+#  max(pos) and settle at the bottom. Reads that are entirely NA never enter
+#  the aggregation at all and are parked last, in their existing order.
+#
+#  Returns a character vector of read_ids in plot order, suitable for
+#  factor(read_id, levels = .). Shared with replot_selection_view.R so the
+#  standalone publication script and the app agree on row order.
+# -----------------------------------------------------------------------------
+order_reads_by_junction <- function(dt) {
+  o <- dt[!is.na(IS_REF), {
+    lead <- IS_REF[1L]
+    sw   <- pos[IS_REF != lead]
+    .(t = if (length(sw) > 0L) {
+            first_sw <- min(sw)
+            (max(pos[IS_REF == lead & pos < first_sw]) + first_sw) / 2
+          } else {
+            max(pos)
+          })
+  }, by = read_id]
+  setorder(o, t)
+  # as.character() keeps the return type stable whether or not read_id already
+  # arrived as a factor, so callers can re-level an already-ordered table.
+  c(as.character(o$read_id),
+    setdiff(unique(as.character(dt$read_id)), as.character(o$read_id)))
+}
+
+# -----------------------------------------------------------------------------
 #  Overview plot builder
 #
 #  Expressed as a plain function that returns a single ggplot object.

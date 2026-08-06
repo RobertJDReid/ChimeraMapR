@@ -111,6 +111,10 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
           pos <= plot_end
       ]
       if (nrow(plot_df) == 0) return(NULL)
+      # Facet rows in junction order so the crossovers line up as a staircase
+      # rather than scattering alphabetically. See order_reads_by_junction().
+      lev <- order_reads_by_junction(plot_df)
+      plot_df[, read_id := factor(read_id, levels = lev)]
       setorder(plot_df, read_id, pos)
 
       x_lims <- range(plot_df$pos / 1000)
@@ -972,6 +976,10 @@ server <- function(input, output, session) {
               pos <= plot_end
           ]
           if (nrow(plot_df) == 0) return(NULL)
+          # Facet rows in junction order so the crossovers line up as a
+          # staircase rather than scattering alphabetically.
+          lev <- order_reads_by_junction(plot_df)
+          plot_df[, read_id := factor(read_id, levels = lev)]
           setorder(plot_df, read_id, pos)
 
           peak_point_df <- data.frame(
@@ -2158,6 +2166,12 @@ server <- function(input, output, session) {
       return(NULL)
     }
 
+    # Facet rows in junction order so the crossovers line up as a staircase
+    # rather than scattering alphabetically. Applied BEFORE the copy below so
+    # the exported .rds carries the same row order the app displayed, keeping
+    # replot_selection_view()'s read_order = "as-is" a faithful reproduction.
+    lev <- order_reads_by_junction(plot_df)
+    plot_df[, read_id := factor(read_id, levels = lev)]
     setorder(plot_df, read_id, pos)
     results$selected_region_data <- copy(plot_df)
 
