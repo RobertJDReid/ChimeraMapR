@@ -1265,26 +1265,39 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
 #  reads both sort by where they actually switch, instead of segregating into
 #  two blocks.
 #
-#  Reads with a single call throughout have no junction, so they sort by
-#  max(pos) and settle at the bottom. Reads that are entirely NA never enter
-#  the aggregation at all and are parked last, in their existing order.
+#  Reads with a single call throughout have no junction, so they carry no
+#  position in the staircase at all: they are parked below every junction-
+#  bearing read and sort among themselves by max(pos). Reads that are entirely
+#  NA never enter the aggregation and are parked last, in their existing order.
 #
 #  Returns a character vector of read_ids in plot order, suitable for
 #  factor(read_id, levels = .). Shared with replot_selection_view.R so the
 #  standalone publication script and the app agree on row order.
 # -----------------------------------------------------------------------------
 order_reads_by_junction <- function(dt) {
+  # Sort within the group: rt_df arrives in whatever order the filter left it,
+  # so "leading allele" has to mean the call at the lowest position, not the
+  # call in the first row. as.numeric() on both branches keeps the column type
+  # identical across groups -- data.table rejects an integer group result once
+  # an earlier group returned the double from the /2 midpoint.
   o <- dt[!is.na(IS_REF), {
-    lead <- IS_REF[1L]
-    sw   <- pos[IS_REF != lead]
-    .(t = if (length(sw) > 0L) {
-            first_sw <- min(sw)
-            (max(pos[IS_REF == lead & pos < first_sw]) + first_sw) / 2
-          } else {
-            max(pos)
-          })
+    ord  <- order(pos)
+    p    <- pos[ord]
+    ir   <- IS_REF[ord]
+    lead <- ir[1L]
+    sw   <- p[ir != lead]
+    has_j <- length(sw) > 0L
+    .(no_j = !has_j,
+      t    = if (has_j) {
+               first_sw <- sw[1L]
+               as.numeric(max(p[ir == lead & p < first_sw]) + first_sw) / 2
+             } else {
+               as.numeric(max(p))
+             })
   }, by = read_id]
-  setorder(o, t)
+  # no_j first so junction-less reads sink below the staircase regardless of
+  # where their (meaningless here) max(pos) would otherwise place them.
+  setorder(o, no_j, t)
   # as.character() keeps the return type stable whether or not read_id already
   # arrived as a factor, so callers can re-level an already-ordered table.
   c(as.character(o$read_id),
