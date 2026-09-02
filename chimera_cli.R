@@ -580,7 +580,10 @@ if (run_chain) {
                            else NA_integer_,
           peak_right_pos = if (!is.null(tok$peak_right))
                              tok$peak_right$fused_pos_bp %||% tok$peak_right$snp_pos
-                           else NA_integer_
+                           else NA_integer_,
+          n_tract_spanning = tok$n_tract_spanning %||% NA_integer_,
+          n_tract_return   = tok$n_tract_return   %||% NA_integer_,
+          n_tract_switch   = tok$n_tract_switch   %||% NA_integer_
         )
       }
     }
@@ -710,6 +713,11 @@ if (run_chain) {
   # ── Step 2: Canonicalise ──────────────────────────────────────────────────────
   cat("[chain] Step 2: Canonicalising (merging same-state gaps) ...\n")
   canonical_chains <- lapply(raw_chains, canonicalise, params = cp)
+
+  # Per-tract junction-spanning read counts (see annotate_tract_read_support):
+  # measured after canonicalise() has settled the spans they refer to.
+  canonical_chains <- lapply(canonical_chains, annotate_tract_read_support,
+                             full_read_loh = results$full_read_loh, params = cp)
 
   if (full_chain) {
     step2_out <- paste0(stem, "_step2_canonical_tokens.csv")

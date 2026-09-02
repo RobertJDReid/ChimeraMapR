@@ -47,6 +47,19 @@ default_chain_params <- function() {
     # Fraction of spanning reads sharing the return pattern for NCO_GC
     homog_frac      = 0.80,
 
+    # Returning/switching reads across a tract needed for a "high" confidence
+    # call on evidence of that kind. Tract-spanning reads are a far scarcer
+    # observation than peak-window traversals -- a tract only a few kb wide
+    # already outruns most reads -- so one or two of them establish the event
+    # without settling it. Below this the call stands but is flagged for review.
+    tract_read_high_min = 4L,
+
+    # How far either side of a fixed tract annotate_tract_read_support() looks
+    # for the flanking haplotype state. Clipped to the adjacent token, so this
+    # is only an upper bound: it keeps the zone local to the junction on a wide
+    # HET flank without truncating a narrow one.
+    tract_flank_bp  = 10000L,
+
     # A peak is "roughly centered" if |peak_mid - token_mid| <=
     # center_tol * token_length
     center_tol      = 0.25,
@@ -1104,7 +1117,8 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 }
 
 .make_event <- function(call, chrom, tokens_involved, evidence_peaks = NULL,
-                        n_support = NA_integer_, notes = "") {
+                        n_support = NA_integer_, notes = "",
+                        support_kind = NA_character_) {
   # Compute genomic span from the tokens involved (excluding TEL sentinels)
   real_toks <- Filter(function(t) t$type != "TEL", tokens_involved)
   ev_start  <- if (length(real_toks) > 0) min(sapply(real_toks, `[[`, "start"), na.rm = TRUE) else NA_integer_
@@ -1156,6 +1170,11 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     peak_edge_types   = pk_edge,
     phase_switch_frac = phase_frac,
     notes             = notes,
+    # What n_support counts. "tract_reads" marks a call whose support is reads
+    # observed crossing BOTH junctions of the tract (see
+    # annotate_tract_read_support) rather than traversals of a peak window;
+    # build_event_table() gates those on their own threshold.
+    support_kind      = support_kind,
     tokens            = tokens_involved   # keep for downstream use / plotting
   )
 }
@@ -2292,11 +2311,92 @@ rule_subres_tract <- list(
   NULL
 }
 
+# =============================================================================
+#  TRACT READ SUPPORT
+#  Attaches per-tract read evidence to every F token in a canonicalised chain.
+#
+#  This is the direct measurement of what a peak's edge_type can only proxy.
+#  A "gene_conversion" label is read off a return pattern inside the PEAK's own
+#  window, and classify_peak_haplotype() scores its n_support as the reads
+#  traversing that window — neither is tied to the tract the peak ends up
+#  attached to. .attach_peaks() binds any peak whose snp_pos falls within
+#  peak_pad_bp of a token boundary, so a peak describing a short island can be
+#  bound to a tract many kb wide whose far junction no read ever reached.
+#
+#  n_tract_return / n_tract_switch / n_tract_spanning answer the question the
+#  outcome call actually turns on — how many reads crossed BOTH junctions of
+#  THIS tract, and what they did across it — so the rules can gate on evidence
+#  rather than on the peak window's geometry.
+#
+#  Runs after canonicalise(), since merging changes token spans.  A NULL
+#  full_read_loh leaves the fields absent and every consumer falls back to its
+#  previous peak-based behaviour.
+# =============================================================================
+annotate_tract_read_support <- function(chain, full_read_loh, params) {
+  if (is.null(full_read_loh)) return(chain)
+  toks <- chain$tokens
+  if (length(toks) == 0) return(chain)
+
+  flank_bp <- as.integer(params$tract_flank_bp %||% 10000L)
+  min_snps <- as.integer(params$min_snps_for_peak %||% 2L)
+
+  for (i in seq_along(toks)) {
+    tok <- toks[[i]]
+    if (tok$type != "F" || is.na(tok$start) || is.na(tok$end)) next
+
+    li <- .nearest_nonfixed_left(toks, i)
+    ri <- .nearest_nonfixed_right(toks, i)
+    if (is.null(li) || is.null(ri)) next
+    L <- toks[[li]]
+    R <- toks[[ri]]
+    if (is.na(L$start) || is.na(L$end) || is.na(R$start) || is.na(R$end)) next
+
+    cnt <- count_tract_junction_reads(
+      full_read_loh, chain$chrom,
+      tract_start = tok$start,
+      tract_end   = tok$end,
+      left_start  = max(L$start, tok$start - flank_bp),
+      left_end    = min(L$end,   tok$start - 1L),
+      right_start = max(R$start, tok$end + 1L),
+      right_end   = min(R$end,   tok$end + flank_bp),
+      tract_state = if (is.null(tok$state) || is.na(tok$state)) NA_character_
+                    else sub("_fixed$", "", tok$state),
+      min_snps    = min_snps,
+      match_frac  = as.numeric(params$homog_frac %||% 0.80)
+    )
+
+    toks[[i]]$n_tract_spanning <- cnt$n_spanning
+    toks[[i]]$n_tract_return   <- cnt$n_return
+    toks[[i]]$n_tract_switch   <- cnt$n_switch
+  }
+
+  chain$tokens <- toks
+  chain
+}
+
 # ── Rule R10: Direct classification from peak edge type ───────────────────────
 # Fires when an F token has a gene_conversion, crossover, or internal_crossover
 # peak directly associated with it.  These peak types are self-classifying:
 # gene_conversion → NCO_GC; crossover / internal_crossover → CO_GC.
 # Uses classify_tract() to preserve the min_span coverage gate.
+#
+# A gene_conversion peak additionally has to be corroborated at the tract:
+# NCO is the claim that the conversion tract CLOSED, which is only observable
+# on a read crossing both of the tract's junctions.  The peak's own label and
+# n_support are scoped to the peak window, not the tract (see
+# annotate_tract_read_support), so when the token carries read counts they
+# decide the outcome:
+#
+#   n_tract_return  > 0  → NCO_GC        (a read returned across this tract)
+#   n_tract_switch  > 0  → CO_GC         (reads crossed, none returned)
+#   neither              → GC_UNRESOLVED (nothing crossed; outcome unobserved)
+#
+# The tract is real either way — the peak establishes that — so an unobserved
+# outcome downgrades the call rather than discarding the event.
+#
+# crossover / internal_crossover peaks are deliberately exempt: a crossover
+# signature is a single-junction observation by construction, with no return
+# that has to span anything.
 rule_peak_direct <- list(
   id = "R10_peak_direct",
   match_fn = function(tokens, i, chain, params) {
@@ -2311,16 +2411,50 @@ rule_peak_direct <- list(
   },
   fire_fn = function(m, chain, params) {
     tract <- classify_tract(m$pk, params)
-    call  <- switch(tract$call,
+    et    <- m$pk$best_edge_type %||% m$pk$edge_type
+
+    call      <- switch(tract$call,
       NCO_GC = "NCO_GC",
       CO_GC  = "CO_GC",
       paste0("AMBIGUOUS(", tract$reason, ")")
     )
+    n_support    <- tract$n_support
+    notes        <- paste0("peak_type=", et)
+    support_kind <- NA_character_
+
+    # Corroborate a gene_conversion peak's NCO claim at the tract itself.
+    # Absent counts (no full_read_loh supplied) leave the peak-based call
+    # untouched.
+    n_ret  <- m$f_tok$n_tract_return   %||% NA_integer_
+    n_swi  <- m$f_tok$n_tract_switch   %||% NA_integer_
+    n_span <- m$f_tok$n_tract_spanning %||% NA_integer_
+    if (identical(call, "NCO_GC") && isTRUE(et == "gene_conversion") &&
+        !is.na(n_ret) && !is.na(n_swi)) {
+      if (n_ret > 0L) {
+        call         <- "NCO_GC"
+        n_support    <- n_ret
+        support_kind <- "tract_reads"
+        notes        <- paste0(notes, "; ", n_ret, "/", n_span,
+                               " junction-spanning reads returned across tract")
+      } else if (n_swi > 0L) {
+        call         <- "CO_GC"
+        n_support    <- n_swi
+        support_kind <- "tract_reads"
+        notes        <- paste0(notes, "; no read returned across tract, ", n_swi,
+                               "/", n_span, " switched — outcome is CO, not NCO")
+      } else {
+        call      <- "GC_UNRESOLVED"
+        notes     <- paste0(notes, "; no read crosses both tract junctions (",
+                            n_span, " spanning, 0 informative)",
+                            "; NCO/CO undetermined")
+      }
+    }
+
     ev <- .make_event(call, chain$chrom, list(m$f_tok),
                       evidence_peaks = list(m$pk),
-                      n_support = tract$n_support,
-                      notes = paste0("peak_type=",
-                                     m$pk$best_edge_type %||% m$pk$edge_type))
+                      n_support = n_support,
+                      notes = notes,
+                      support_kind = support_kind)
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk), loh = m$f_tok))
   }
@@ -2451,6 +2585,76 @@ rule_one_sided_binary <- list(
   }
 )
 
+# ── Rule R11c: Direct tract read evidence ─────────────────────────────────────
+# Fires on an F token whose own reads settle the outcome: reads observed
+# crossing BOTH junctions, some of which returned to the flanking homolog
+# (NCO) or switched to the other one (CO).  See annotate_tract_read_support().
+#
+# This is the fallback for a tract the peak-based rules cannot reach.  R10
+# needs a self-classifying peak bound to the token; R11 needs a *binary* peak
+# at each junction; R11b needs one binary peak and genuinely no peak opposite.
+# A tract whose junction peak happens to be typed gene_conversion — because it
+# describes a short restored-het island sitting between two conversion patches
+# — satisfies none of them, and used to fall through to reconcile() as an
+# uncalled LOH even when reads plainly crossed it.
+#
+# Deliberately claims the LOH token but NO peak.  The peak-exclusivity rule
+# ("peaks are shared observations that back a single event") is right for calls
+# whose evidence IS the peak, but here the evidence is the reads; the junction
+# peak may legitimately be the shared boundary between this tract and its
+# neighbour, already consumed by the neighbour's call.  Claiming the token
+# still keeps one call per tract, and leaving the peak unclaimed lets a shared
+# junction back both adjacent events.
+#
+# Placed after R10/R11/R11b so those keep priority: the resolver settles the
+# LOH-token contention in favour of the earlier (higher-scoring) rule, and this
+# rule only takes tracts none of them claimed.
+rule_tract_read_evidence <- list(
+  id = "R11c_tract_read_evidence",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F") return(NULL)
+
+    n_ret <- tok$n_tract_return %||% NA_integer_
+    n_swi <- tok$n_tract_switch %||% NA_integer_
+    if (is.na(n_ret) || is.na(n_swi)) return(NULL)   # no counts (no full_read_loh)
+    if (n_ret + n_swi == 0L) return(NULL)            # nothing crossed informatively
+
+    list(span = c(i, i), f_tok = tok)
+  },
+  fire_fn = function(m, chain, params) {
+    tok    <- m$f_tok
+    n_ret  <- as.integer(tok$n_tract_return   %||% 0L)
+    n_swi  <- as.integer(tok$n_tract_switch   %||% 0L)
+    n_span <- as.integer(tok$n_tract_spanning %||% NA_integer_)
+    n_inf  <- n_ret + n_swi
+    homog  <- as.numeric(params$homog_frac %||% 0.80)
+
+    # Informative reads should agree on the outcome. A tract carrying both
+    # returning and switching reads is a mixed population, not a single event.
+    if (n_ret / n_inf >= homog) {
+      call <- "NCO_GC"; ns <- n_ret
+      note <- paste0("tract_read_evidence; ", n_ret, "/", n_span,
+                     " junction-spanning reads returned across tract")
+    } else if (n_swi / n_inf >= homog) {
+      call <- "CO_GC";  ns <- n_swi
+      note <- paste0("tract_read_evidence; ", n_swi, "/", n_span,
+                     " junction-spanning reads switched across tract")
+    } else {
+      call <- "AMBIGUOUS(mixed_tract_reads)"; ns <- n_inf
+      note <- paste0("tract_read_evidence; mixed outcome across tract (",
+                     n_ret, " returned, ", n_swi, " switched of ", n_span,
+                     " spanning)")
+    }
+
+    ev <- .make_event(call, chain$chrom, list(tok),
+                      n_support = ns, notes = note,
+                      support_kind = "tract_reads")
+    list(event = ev, rewrite = NULL,
+         claims = list(loh = tok))
+  }
+)
+
 # ── Rule R12: LOH-crossover (large interstitial LOH flanked by chimeric peaks) ─
 # Fires when an F token with a large LOH is flanked by two junction peaks that
 # share a pair record with edge_type = "crossover" from the LOH-crossover probing
@@ -2552,7 +2756,8 @@ MOTIF_RULES <- list(
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking,      # R11 — two binary peaks flanking H-[F]-H
-  rule_one_sided_binary          # R11b — one confirmed binary peak, other side genuinely peak-less
+  rule_one_sided_binary,         # R11b — one confirmed binary peak, other side genuinely peak-less
+  rule_tract_read_evidence       # R11c — tract's own junction-spanning reads settle the outcome
   # rule_het_bounded,            # R04 — disabled (replaced by R10/R11)
   # rule_double_gc,              # R07 — disabled
   # rule_crossover_no_tract,     # R08 — disabled
@@ -2602,6 +2807,21 @@ MOTIF_RULES <- list(
       if (!is.null(t) && !is.null(t$start) && !is.na(t$start))
         keys <- c(keys, paste0("loh:", t$start, "-", t$end))
     }
+  }
+  # Also key on the FOOTPRINT each event reports, not just the tokens it
+  # consumed. .make_event() can re-anchor an event away from its matched token
+  # onto a peak's phase island, so two rules that claim different tokens can
+  # still end up describing the same interval — and the token keys above would
+  # not see the collision. Observed in R187E_13 chrI: R10 matched the F token
+  # 28,705-122,023 through the internal_crossover peak at 129,863 and re-anchored
+  # onto that peak's island, landing on 130,264-130,305, the exact tract R11c
+  # had independently claimed. Both committed, giving one crossover twice.
+  # Keying on the post-anchor span makes them contend, and MOTIF_RULES priority
+  # settles it in favour of the peak-backed call.
+  evs <- if (!is.null(fired$events)) fired$events else list(fired$event)
+  for (e in evs) {
+    if (!is.null(e) && !is.null(e$start) && !is.na(e$start) && !is.na(e$end))
+      keys <- c(keys, paste0("ev:", e$start, "-", e$end))
   }
   keys
 }
@@ -2802,6 +3022,32 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     NULL
   }
 
+  # Collapse fused peaks back to one row per fusion group.
+  #
+  # `fused_peaks` is one row PER PEAK; `fused_pos_bp` is the group aggregate
+  # (the mean of the constituent peaks' snp_pos — see fused_coords in
+  # compute_peak_pairs). A gene_conversion pair is therefore two rows sharing
+  # one position: the two binary junction peaks bracketing a conversion tract,
+  # whose midpoint is the fused position. Iterating rows below without this
+  # collapse promoted such a pair to TWO identical *_subres events differing
+  # only in n_support — the per-junction read counts (e.g. RAD5_09 chrVII
+  # 435,397 n=41 + 436,829 n=37 → two rows at 436,113).
+  #
+  # n_read_support is combined as the MINIMUM across the group: an NCO is the
+  # claim that the tract closed, which only a read crossing BOTH junctions can
+  # witness, so the thinner junction bounds the achievable support. (The
+  # per-peak value is left off fused_coords deliberately, on the reasoning that
+  # self-classifying peak classes are excluded from fusion and so always form
+  # singletons. That holds for a peak whose own haplotype_label is
+  # gene_conversion; it does not hold here, where the PAIR's edge_type is
+  # gene_conversion while both PEAKS are binary — fusion-eligible.)
+  if (!is.null(peak_source_for_reconcile) && nrow(peak_source_for_reconcile) > 0) {
+    peak_source_for_reconcile <- peak_source_for_reconcile[
+      , .(et_col = et_col[which(!is.na(et_col))[1]],
+          ns_col = if (all(is.na(ns_col))) NA_integer_ else min(ns_col, na.rm = TRUE)),
+      by = .(chrom, pos_col)]
+  }
+
   unclaimed_peaks <- list()
   if (!is.null(peak_source_for_reconcile)) {
     for (ri in seq_len(nrow(peak_source_for_reconcile))) {
@@ -2923,11 +3169,22 @@ build_event_table <- function(events, params = default_chain_params()) {
     ))
 
   min_span <- as.integer(params$min_span %||% 3L)
+  tract_read_high_min <- as.integer(params$tract_read_high_min %||% 4L)
 
   rows <- lapply(events, function(ev) {
     ns <- as.integer(ev$n_support %||% NA_integer_)
 
-    confidence <- if (ev$event_class %in% HIGH_CONF_CLASSES) {
+    # A call supported by tract-spanning reads is gated on its own threshold,
+    # ahead of the per-class rule. These reads are a much scarcer observation
+    # than peak-window traversals -- crossing both junctions of a tract of any
+    # size outruns most reads -- so a handful of them establishes the event
+    # without settling it, whatever class it landed in.
+    # Gated only for classes that could otherwise reach "high" -- an AMBIGUOUS
+    # call is never promoted by having plenty of reads behind its ambiguity.
+    confidence <- if (identical(ev$support_kind %||% NA_character_, "tract_reads") &&
+                      ev$event_class %in% HIGH_CONF_CLASSES) {
+      if (!is.na(ns) && ns >= tract_read_high_min) "high" else "review"
+    } else if (ev$event_class %in% HIGH_CONF_CLASSES) {
       "high"
     } else if (ev$event_class %in% SUBRES_CLASSES) {
       if (!is.na(ns) && ns >= min_span) "high" else "review"
@@ -2967,6 +3224,11 @@ build_event_table <- function(events, params = default_chain_params()) {
 #' @param fused_peaks    data.table from compute_peak_pairs()$fused_peaks
 #' @param peak_pairs     data.table from compute_peak_pairs()$peak_pairs
 #' @param rt_df          chimeric read table from run_chimera_analysis()
+#' @param full_read_loh  MAPQ-filtered read table from run_chimera_analysis();
+#'                       supplies the per-tract junction-spanning read counts
+#'                       used to corroborate gene-conversion outcome calls.
+#'                       When NULL those counts are absent and the rules fall
+#'                       back to peak-based classification alone.
 #' @param chr_span       data.table from run_chimera_analysis()$chr_span
 #' @param coverage_segments data.table from compute_coverage_map()$coverage_segments;
 #'                       chromosome-wide depth_ratio (general-purpose fallback).
@@ -3000,6 +3262,7 @@ run_chain_analysis <- function(loh_segments,
                                 peak_pairs   = NULL,
                                 snp_peaks    = NULL,
                                 rt_df        = NULL,
+                                full_read_loh = NULL,
                                 chr_span,
                                 coverage_segments = NULL,
                                 coverage_table     = NULL,
@@ -3012,6 +3275,11 @@ run_chain_analysis <- function(loh_segments,
 
   message("  [chain] Canonicalising chains ...")
   chains <- lapply(chains, canonicalise, params = params)
+
+  # Per-tract read evidence, measured after canonicalise() has settled the
+  # token spans the counts refer to.
+  chains <- lapply(chains, annotate_tract_read_support,
+                   full_read_loh = full_read_loh, params = params)
 
   message("  [chain] Scanning for motifs ...")
   scan_results <- lapply(names(chains), function(cname) {

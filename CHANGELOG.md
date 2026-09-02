@@ -4,6 +4,167 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.14] - 2026-09-02
+
+### Gene-conversion outcomes are decided by reads crossing the tract
+
+- R10 (`rule_peak_direct`) treated a `gene_conversion` peak as self-classifying
+  and promoted whatever F token it was attached to straight to `NCO_GC`. But
+  that label is read off a REF-ALT-REF (or ALT-REF-ALT) return pattern inside
+  the *peak's* window, and `classify_peak_haplotype()` scores its `n_support`
+  as the reads traversing that window — neither is tied to the tract the peak
+  ends up attached to. Since `.attach_peaks()` binds any peak whose `snp_pos`
+  falls within `peak_pad_bp` (200 bp) of a token boundary, a peak describing a
+  short island could be bound to a tract many kb wide whose far junction no
+  read ever reached.
+- New `count_tract_junction_reads()` (`chimera_functions.R`) measures what the
+  outcome call actually turns on. For a tract and its two flanking zones it
+  classifies every read crossing **both** junctions: *return* (same homolog
+  both flanks, and it is the one the tract is not — NCO), *switch* (a different
+  homolog each side — CO), or *uninformative* (flanks already match the tract
+  state: the unconverted homolog running straight through, which inside a fixed
+  tract is most of the reads present).
+- `annotate_tract_read_support()` attaches `n_tract_return` / `n_tract_switch`
+  / `n_tract_spanning` to every F token, after `canonicalise()` since merging
+  changes the spans the counts refer to. `full_read_loh` now flows into
+  `run_chain_analysis()` and is passed by both `chimera_cli.R` and `app.R`; the
+  counts are serialised into the chain step CSVs. When it is not supplied the
+  fields are absent and every consumer falls back to the previous peak-based
+  behaviour.
+- R10 gates on the measurement: `n_tract_return > 0` → `NCO_GC`, else
+  `n_tract_switch > 0` → `CO_GC`, else `GC_UNRESOLVED` (𝝤°) — the tract is real
+  either way, so an unobserved outcome downgrades the call rather than
+  discarding the event. `crossover` and `internal_crossover` peaks are exempt:
+  a crossover signature is a single-junction observation by construction, with
+  no return that has to span anything.
+- The flanking zones come from the adjacent chain tokens rather than a fixed bp
+  window either side: on RAD5_09 `S288C_chrII` the left flank of the
+  91,510–98,709 tract *is* a 439 bp restored-HET island with another fixed
+  tract immediately beyond it, and a fixed window would reach past the island
+  into that neighbour and read the wrong state.
+- A read counts as a *return* only if it positively carries the tract's allele
+  at the in-tract SNPs it covers — its own calls, checked against the tract
+  state from the LOH map, at `homog_frac` agreement. Both halves of that matter.
+  Using the read's calls rather than a `classify_zone_state()` majority vote
+  keeps short tracts observable: a tract can hold fewer SNPs than the zone
+  caller needs, which would otherwise force a genuine 4 bp conversion on
+  RAD5_07 `S288C_chrII` to "outcome unknown". Requiring the match to be
+  *positive* is what keeps the count honest: treating an uncallable tract zone
+  as permissive scores every opposite-homolog read that merely overlaps the
+  tract as a return — roughly half the spanning reads by construction. On EV_10
+  that alone manufactured eight `NCO_GC` calls, four of them "high confidence",
+  on tracts with no chimeric peak anywhere near them; every supporting read was
+  the *unconverted* homolog reading straight through a coverage dip. And the
+  threshold is a fraction, not unanimity, because over a multi-kb tract one
+  miscalled base is expected — the RAD5_09 `S288C_chrII` 91,510–98,709 call
+  rests on a single read that is ALT at 35 of its 36 in-tract SNPs.
+
+### New rule R11c — a tract's own reads can call it
+
+- `rule_tract_read_evidence` fires on an F token whose reads settle the
+  outcome, classifying from `n_tract_return` / `n_tract_switch` with
+  `homog_frac` requiring the informative reads to agree; a mixed tract reports
+  `AMBIGUOUS(mixed_tract_reads)` with the split in its notes.
+- This is the fallback for a tract no peak-based rule can reach. R10 needs a
+  self-classifying peak bound to the token, R11 needs a *binary* peak at each
+  junction, R11b needs one binary peak and genuinely no peak opposite. A tract
+  whose junction peak happens to be typed `gene_conversion` — because it
+  describes a short restored-het island between two conversion patches —
+  satisfies none of them, and fell through to `reconcile()` as an uncalled LOH
+  even when reads plainly crossed it.
+- It claims the LOH token but **no peak**. Peak exclusivity ("peaks are shared
+  observations that back a single event") is right for calls whose evidence is
+  the peak; here the evidence is the reads, and the junction peak may
+  legitimately be the shared boundary between this tract and its neighbour,
+  already consumed by the neighbour's call. Claiming the token still keeps one
+  call per tract, while leaving the peak unclaimed lets a shared junction back
+  both adjacent events. Placed last in `MOTIF_RULES` so the peak-based rules
+  keep priority through the resolver's score.
+
+### Confidence on read-supported calls
+
+- Events carrying `support_kind = "tract_reads"` are gated on the new
+  `tract_read_high_min` (4): one to three returning/switching reads → "review",
+  more than three → "high". Tract-spanning reads are a far scarcer observation
+  than peak-window traversals — crossing both junctions of a tract of any size
+  outruns most reads — so a handful establishes the event without settling it.
+- Applied ahead of the per-class rule but only for classes that could otherwise
+  reach "high", so an `AMBIGUOUS` call is never promoted by having plenty of
+  reads behind its ambiguity.
+
+### Two ways one event was being reported twice
+
+- `reconcile()` promoted unclaimed peaks by iterating `fused_peaks`, which
+  holds one row **per peak** while `fused_pos_bp` is the fusion *group*
+  aggregate (the mean of the constituent peaks' `snp_pos`). A conversion tract
+  bracketed by two binary junction peaks is one fused pair sharing one
+  position, so it emitted two identical `*_subres` events differing only in
+  `n_support` - the two junctions' separate read counts. RAD5_09
+  `S288C_chrVII` 435,397 (n=41) and 436,829 (n=37) both reported at 436,113,
+  their midpoint; likewise `S288C_chrVIII` 418,921 (n=10) and 419,699 (n=11) at
+  419,310. Four such pairs across the 43-sample set (also RAD5_07
+  `S288C_chrIX` 202,877 and RAD5_13 `S288C_chrVII` 109,694).
+- `compute_peak_pairs()` deliberately leaves `n_read_support` off the group
+  aggregate, on the reasoning that self-classifying peak classes are excluded
+  from fusion and so always form singletons. That holds for a peak whose own
+  `haplotype_label` is `gene_conversion`; it does not hold here, where the
+  *pair's* `edge_type` is `gene_conversion` while both *peaks* are `binary`,
+  which is fusion-eligible. `reconcile()` now collapses the peak source to one
+  row per position, combining support as the **minimum** across the group: an
+  NCO is the claim that the tract closed, witnessed only by a read crossing
+  both junctions, so the thinner junction bounds the achievable support.
+- Separately, `.fired_claim_keys()` derived a candidate's claim keys from the
+  tokens it consumed, but `.make_event()` can re-anchor an event off its
+  matched token onto a peak's phase island. Two rules claiming different tokens
+  could therefore describe the same interval with no collision visible to the
+  resolver. On R187E_13 `S288C_chrI`, R10 matched the F token 28,705-122,023
+  through the `internal_crossover` peak at 129,863, re-anchored onto that peak's
+  island, and landed on 130,264-130,305 - the exact tract R11c had claimed on
+  its own reads. Both committed, giving one crossover twice (n=39 and n=42).
+  Claim keys now include each event's post-anchor footprint, so the two contend
+  and `MOTIF_RULES` priority settles it in favour of the peak-backed call.
+
+### Effect on the 43-sample RAD5-OE set
+
+- 449 -> 451 events. Six new calls from R11c (three `NCO_GC`, two `CO_GC`, one
+  `AMBIGUOUS(mixed_tract_reads)`), spread over five samples, and four surplus
+  rows removed by the fused-pair collapse. No event was lost. Every new call
+  sits on a tract the LOH map calls unambiguously fixed (`balance_mean`
+  0.006-0.016 or 0.992-1.000, with a single 3-SNP tract at 0.113).
+- One class change: RAD5_09 `S288C_chrII` 69,647-90,558 (20.9 kb), previously
+  `NCO_GC` at high confidence with `n_support = 20`, now `GC_UNRESOLVED`. The
+  `gene_conversion` peak at 90,610 describes the 439 bp island - its window is
+  89,087-93,687 - but sat 52 bp inside the pad at that tract's right edge. No
+  read crosses both of its junctions: the one read spanning the interval is the
+  unconverted homolog, pure ALT throughout. The adjacent 91,510-98,709 tract,
+  previously uncalled, is now `NCO_GC` on the single read that does return
+  across it.
+- Eleven `NCO_GC` calls move from "high" to "review", each resting on one to
+  three returning reads. Several are large (18.5 kb, 16.7 kb, 20.8 kb), where
+  thin junction-spanning support is expected rather than suspicious.
+- Final split: 348 high / 103 review. No sample now reports the same interval
+  twice.
+
+### Known limitation exposed by this work
+
+- R11c calls a tract from its reads alone, with no requirement that a chimeric
+  peak sit anywhere near it. That is deliberate - it is the whole point of the
+  rule - but it means the call inherits whatever the LOH map decided, and the
+  LOH map is not equally trustworthy in every sample. On EV_10 all fifteen
+  "fixed" segments have `balance_mean` between 0.72 and 0.87; none approaches 0
+  or 1, and the sample carries no chimeric peaks at all. A sample with no
+  genuine LOH gives the beta-binomial EM no fixed-state population to fit, and
+  its fixed component appears to settle on the most allele-skewed positions
+  available - typically local coverage dips. Compare RAD5_09, cleanly bimodal
+  at 0.000-0.021 and 0.998-0.999.
+- Nothing upstream guards against this: the local-deletion-rate SNP filter
+  targets positions where reads register deletions, and Rd
+  (`rule_interstitial_deletion`) needs `flank_depth_ratio < 0.60` where these
+  dips sit at 0.62-0.85. The positive in-tract match now keeps such tracts from
+  producing events (EV_10 goes from eight calls to none), so the problem is
+  latent rather than active, but the LOH map itself is unchanged and no rule
+  currently checks a tract's `balance_mean` before trusting it.
+
 ## [0.8.13] - 2026-08-05
 
 - **Event labels moved below the LOH band**, on both the genome-wide overview

@@ -1200,6 +1200,7 @@ server <- function(input, output, session) {
         peak_pairs        = results$peak_pairs,
         snp_peaks         = results$snp_peaks,     # fallback when fused_peaks is NULL
         rt_df             = results$rt_df,
+        full_read_loh     = results$full_read_loh,
         chr_span          = results$chr_span,
         coverage_segments = results$coverage_segments,
         coverage_table    = results$coverage_table,

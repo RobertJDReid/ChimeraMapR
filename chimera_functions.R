@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.13"
+APP_VERSION <- "0.8.14"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -2134,6 +2134,121 @@ classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_s
   if (is.na(majority)) return(NA_character_)
   if (abs(majority - 0.5) < min_margin) return(NA_character_)
   if (majority >= 0.5) "REF" else "ALT"
+}
+
+# ---------------------------------------------------------------------------
+# count_tract_junction_reads()
+#   Read-level evidence for the OUTCOME of a fixed (LOH) tract: how many reads
+#   cross BOTH of its junctions, and what each of those reads does across it.
+#
+#   A tract's NCO/CO outcome is only ever observable on a read that carries a
+#   homolog across both junctions. Given the flanking zones either side, each
+#   such read falls into one of three classes:
+#
+#     return  — same haplotype on both flanks, the opposite state across the
+#               tract (REF-ALT-REF / ALT-REF-ALT). The conversion tract closed
+#               and the molecule returned to its own homolog: NCO.
+#     switch  — a different haplotype on each flank. The molecule changed
+#               homolog and stayed changed: CO.
+#     uninformative — both flanks already match the tract state: the
+#               unconverted homolog running straight through. It says nothing
+#               about the event, and inside a fixed tract it is most of the
+#               reads present.
+#
+#   The flanking zones are supplied by the caller (from the adjacent chain
+#   tokens) rather than taken as a fixed bp window either side. The flank of
+#   one tract can be a restored-het island only a few hundred bp wide with
+#   another fixed tract just beyond it; a fixed window would reach past the
+#   island into that neighbour and read the wrong state.
+#
+#   The tract's own state comes from the caller (the LOH map already called it),
+#   not from a per-read majority vote over the tract zone: a short tract can
+#   hold fewer SNPs than classify_zone_state() needs to call a zone at all, and
+#   requiring a callable tract zone would make a return impossible to observe
+#   there, silently forcing every such tract to "outcome unknown".
+#
+#   A return must be POSITIVE, though. The read has to carry the tract's allele
+#   at >= match_frac of the in-tract SNPs it covers — its own calls, not an
+#   inference from the flanks. Scoring an uncallable tract zone as permissive
+#   instead makes every opposite-homolog read that merely overlaps the tract a
+#   return, which is about half the spanning reads by construction, and turns
+#   an allele-balance dip the LOH HMM called fixed on thin evidence into a
+#   confidently supported gene conversion. The threshold is a fraction rather
+#   than unanimity because a single miscalled base over a multi-kb tract is
+#   expected and should not discard the read.
+#
+#   Returns a list: n_spanning, n_return, n_switch, n_uninformative.
+# ---------------------------------------------------------------------------
+count_tract_junction_reads <- function(full_read_loh, chr_name,
+                                       tract_start, tract_end,
+                                       left_start,  left_end,
+                                       right_start, right_end,
+                                       tract_state = NA_character_,
+                                       min_snps = 2L,
+                                       match_frac = 0.80) {
+  empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
+                n_uninformative = 0L)
+  if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
+  if (anyNA(c(tract_start, tract_end, left_start, left_end,
+              right_start, right_end)))                    return(empty)
+  if (left_end < left_start || right_end < right_start)    return(empty)
+
+  win <- full_read_loh[as.character(chrom) == chr_name &
+                         pos >= left_start & pos <= right_end]
+  if (nrow(win) == 0) return(empty)
+
+  tract_is_ref <- if (is.na(tract_state)) NA else identical(tract_state, "REF")
+
+  st <- win[, {
+    sL   <- classify_zone_state(pos, IS_REF, left_start,  left_end,  min_snps)
+    sR   <- classify_zone_state(pos, IS_REF, right_start, right_end, min_snps)
+    inM  <- pos >= tract_start & pos <= tract_end
+    .(state_L = sL, state_R = sR,
+      n_in       = sum(inM),
+      n_in_tract = if (is.na(tract_is_ref)) NA_integer_
+                   else sum(inM & IS_REF == tract_is_ref))
+  }, by = read_id]
+
+  span <- st[!is.na(state_L) & !is.na(state_R)]
+  if (nrow(span) == 0) return(empty)
+
+  # Different homolog each side: the molecule changed and stayed changed (CO).
+  is_switch <- span$state_L != span$state_R
+
+  # Same homolog both sides, and it is the one the tract is NOT: the molecule
+  # left its homolog across the tract and came back (NCO).
+  #
+  # The read must POSITIVELY carry the tract's allele at the in-tract SNPs it
+  # covers. Testing the read's own calls — rather than a zone-majority vote via
+  # classify_zone_state() — matters in both directions:
+  #
+  #   * A short tract (a handful of bp, 1-2 SNPs) is below the zone caller's
+  #     min_evidence_snps, so a majority vote can never confirm a genuine
+  #     conversion there. The per-read check can.
+  #   * Treating an uncallable tract zone as permissive is far worse: every
+  #     read of the opposite homolog that merely OVERLAPS the tract then scores
+  #     as a return — roughly half the spanning reads by construction — which
+  #     manufactures gene conversions out of allele-balance dips that the LOH
+  #     HMM called fixed on thin evidence.
+  #
+  # So: same homolog both flanks, that homolog is not the tract's, and the read
+  # agrees with the tract at >= match_frac of the in-tract SNPs it covers. A
+  # read that reads as its flanking homolog straight through converted nothing
+  # and is not support. The threshold rather than unanimity is deliberate: over
+  # a multi-kb tract a single miscalled base is expected, and demanding a
+  # perfect run discards real conversions (RAD5_09 chrII 91,510-98,709 is
+  # carried by one read that is ALT at 35 of 36 in-tract SNPs).
+  is_return <- !is_switch & span$n_in > 0L &
+               !is.na(tract_state) & span$state_L != tract_state &
+               !is.na(span$n_in_tract) &
+               span$n_in_tract >= match_frac * span$n_in
+
+  list(
+    n_spanning      = as.integer(nrow(span)),
+    n_return        = as.integer(sum(is_return)),
+    n_switch        = as.integer(sum(is_switch)),
+    n_uninformative = as.integer(sum(!is_switch & !is_return))
+  )
 }
 
 # ---------------------------------------------------------------------------
