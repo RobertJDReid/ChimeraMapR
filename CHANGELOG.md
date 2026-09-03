@@ -4,6 +4,39 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.15] - 2026-09-03
+
+### R12 corroborates its crossover claim at the tract
+
+- `rule_loh_crossover` (R12) asserted `CO_GC` purely from a peak pair's
+  `edge_type = "crossover"`, with no check that any read actually carried a
+  homolog across the tract. That verdict comes from
+  `classify_loh_crossover_edge()` over the two peaks' outer zones, and those
+  zones are bounded by the *neighbouring peaks* — not by heterozygosity. When a
+  zone lands inside another fixed tract every read reads the same allele there,
+  so the L-R "crossing" it scores is the LOH map read back to itself with no
+  phase content at all.
+- On RAD5_15 `S288C_chrI` that produced a high-confidence `CO_GC` over the
+  18.2 kb REF tract at 75,326–93,531. The pair backing it (74,978 ↔ 93,531)
+  rests on **one** read, 73,740–94,351, whose left zone (71,797–74,978) is nine
+  SNPs of the adjacent 2.7 kb ALT tract plus the single HET SNP at 74,978. The
+  read is ALT across the ALT tract because the ALT tract is ALT, REF at 74,978,
+  and REF onward — an uninformative read, scored as `ALT-REF` and therefore as a
+  crossover.
+- R12 now applies the same tract corroboration R10's `gene_conversion` branch
+  has carried since 0.8.14, from `annotate_tract_read_support()` — whose
+  flanking zones come from the adjacent chain tokens, so an uncallable flank
+  yields no spanning reads instead of a fabricated state:
+  `n_tract_switch > 0` → `CO_GC`, else `n_tract_return > 0` → `NCO_GC` (the
+  reads say the tract closed, whatever the pair said), else `GC_UNRESOLVED`.
+  The tract is real either way, so an unobserved outcome downgrades the call
+  rather than discarding the event. Absent counts (no `full_read_loh`) leave the
+  peak-based call untouched.
+- The chrI call becomes `GC_UNRESOLVED` at "review": its left flank is the
+  single SNP at 74,978, below `ZONE_CALL_HEURISTICS$min_evidence_snps`, so the
+  tract has 0 junction-spanning reads and no CO/NCO outcome is observable. No
+  other RAD5_15 event changed (17 events, 14 high / 3 review).
+
 ## [0.8.14] - 2026-09-02
 
 ### Gene-conversion outcomes are decided by reads crossing the tract

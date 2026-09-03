@@ -2660,6 +2660,26 @@ rule_tract_read_evidence <- list(
 # share a pair record with edge_type = "crossover" from the LOH-crossover probing
 # in compute_peak_pairs().  This is the fallback when R10 cannot fire because the
 # flanking peaks' windows do not overlap the F token directly.
+#
+# Like R10's gene_conversion branch, the peak-pair verdict is corroborated at the
+# tract itself when the token carries junction-spanning read counts.  The verdict
+# comes from classify_loh_crossover_edge() over the two peaks' outer zones, which
+# are bounded by the neighbouring peaks -- not by heterozygosity.  When a zone
+# happens to lie inside another fixed tract, every read reads the same allele
+# there and the resulting L-R "crossing" is the LOH map read back to itself, with
+# no phase content at all.  A crossover through a tract is only ever observable
+# on a read that carries a homolog across BOTH of its junctions, and that is
+# exactly what annotate_tract_read_support() measures (its flanking zones come
+# from the adjacent chain tokens, so an uncallable flank yields no spanning
+# reads rather than a fabricated state):
+#
+#   n_tract_switch > 0  → CO_GC          (reads crossed and stayed crossed)
+#   n_tract_return > 0  → NCO_GC         (reads returned; the tract closed)
+#   neither             → GC_UNRESOLVED  (nothing crossed; outcome unobserved)
+#
+# The tract is real either way -- the peaks establish that -- so an unobserved
+# outcome downgrades the call rather than discarding the event.  Absent counts
+# (no full_read_loh supplied) leave the peak-based call untouched.
 rule_loh_crossover <- list(
   id = "R12_loh_crossover",
   match_fn = function(tokens, i, chain, params) {
@@ -2706,11 +2726,39 @@ rule_loh_crossover <- list(
     else
       "CO_GC"
 
+    notes        <- paste0("loh_crossover; state=", m$f_tok$state)
+    support_kind <- NA_character_
+
+    # Corroborate the crossover claim at the tract itself (see rule header).
+    n_ret  <- m$f_tok$n_tract_return   %||% NA_integer_
+    n_swi  <- m$f_tok$n_tract_switch   %||% NA_integer_
+    n_span <- m$f_tok$n_tract_spanning %||% NA_integer_
+    if (identical(call, "CO_GC") && !is.na(n_ret) && !is.na(n_swi)) {
+      if (n_swi > 0L) {
+        ns           <- n_swi
+        support_kind <- "tract_reads"
+        notes        <- paste0(notes, "; ", n_swi, "/", n_span,
+                               " junction-spanning reads switched across tract")
+      } else if (n_ret > 0L) {
+        call         <- "NCO_GC"
+        ns           <- n_ret
+        support_kind <- "tract_reads"
+        notes        <- paste0(notes, "; no read switched across tract, ", n_ret,
+                               "/", n_span, " returned — outcome is NCO, not CO")
+      } else {
+        call  <- "GC_UNRESOLVED"
+        notes <- paste0(notes, "; no read crosses both tract junctions (",
+                        n_span, " spanning, 0 informative)",
+                        "; NCO/CO undetermined")
+      }
+    }
+
     ev <- .make_event(call, chain$chrom,
                       list(m$f_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = ns,
-                      notes = paste0("loh_crossover; state=", m$f_tok$state))
+                      notes = notes,
+                      support_kind = support_kind)
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk_l, m$pk_r), loh = list(m$f_tok)))
   }
