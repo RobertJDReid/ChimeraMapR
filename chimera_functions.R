@@ -2252,6 +2252,36 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
 }
 
 # ---------------------------------------------------------------------------
+# pos_in_fixed_loh()
+#   TRUE for each position falling inside a REF_fixed / ALT_fixed segment of the
+#   LOH map, i.e. the positions that carry NO phase information.
+#
+#   classify_zone_state() answers "which allele does this read carry here", and
+#   every caller that compares two zones treats that answer as homolog identity.
+#   Those are the same thing only where the sample is heterozygous: inside a
+#   fixed tract every molecule reads the tract's allele whichever homolog it
+#   came from, so a zone state read off such positions is the LOH map echoed
+#   back, not evidence about the read. Zones whose job is to establish homolog
+#   identity must therefore vote with these positions excluded.
+#
+#   Segments are non-overlapping and sorted, so findInterval locates each
+#   position's candidate segment in one pass.
+# ---------------------------------------------------------------------------
+pos_in_fixed_loh <- function(loh_segments, chr_name, pos) {
+  out <- rep(FALSE, length(pos))
+  if (is.null(loh_segments) || nrow(loh_segments) == 0 || length(pos) == 0)
+    return(out)
+  segs <- loh_segments[as.character(chrom) == chr_name &
+                         loh_state %in% c("REF_fixed", "ALT_fixed")]
+  if (nrow(segs) == 0) return(out)
+  segs <- segs[order(start)]
+  i    <- findInterval(pos, segs$start)
+  hit  <- i > 0L & !is.na(pos)
+  out[hit] <- pos[hit] <= segs$end[i[hit]]
+  out
+}
+
+# ---------------------------------------------------------------------------
 # count_block_junction_reads()
 #   The composite-LOH generalisation of count_tract_junction_reads(): read-level
 #   evidence for the outcome of a RUN of fixed tracts that no callable
@@ -2791,6 +2821,24 @@ compute_peak_pairs <- function(snp_peaks,
     chr_peaks <- peaks_dt[chrom == chr_name][order(snp_pos)]
     if (nrow(chr_peaks) < 2) next
 
+    # This chromosome's read calls, flagged with whether each position is
+    # phase-informative (see pos_in_fixed_loh). The OUTER zones of every pair
+    # below vote with HET_OK positions only: their job is to say which homolog
+    # the read is, and a zone that has drifted inside a neighbouring fixed
+    # tract cannot. RAD5_15 S288C_chrI is the case that forced this — both of
+    # its pairs were classified entirely off LOH. The 71,796 <-> 74,978 pair's
+    # 23 "supporting" reads all lie between 47,514 and 88,796, wholly inside
+    # the 28,705-93,531 LOH block, and their unanimous REF-ALT-REF is the LOH
+    # map read back to itself; the 74,978 <-> 93,531 pair's single read is ALT
+    # across the 2.7 kb ALT tract because that tract is ALT, which scored as a
+    # crossover. The MIDDLE zone is deliberately left unmasked: it is the
+    # candidate conversion tract, and being fixed is what it is being asked
+    # about, not a disqualification.
+    chr_rt <- rt_df[as.character(chrom) == chr_name]
+    if (nrow(chr_rt) == 0) next
+    set(chr_rt, j = "HET_OK",
+        value = !pos_in_fixed_loh(loh_segments, chr_name, chr_rt$pos))
+
     get_peak_reads <- function(pk) {
       transition_pos[
         as.character(chrom) == chr_name &
@@ -2905,8 +2953,8 @@ compute_peak_pairs <- function(snp_peaks,
         # boundary) so shared_reads (intersect(reads_a, reads_b)) is empty —
         # that's the condition that put us in this branch.
         # Find reads from each set that physically reach the opposite zone.
-        chr_rt <- rt_df[as.character(chrom) == chr_name]
-
+        # Reach is a question about coordinates, so it is asked of every
+        # position; only the state calls below are restricted to HET_OK.
         left_crossers <- if (length(reads_a) > 0)
           chr_rt[read_id %in% reads_a,
                  .(reaches_right = any(pos >= zone_r_start)), by = read_id
@@ -2925,11 +2973,16 @@ compute_peak_pairs <- function(snp_peaks,
         span_df <- chr_rt[read_id %in% spanning_ids]
         if (nrow(span_df) > 0) {
           state_list <- span_df[, {
-            sL <- classify_zone_state(pos, IS_REF, zone_l_start, zone_l_end, zone_min_snps)
-            sR <- classify_zone_state(pos, IS_REF, zone_r_start, zone_r_end, zone_min_snps)
+            sL <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
+                                      zone_l_start, zone_l_end, zone_min_snps)
+            sR <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
+                                      zone_r_start, zone_r_end, zone_min_snps)
             .(state_L = sL, state_M = NA_character_, state_R = sR)
           }, by = read_id]
-          n_spanning <- nrow(state_list)
+          # Only reads the classifier can actually use. Counting every read
+          # that merely reached the far zone reported support for a verdict
+          # those reads took no part in.
+          n_spanning <- sum(!is.na(state_list$state_L) & !is.na(state_list$state_R))
           # Use the LOH-aware classifier: a single consistent crossing direction
           # is accepted as crossover evidence when the LOH allele is the
           # complementary observation (classify_edge_type requires both).
@@ -2950,18 +3003,20 @@ compute_peak_pairs <- function(snp_peaks,
         spanning_ids <- shared_reads
 
         if (length(spanning_ids) > 0) {
-          span_df <- rt_df[read_id %in% spanning_ids &
-                             as.character(chrom) == chr_name]
+          span_df <- chr_rt[read_id %in% spanning_ids]
 
           if (nrow(span_df) > 0) {
             state_list <- span_df[, {
-              sL <- classify_zone_state(pos, IS_REF, zone_l_start, zone_l_end, zone_min_snps)
+              sL <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
+                                        zone_l_start, zone_l_end, zone_min_snps)
               sM <- classify_zone_state(pos, IS_REF, zone_m_start, zone_m_end, zone_min_snps)
-              sR <- classify_zone_state(pos, IS_REF, zone_r_start, zone_r_end, zone_min_snps)
+              sR <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
+                                        zone_r_start, zone_r_end, zone_min_snps)
               .(state_L = sL, state_M = sM, state_R = sR)
             }, by = read_id]
 
-            n_spanning <- nrow(state_list)
+            # See the crossover branch: classifiable reads only.
+            n_spanning <- sum(!is.na(state_list$state_L) & !is.na(state_list$state_R))
             edge_type  <- classify_edge_type(as.data.frame(state_list),
                                              homog_frac = homog_frac)
           }
@@ -2969,6 +3024,14 @@ compute_peak_pairs <- function(snp_peaks,
       }
 
       pair_key <- paste0(chr_name, "_", pk_a$peak_id, "_", pk_b$peak_id)
+
+      # How much phase information each outer zone actually held, so a pair
+      # that could not be classified for want of heterozygosity is legible in
+      # the step CSVs rather than just showing up as "unresolvable".
+      zl_het <- length(unique(chr_rt$pos[chr_rt$HET_OK &
+                        chr_rt$pos >= zone_l_start & chr_rt$pos <= zone_l_end]))
+      zr_het <- length(unique(chr_rt$pos[chr_rt$HET_OK &
+                        chr_rt$pos >= zone_r_start & chr_rt$pos <= zone_r_end]))
 
       # Determine fusion_mode for this pair.
       # is_loh_crossover_mode fires when LOH fills the gap AND no read is
@@ -2994,7 +3057,21 @@ compute_peak_pairs <- function(snp_peaks,
                                      win_start_a = pk_a$peak_start, win_end_a = pk_a$peak_end,
                                      win_start_b = pk_b$peak_start, win_end_b = pk_b$peak_end)
 
-      fusion_mode <- if (is_loh_crossover_mode && !independent_tracts_here) {
+      # Case (a) still needs the pair to have actually been classified. The
+      # crossover-mode branch reached "automatic" from the geometry alone --
+      # LOH fills the gap, no read is chimeric at both peaks -- on the tacit
+      # assumption that the reads crossing it produced a verdict. Once the
+      # outer zones are restricted to phase-informative positions they may
+      # produce none at all, and an edge carrying no verdict is not evidence
+      # for a merge. On RAD5_15 S288C_chrI that would have fused the 74,978
+      # and 93,531 peaks -- 18.5 kb apart, zero classifiable reads between
+      # them -- because its only competitor for peak 2 in the DP below had
+      # itself just dropped to zero weight.
+      unfusable_here <- edge_type %in% FUSION_HEURISTICS$unfusable_edge_types
+
+      fusion_mode <- if (is_loh_crossover_mode && unfusable_here) {
+        "none"
+      } else if (is_loh_crossover_mode && !independent_tracts_here) {
         "automatic"
       } else if (is_loh_crossover_mode) {
         "none"
@@ -3025,6 +3102,8 @@ compute_peak_pairs <- function(snp_peaks,
         n_reads_b    = length(reads_b),
         n_shared     = n_shared,
         n_spanning   = n_spanning,
+        zone_l_het_snps = zl_het,
+        zone_r_het_snps = zr_het,
         jaccard      = round(jaccard, 4),
         loh_in_gap   = loh_in_gap,
         bridges_independent_tracts = bridges_independent_tracts,
@@ -3044,6 +3123,7 @@ compute_peak_pairs <- function(snp_peaks,
       gap_bp             = numeric(),   median_read_len_bp = numeric(),
       n_reads_a          = integer(),   n_reads_b    = integer(),
       n_shared           = integer(),   n_spanning   = integer(),
+      zone_l_het_snps    = integer(),   zone_r_het_snps = integer(),
       jaccard            = numeric(),   loh_in_gap   = logical(),
       bridges_independent_tracts = logical(),
       edge_type          = character(), fusion_mode  = character()

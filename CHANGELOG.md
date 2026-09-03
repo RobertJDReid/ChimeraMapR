@@ -64,6 +64,59 @@ read by `app.R` and `chimera_cli.R`.
   "no read crosses both tract junctions" should win over "low coverage" on the
   proxy. The peak-based fallback is unchanged when no counts exist.
 
+### Peak-pair outer zones vote only on heterozygous positions
+
+- This is the root cause the three fixes above worked around. A pair's outer
+  zones are bounded by the *neighbouring peaks* (`zone_l_start` /
+  `zone_r_end`), never by heterozygosity, and nothing checked what they landed
+  on. `classify_zone_state()` answers "which allele does this read carry here",
+  and both `classify_edge_type()` and `classify_loh_crossover_edge()` read that
+  answer as homolog identity — the same thing only where the sample is
+  heterozygous. Inside a fixed tract every molecule carries the tract's allele
+  whichever homolog it came from, so the state is the LOH map echoed back.
+- New `pos_in_fixed_loh()` flags positions inside a `REF_fixed`/`ALT_fixed`
+  segment, and `compute_peak_pairs()` restricts the two OUTER zones to the rest.
+  The MIDDLE zone is deliberately left unmasked: it is the candidate conversion
+  tract, and being fixed is what it is being asked about.
+- `n_spanning` now counts reads the classifier could actually use (both outer
+  states non-NA) rather than every read that reached the far zone. It is read as
+  support by `classify_two_binary_junction()` and R12, and a read that took no
+  part in the verdict is not support for it.
+- New `zone_l_het_snps` / `zone_r_het_snps` columns on `peak_pairs` record how
+  much phase information each outer zone held, so a pair that went
+  `unresolvable` for want of heterozygosity is legible rather than merely blank.
+- The crossover-mode branch reached `fusion_mode = "automatic"` from geometry
+  alone, on the tacit assumption that the reads crossing the gap produced a
+  verdict. They may now produce none, and an edge carrying no verdict is not
+  evidence for a merge, so an `unfusable_edge_types` verdict forces `"none"`.
+  Without this, RAD5_15 `S288C_chrI` fused the 74,978 and 93,531 peaks — 18.5 kb
+  apart, zero classifiable reads between them — because the weighted-interval DP
+  that had previously demoted that edge lost its only competitor when the
+  71,796 ↔ 74,978 pair dropped to zero weight.
+
+### Effect on the 9-sample test set
+
+- No event added and none removed; 26 change class or support, and 28 of the 110
+  peak pairs change verdict.
+- **Every** flipped pair but one had 0 or 1 heterozygous SNP in an outer zone —
+  the chrI defect was present in all nine samples, not a one-off. Twenty-one
+  `gene_conversion` verdicts and three `crossover` verdicts were built entirely
+  on positions the LOH map had already called fixed.
+- The one pair with real heterozygosity on both flanks (RAD5_07 `S288C_chrII`,
+  6 and 523 het SNPs) went `gene_conversion` → `ambiguous` once 18
+  unclassifiable reads stopped voting — a reclassification on the merits, not a
+  masking artifact. It changed no event.
+- Six `NCO_GC_in_terminal` calls become `AMBIGUOUS(binary_single_peak)` and two
+  become `POSSIBLE_GC`. These are conversion patches nested inside a *terminal*
+  LOH tract, where by construction there is no heterology on either side to
+  return to; NCO is not distinguishable from CO there. All three classes are
+  pre-existing fallbacks on the same R06 path, and the intervals are still
+  reported.
+- `n_support` falls on twelve calls (e.g. RAD5_07 `S288C_chrVIII` 96,844–99,830
+  `CO_GC` 42 → 15) — the honest count of reads that were actually classifiable.
+- One improvement in the other direction: RAD5_06 `S288C_chrXIV` 18,418–145,905
+  goes from `AMBIGUOUS(low_coverage)` n=1 to `CO_TERM` n=25 at high confidence.
+
 ### Composite LOH blocks are called as one event (new rule R11d)
 
 - Two fixed tracts butted together, or parted only by a het island too thin for
