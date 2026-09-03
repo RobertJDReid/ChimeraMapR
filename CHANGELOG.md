@@ -64,6 +64,64 @@ read by `app.R` and `chimera_cli.R`.
   "no read crosses both tract junctions" should win over "low coverage" on the
   proxy. The peak-based fallback is unchanged when no counts exist.
 
+### Composite LOH blocks are called as one event (new rule R11d)
+
+- Two fixed tracts butted together, or parted only by a het island too thin for
+  `classify_zone_state()` to call, are not two independently observable events.
+  Nothing inside the run carries phase — within a fixed tract every molecule
+  reads the same allele whichever homolog it came from — so the interior only
+  repeats what the LOH map said. The phase information is at the two ends, in
+  the nearest genuinely heterozygous zones, and a read settles the outcome only
+  by reaching **both** of them. A read that begins inside the run has no
+  left-hand homolog identity to compare, however far right it travels.
+- New `.loh_block()` identifies such a run: a maximal set of F tokens whose only
+  separators are G gaps and H islands below
+  `ZONE_CALL_HEURISTICS$min_evidence_snps`. `count_block_junction_reads()`
+  (`chimera_functions.R`) is the block-level counterpart of
+  `count_tract_junction_reads()`, and `annotate_block_read_support()` attaches
+  `n_block_spanning` / `n_block_return` / `n_block_switch` to every F token of a
+  multi-tract block.
+- The one substantive change from the single-tract logic is the uninformative
+  test. A return there required the read's flanking homolog to differ from the
+  tract's state; here it must differ from **at least one** tract in the run. On
+  an alternating run (HET-ALT-REF-HET) every read differs from something, so
+  both homologs are informative — which is what makes `AABA`/`BABB` (returns)
+  distinguishable from `AABB`/`BABA` (switches). On a run that is all one state
+  it reduces exactly to the old rule, and the unconverted homolog reading
+  straight through still scores as uninformative rather than as a conversion.
+- `rule_composite_loh_block` (R11d) precedes R12/R10/R11/R11b, which cannot see
+  this structure: they classify a tract from junction peaks whose own zones are
+  bounded by the neighbouring peaks rather than by heterozygosity, so on a
+  composite run they read the LOH map back to themselves as if it were phase.
+  R11d claims the whole run and reports one event — `CO_GC` / `NCO_GC` /
+  `AMBIGUOUS(mixed_block_reads)` / `GC_UNRESOLVED` when nothing spans.
+- It claims the run's peaks as well as its tokens (unlike R11c, which leaves a
+  shared junction peak for its neighbour): here every peak in the run describes
+  the one composite event, and leaving them unclaimed lets `reconcile()` promote
+  them into duplicate `*_subres` rows. The claim is bounded **by position**,
+  within `merge_gap_bp` of the block, not by which tokens the block spans — a
+  flank token is a wide HET region and `.attach_peaks()` binds a peak to it on
+  any overlap, so its `peak_over` can be a peak near that token's far end. On
+  RAD5_07 `S288C_chrVIII` the 98,736 peak, 16 kb past the block, is carried by
+  two of its flanks and marks the separate 96,844–99,830 tract; claiming it lost
+  that tract's own `CO_GC`.
+
+### Effect on the 9-sample test set
+
+- 215 → 220 events (156 high / 64 review), no event lost and no new overlapping
+  pair (14 before and after, all the intended "GC nested in a terminal CO").
+- Five new composite calls: RAD5_07 `chrVIII` 78,924–82,405 `CO_GC` (3 tracts,
+  51/51 switching — the known complex-LOH region with two seamless reversal
+  junctions), RAD5_07 `chrII` 89,119–90,453 and `chrXIV` 495,919–497,494,
+  RAD5_09 `chrIX` 122,923–127,249, and RAD5_02 `chrXIII` 632,293–655,347 as
+  `GC_UNRESOLVED` (nothing previously reported there at all).
+- Two footprints corrected rather than added: RAD5_06 `chrXV` 61,916–62,330
+  `NCO_GC` becomes 61,916–66,679 over both its tracts, and RAD5_15 `chrI`
+  becomes the single 64.8 kb `GC_UNRESOLVED` described above.
+- RAD5_07 `chrII` 87,529–87,888 keeps its `NCO_GC` and its 36 supporting reads
+  but now arrives via R11c rather than R10, R11d having claimed the peak R10 was
+  using. Same call, different route.
+
 ### Junction distance is measured from the constituent, not the group mean
 
 - `fused_pos_bp` is the *mean* of a fusion group's members, so for anything but

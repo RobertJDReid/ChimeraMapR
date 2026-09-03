@@ -2247,6 +2247,65 @@ rule_subres_tract <- list(
   if (j <= n && tokens[[j]]$type == "F") j else NULL
 }
 
+# ── Composite LOH blocks ─────────────────────────────────────────────────────
+#
+# A "block" is a maximal run of fixed (F) tokens that no PHASE-CALLABLE
+# heterozygous zone separates: the only things allowed between its members are
+# G gaps and H islands too thin for classify_zone_state() to call.
+#
+# The distinction matters because CO/NCO is a statement about homolog identity,
+# and nothing inside a fixed tract carries any. Two tracts butted together, or
+# parted by a single-SNP het island, are one observable event with one pair of
+# informative ends -- not two events -- and a read has to reach both of those
+# ends to say anything about either. RAD5_15 S288C_chrI is the case in point:
+# REF 28,705-71,796, ALT 72,069-74,758 and REF 75,326-93,531 are separated only
+# by short gaps and one HET SNP at 74,978, and the nearest callable het zones
+# are 12.8 kb and 93.7 kb -- 81 kb apart, which no read spans.
+
+# An H token can serve as a phase flank only when it holds enough SNPs for
+# classify_zone_state() to return a call at all; that function applies both
+# min_snps and ZONE_CALL_HEURISTICS$min_evidence_snps, so use the larger.
+.zone_callable <- function(tok, params) {
+  !is.null(tok) && identical(tok$type, "H") &&
+    !is.null(tok$n_snps) && !is.na(tok$n_snps) &&
+    tok$n_snps >= max(as.integer(params$min_snps_for_peak %||% 2L),
+                      as.integer(ZONE_CALL_HEURISTICS$min_evidence_snps))
+}
+
+# Step one token in `dir` (-1L / +1L) past everything transparent to a block:
+# G gaps and non-callable H islands. Returns the index of the first token that
+# is F, TEL, or a callable H, or NULL at the end of the chain.
+.skip_transparent <- function(tokens, i, dir, params) {
+  j <- i + dir
+  while (j >= 1L && j <= length(tokens)) {
+    tk <- tokens[[j]]
+    if (identical(tk$type, "G")) { j <- j + dir; next }
+    if (identical(tk$type, "H") && !.zone_callable(tk, params)) { j <- j + dir; next }
+    return(j)
+  }
+  NULL
+}
+
+# The block beginning at tokens[[i]], or NULL when tokens[[i]] is not an F or
+# not the FIRST F of its block (so a block is proposed once, at its left edge).
+# Returns f_idx (the block's F token indices) and li/ri, the indices of the
+# tokens bounding it -- callable H, TEL, or NULL off the end of the chain.
+.loh_block <- function(tokens, i, params) {
+  if (is.null(tokens[[i]]) || tokens[[i]]$type != "F") return(NULL)
+  lj <- .skip_transparent(tokens, i, -1L, params)
+  if (!is.null(lj) && tokens[[lj]]$type == "F") return(NULL)   # not the first F
+
+  f_idx <- i
+  j     <- i
+  repeat {
+    nj <- .skip_transparent(tokens, j, 1L, params)
+    if (is.null(nj) || tokens[[nj]]$type != "F") break
+    f_idx <- c(f_idx, nj)
+    j     <- nj
+  }
+  list(f_idx = f_idx, li = lj, ri = .skip_transparent(tokens, j, 1L, params))
+}
+
 # Walk right from tokens[[start_i+1]], skipping G tokens and tiny H tokens
 # (n_snps <= min_snps_for_peak), collecting consecutive same-state F tokens.
 # Returns a list of {tok, idx} pairs ending with the last F of `state` that
@@ -2403,6 +2462,194 @@ annotate_tract_read_support <- function(chain, full_read_loh, params) {
   chain$tokens <- toks
   chain
 }
+
+# =============================================================================
+#  COMPOSITE-BLOCK READ SUPPORT
+#  Attaches the block-level counterpart of the per-tract counts above to every
+#  F token of a multi-tract block (see .loh_block).
+#
+#  The flanking windows are anchored to the FLANK TOKEN's inner edge rather
+#  than to the block's boundary minus tract_flank_bp. annotate_tract_read_support
+#  does the latter, which silently inverts (left_start > left_end -> no counts)
+#  whenever the flank sits further from the tract than the window is wide. For a
+#  single tract that is nearly always the right answer anyway; for a block whose
+#  flanks can legitimately be tens of kb away it would make every block
+#  unmeasurable for the wrong reason. Anchoring to the token keeps the window
+#  local to the junction while letting a distant flank still be read -- and
+#  "no read reaches both flanks" then becomes an honest measurement rather than
+#  an artifact of the window arithmetic.
+# =============================================================================
+
+annotate_block_read_support <- function(chain, full_read_loh, params) {
+  if (is.null(full_read_loh)) return(chain)
+  toks <- chain$tokens
+  if (length(toks) == 0) return(chain)
+
+  flank_bp <- as.integer(params$tract_flank_bp %||% 10000L)
+  min_snps <- as.integer(params$min_snps_for_peak %||% 2L)
+
+  for (i in seq_along(toks)) {
+    blk <- .loh_block(toks, i, params)
+    if (is.null(blk) || length(blk$f_idx) < 2L) next
+    if (is.null(blk$li) || is.null(blk$ri))     next
+
+    L <- toks[[blk$li]]
+    R <- toks[[blk$ri]]
+    if (!.zone_callable(L, params) || !.zone_callable(R, params)) next
+
+    f_toks <- lapply(blk$f_idx, function(k) toks[[k]])
+    tracts <- lapply(f_toks, function(t) list(
+      start = t$start, end = t$end,
+      state = if (is.null(t$state) || is.na(t$state)) NA_character_
+              else sub("_fixed$", "", t$state)))
+    if (any(vapply(tracts, function(t) is.na(t$state), logical(1)))) next
+
+    blk_start <- min(vapply(f_toks, `[[`, numeric(1), "start"))
+    blk_end   <- max(vapply(f_toks, `[[`, numeric(1), "end"))
+
+    cnt <- count_block_junction_reads(
+      full_read_loh, chain$chrom, tracts,
+      left_start  = max(L$start, L$end - flank_bp + 1L),
+      left_end    = L$end,
+      right_start = R$start,
+      right_end   = min(R$end, R$start + flank_bp - 1L),
+      min_snps    = min_snps,
+      match_frac  = as.numeric(params$homog_frac %||% 0.80)
+    )
+
+    for (k in seq_along(blk$f_idx)) {
+      ti <- blk$f_idx[k]
+      toks[[ti]]$block_start      <- as.integer(blk_start)
+      toks[[ti]]$block_end        <- as.integer(blk_end)
+      toks[[ti]]$block_n_tracts   <- length(blk$f_idx)
+      toks[[ti]]$block_first      <- (k == 1L)
+      toks[[ti]]$n_block_spanning <- cnt$n_spanning
+      toks[[ti]]$n_block_return   <- cnt$n_return
+      toks[[ti]]$n_block_switch   <- cnt$n_switch
+    }
+  }
+
+  chain$tokens <- toks
+  chain
+}
+
+# ── Rule R11d: Composite LOH block called from its own flank-to-flank reads ───
+# Fires on a run of two or more fixed tracts that no phase-callable HET zone
+# separates (see .loh_block), bounded by a callable HET zone on each side.
+#
+# Such a run has ONE pair of informative ends, not one per tract: inside a fixed
+# tract every molecule reads the same allele whichever homolog it came from, so
+# a read that starts inside the run carries no left-hand homolog identity to
+# compare and cannot settle any tract's outcome, however far right it reaches.
+# The peak-based interstitial rules (R10/R11/R11b/R12) do not know this -- they
+# classify a tract from junction peaks whose own classification zones are
+# bounded by the neighbouring PEAKS rather than by heterozygosity, so on a
+# composite run they read the LOH map back to themselves as if it were phase.
+# R11d therefore precedes them and claims the whole run, one event for one
+# observable:
+#
+#   switches dominate  → CO_GC          (changed homolog and stayed changed)
+#   returns dominate   → NCO_GC         (left its homolog and came back)
+#   mixed              → AMBIGUOUS(mixed_block_reads)
+#   nothing spans      → GC_UNRESOLVED  (no read reaches both flanks)
+#
+# The run is real either way -- the LOH map resolved every tract in it -- so an
+# unobserved outcome downgrades the call rather than discarding the event.
+#
+# Unlike R11c this claims the block's peaks as well as its tokens. R11c leaves
+# a shared junction peak unclaimed so it can also back the neighbour's call;
+# here there is no neighbour to share with -- every peak inside the run, and the
+# two at its ends, is describing this one composite event, and leaving them
+# unclaimed would let reconcile() promote them into duplicate *_subres rows.
+rule_composite_loh_block <- list(
+  id = "R11d_composite_loh_block",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (is.null(tok) || tok$type != "F") return(NULL)
+    if (!isTRUE(tok$block_first)) return(NULL)
+    n_span <- tok$n_block_spanning %||% NA_integer_
+    if (is.null(n_span) || is.na(n_span)) return(NULL)   # no counts / not a block
+
+    blk <- .loh_block(tokens, i, params)
+    if (is.null(blk) || length(blk$f_idx) < 2L) return(NULL)
+
+    f_toks    <- lapply(blk$f_idx, function(k) tokens[[k]])
+    blk_start <- min(vapply(f_toks, `[[`, numeric(1), "start"))
+    blk_end   <- max(vapply(f_toks, `[[`, numeric(1), "end"))
+
+    # Every peak the run covers, its two end junctions included: the block
+    # consumes them all. Bounded by position, NOT by which tokens the block
+    # spans -- the flank tokens are wide HET regions, and .attach_peaks binds a
+    # peak to a token whenever their spans overlap at all, so a flank's
+    # peak_over can be a peak sitting near that token's FAR end describing a
+    # different junction entirely. On RAD5_07 S288C_chrVIII the left flank
+    # (8,073-78,345) and the 83,071-95,721 flank both carry the 98,736 peak,
+    # 16 kb past the block, which marks the junctions of the separate
+    # 96,844-99,830 tract; claiming it starved that tract's own rule and lost
+    # a real CO_GC. Same merge_gap_bp reasoning as .left_junction_peak().
+    tol  <- params$merge_gap_bp %||% 5000L
+    pks  <- unlist(lapply(seq.int(blk$li, blk$ri), function(k)
+      list(tokens[[k]]$peak_left, tokens[[k]]$peak_over, tokens[[k]]$peak_right)),
+      recursive = FALSE)
+    pks  <- Filter(Negate(is.null), pks)
+    seen <- character(0)
+    pks  <- Filter(function(pk) {
+      pos <- .peak_junction_pos(pk, if (is.null(pk)) NA else
+                                    max(blk_start, min(blk_end, pk$fused_pos_bp %||% pk$snp_pos %||% NA)))
+      if (is.null(pos) || is.na(pos)) return(FALSE)
+      if (pos < blk_start - tol || pos > blk_end + tol) return(FALSE)
+      key <- as.character(pk$fused_pos_bp %||% pk$snp_pos %||% NA)
+      if (key %in% seen) return(FALSE)
+      seen <<- c(seen, key); TRUE
+    }, pks)
+
+    list(span = c(blk$f_idx[1], blk$ri), f_toks = f_toks, peaks = pks,
+         l_tok = tokens[[blk$li]], r_tok = tokens[[blk$ri]])
+  },
+  fire_fn = function(m, chain, params) {
+    tok    <- m$f_toks[[1]]
+    n_ret  <- as.integer(tok$n_block_return   %||% 0L)
+    n_swi  <- as.integer(tok$n_block_switch   %||% 0L)
+    n_span <- as.integer(tok$n_block_spanning %||% 0L)
+    n_inf  <- n_ret + n_swi
+    homog  <- as.numeric(params$homog_frac %||% 0.80)
+
+    tract_desc <- paste(vapply(m$f_toks, function(t)
+      paste0(sub("_fixed$", "", t$state), " ", t$start, "-", t$end),
+      character(1)), collapse = ", ")
+    base_note <- paste0("composite_loh_block; ", length(m$f_toks),
+                        " tracts (", tract_desc, ")")
+
+    if (n_inf == 0L) {
+      call         <- "GC_UNRESOLVED"
+      ns           <- n_span
+      support_kind <- NA_character_
+      note <- paste0(base_note, "; no read reaches both flanking HET zones (",
+                     n_span, " spanning, 0 informative); NCO/CO undetermined")
+    } else if (n_ret / n_inf >= homog) {
+      call <- "NCO_GC"; ns <- n_ret; support_kind <- "tract_reads"
+      note <- paste0(base_note, "; ", n_ret, "/", n_span,
+                     " flank-to-flank reads returned across the block")
+    } else if (n_swi / n_inf >= homog) {
+      call <- "CO_GC";  ns <- n_swi; support_kind <- "tract_reads"
+      note <- paste0(base_note, "; ", n_swi, "/", n_span,
+                     " flank-to-flank reads switched across the block")
+    } else {
+      call <- "AMBIGUOUS(mixed_block_reads)"; ns <- n_inf
+      support_kind <- "tract_reads"
+      note <- paste0(base_note, "; mixed outcome (", n_ret, " returned, ",
+                     n_swi, " switched of ", n_span, " spanning)")
+    }
+
+    ev <- .make_event(call, chain$chrom, m$f_toks,
+                      evidence_peaks = if (length(m$peaks)) m$peaks else NULL,
+                      n_support = ns, notes = note,
+                      support_kind = support_kind)
+    list(event = ev, rewrite = NULL,
+         claims = list(loh = m$f_toks,
+                       peak = if (length(m$peaks)) m$peaks else NULL))
+  }
+)
 
 # ── Rule R10: Direct classification from peak edge type ───────────────────────
 # Fires when an F token has a gene_conversion, crossover, or internal_crossover
@@ -2889,6 +3136,7 @@ MOTIF_RULES <- list(
   # AND no wide proximal gap to explain its absence (R02d handles that case)
   # there is no positive evidence for a crossover mechanism.  Leave unclaimed →
   # UNCATEGORIZED_LOH → no symbol on the overview map.
+  rule_composite_loh_block,      # R11d — run of fixed tracts with no callable HET between them
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking,      # R11 — two binary peaks flanking H-[F]-H
@@ -3068,6 +3316,9 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
                 list(m$pk %||% NULL, m$pk_l %||% NULL, m$pk_r %||% NULL,
                      m$pk1 %||% NULL, m$pk2 %||% NULL,
                      m$peak %||% NULL))
+  # R11d (rule_composite_loh_block) carries every peak its run covers in
+  # m$peaks rather than a fixed left/right pair.
+  if (!is.null(m$peaks)) pks <- c(pks, m$peaks)
   # R06 (rule_opp_sandwich) can carry several fragments' peaks in m$fragments
   # instead of the single pk/pk_l/pk_r fields other rules use.
   if (!is.null(m$fragments)) {
@@ -3415,6 +3666,8 @@ run_chain_analysis <- function(loh_segments,
   # Per-tract read evidence, measured after canonicalise() has settled the
   # token spans the counts refer to.
   chains <- lapply(chains, annotate_tract_read_support,
+                   full_read_loh = full_read_loh, params = params)
+  chains <- lapply(chains, annotate_block_read_support,
                    full_read_loh = full_read_loh, params = params)
 
   message("  [chain] Scanning for motifs ...")

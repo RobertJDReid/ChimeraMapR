@@ -2252,6 +2252,103 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
 }
 
 # ---------------------------------------------------------------------------
+# count_block_junction_reads()
+#   The composite-LOH generalisation of count_tract_junction_reads(): read-level
+#   evidence for the outcome of a RUN of fixed tracts that no callable
+#   heterozygous zone separates.
+#
+#   Two fixed tracts butted together (or parted only by a single-SNP het island
+#   too thin for classify_zone_state() to call) are not two independently
+#   observable events. Nothing inside the run carries phase: within a fixed
+#   tract every molecule reads the same allele whichever homolog it came from,
+#   so the interior says only what the LOH map already said. The only phase
+#   information is at the two ends, in the nearest zones that are genuinely
+#   heterozygous — which means a read settles the outcome only if it reaches
+#   BOTH of them. A read that begins inside the run has no left-hand homolog
+#   identity to compare, however far right it travels.
+#
+#     return  — same haplotype in both flanks: the molecule left its homolog
+#               somewhere in the run and came back (NCO).
+#     switch  — a different haplotype in each flank: it changed homolog and
+#               stayed changed (CO).
+#     uninformative — the flanking homolog matches the run's state throughout,
+#               i.e. the unconverted homolog reading straight past.
+#
+#   `tracts` is a list of list(start, end, state) with state "REF"/"ALT", in
+#   coordinate order — the run's fixed tracts, gaps between them omitted.
+#
+#   The "uninformative" test is where this differs from the single-tract case
+#   beyond bookkeeping. There, a return required the flanking homolog to differ
+#   from the one tract's state. Here it must differ from AT LEAST ONE tract in
+#   the run: on an alternating run (HET-ALT-REF-HET) every read differs from
+#   something, so both homologs are informative, while on a run that is all one
+#   state it reduces exactly to the single-tract rule and the unconverted
+#   homolog still scores as uninformative rather than as a conversion.
+#
+#   The positive in-run match is carried over unchanged and for the same reason
+#   (see count_tract_junction_reads): a read must actually carry the run's
+#   per-tract alleles at match_frac of the in-run SNPs it covers. Without it,
+#   an allele-balance dip the LOH HMM called fixed on thin evidence turns every
+#   opposite-homolog read that merely overlaps the run into a gene conversion.
+#
+#   Returns a list: n_spanning, n_return, n_switch, n_uninformative.
+# ---------------------------------------------------------------------------
+count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
+                                       left_start,  left_end,
+                                       right_start, right_end,
+                                       min_snps = 2L,
+                                       match_frac = 0.80) {
+  empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
+                n_uninformative = 0L)
+  if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
+  if (length(tracts) == 0)                                 return(empty)
+  if (anyNA(c(left_start, left_end, right_start, right_end))) return(empty)
+  if (left_end < left_start || right_end < right_start)    return(empty)
+
+  win <- full_read_loh[as.character(chrom) == chr_name &
+                         pos >= left_start & pos <= right_end]
+  if (nrow(win) == 0) return(empty)
+
+  # Per-position expectation from the LOH map: TRUE where the run is REF-fixed,
+  # FALSE where ALT-fixed, NA outside the tracts (gaps, flanks).
+  blk_ref <- rep(NA, nrow(win))
+  for (tr in tracts) {
+    sel <- win$pos >= tr$start & win$pos <= tr$end
+    blk_ref[sel] <- identical(tr$state, "REF")
+  }
+  data.table::set(win, j = "blk_ref", value = blk_ref)
+
+  st <- win[, .(
+    state_L    = classify_zone_state(pos, IS_REF, left_start,  left_end,  min_snps),
+    state_R    = classify_zone_state(pos, IS_REF, right_start, right_end, min_snps),
+    n_in       = sum(!is.na(blk_ref)),
+    n_in_block = sum(!is.na(blk_ref) & IS_REF == blk_ref, na.rm = TRUE)
+  ), by = read_id]
+
+  span <- st[!is.na(state_L) & !is.na(state_R)]
+  if (nrow(span) == 0) return(empty)
+
+  is_switch <- span$state_L != span$state_R
+
+  # The flanking homolog has to differ from at least one tract in the run;
+  # otherwise the read is the unconverted homolog reading straight through.
+  run_states   <- unique(vapply(tracts, function(tr) as.character(tr$state),
+                                character(1)))
+  flank_differs <- vapply(span$state_L,
+                          function(s) any(run_states != s), logical(1))
+
+  is_return <- !is_switch & flank_differs & span$n_in > 0L &
+               span$n_in_block >= match_frac * span$n_in
+
+  list(
+    n_spanning      = as.integer(nrow(span)),
+    n_return        = as.integer(sum(is_return)),
+    n_switch        = as.integer(sum(is_switch)),
+    n_uninformative = as.integer(sum(!is_switch & !is_return))
+  )
+}
+
+# ---------------------------------------------------------------------------
 # classify_edge_type()
 #   Given the set of spanning reads (reads with data in all three zones),
 #   determine whether the pair represents a gene_conversion, crossover,

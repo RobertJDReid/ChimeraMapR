@@ -583,7 +583,13 @@ if (run_chain) {
                            else NA_integer_,
           n_tract_spanning = tok$n_tract_spanning %||% NA_integer_,
           n_tract_return   = tok$n_tract_return   %||% NA_integer_,
-          n_tract_switch   = tok$n_tract_switch   %||% NA_integer_
+          n_tract_switch   = tok$n_tract_switch   %||% NA_integer_,
+          block_start      = tok$block_start      %||% NA_integer_,
+          block_end        = tok$block_end        %||% NA_integer_,
+          block_n_tracts   = tok$block_n_tracts   %||% NA_integer_,
+          n_block_spanning = tok$n_block_spanning %||% NA_integer_,
+          n_block_return   = tok$n_block_return   %||% NA_integer_,
+          n_block_switch   = tok$n_block_switch   %||% NA_integer_
         )
       }
     }
@@ -717,6 +723,10 @@ if (run_chain) {
   # Per-tract junction-spanning read counts (see annotate_tract_read_support):
   # measured after canonicalise() has settled the spans they refer to.
   canonical_chains <- lapply(canonical_chains, annotate_tract_read_support,
+                             full_read_loh = results$full_read_loh, params = cp)
+  # Block-level counts for runs of fixed tracts with no callable HET zone
+  # between them (see annotate_block_read_support / R11d).
+  canonical_chains <- lapply(canonical_chains, annotate_block_read_support,
                              full_read_loh = results$full_read_loh, params = cp)
 
   if (full_chain) {
