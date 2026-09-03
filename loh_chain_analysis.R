@@ -1313,7 +1313,8 @@ rule_interstitial_deletion <- list(
     if (.has_resolved_switch_peak(tok, params)) return(NULL)
     list(span = i, f_tok = tok, ratio = dr,
          depth_hit = depth_hit, read_hit = read_hit,
-         n_del_snps = n_ds, del_frac_mean = dfm, coherence = coh)
+         n_del_snps = n_ds, del_frac_mean = dfm, coherence = coh,
+         n_del_reads = length(tok$meta$del_read_ids %||% character(0)))
   },
   fire_fn = function(m, chain, params) {
     parts <- character(0)
@@ -1324,7 +1325,32 @@ rule_interstitial_deletion <- list(
       parts <- c(parts, sprintf(paste0("read-level deletion at %d SNPs ",
                                        "(mean del_frac=%.2f, read coherence=%.2f)"),
                                 m$n_del_snps, m$del_frac_mean, m$coherence))
+
+    # n_support counts the reads that ARE the deletion: those registering a
+    # deletion at >= 80% of the tract's over-cutoff positions they cover (see
+    # .tract_deletion_evidence) -- the same quantity every other class reports,
+    # reads that witnessed the event.
+    #
+    # Reported only when the read trigger fired, i.e. when that count rests on
+    # a measurement Rd would itself act on. This is not a technicality: the two
+    # triggers separate by deletion SIZE. A short deletion is spanned by reads,
+    # which align across it and register DEL calls at its SNPs -- RAD5_03
+    # S288C_chrII 428,804-430,361, 1.6 kb, 12 over-cutoff SNPs, 27 such reads.
+    # A long one removes the homolog's reads altogether: they do not align at
+    # all, so depth halves and almost nothing registers as a deletion --
+    # RAD5_04 S288C_chrIII 158,270-174,590, 16.3 kb, just 3 over-cutoff SNPs at
+    # 0.31 coherence, carried entirely by flank_depth_ratio 0.58.
+    #
+    # Those 3 SNPs do yield two deletion-consistent reads, and reporting "2"
+    # beside the 27 above would rank a solid 16 kb deletion below a 1.6 kb one
+    # on what is really misalignment noise at three scattered positions. NA is
+    # the honest answer there: for a deletion that large there is no
+    # deleted-read count to report, and the depth drop is the evidence.
+    ns <- if (isTRUE(m$read_hit) && m$n_del_reads > 0L)
+      as.integer(m$n_del_reads) else NA_integer_
+
     ev <- .make_event("DELETION", chain$chrom, list(m$f_tok),
+                      n_support = ns,
                       notes = paste0("interstitial hemizygous deletion; ",
                                      paste(parts, collapse = "; ")))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))

@@ -65,6 +65,26 @@ read by `app.R` and `chimera_cli.R`.
   satisfied `n_in > 0` and then scored 1/1 against `match_frac`. The tract's
   `n_tract_return` drops 2 → 1.
 
+### DELETION events report their deleted-read count
+
+- `n_support` on a `DELETION` is now the number of reads registering a deletion
+  at >= 80% of the tract's over-cutoff positions they cover — the same quantity
+  every other class reports, reads that witnessed the event. RAD5_03
+  `S288C_chrII` 428,804-430,361 reports 27.
+- It is set only when the read trigger fired, and that is not a technicality:
+  the two triggers separate by deletion **size**. A short deletion is spanned
+  by reads, which align across it and register DEL calls at its SNPs (RAD5_03
+  chrII, 1.6 kb, 12 over-cutoff SNPs, 27 such reads). A long one removes the
+  homolog's reads altogether — they do not align at all — so depth halves and
+  almost nothing registers as a deletion: RAD5_04 `S288C_chrIII`
+  158,270-174,590 is 16.3 kb with just 3 over-cutoff SNPs at 0.31 coherence,
+  carried entirely by `flank_depth_ratio` 0.58.
+- Those 3 SNPs do yield two deletion-consistent reads, and printing "2" beside
+  the 27 above would rank a solid 16 kb deletion below a 1.6 kb one on what is
+  really misalignment noise at three scattered positions. `NA` is the honest
+  answer: for a deletion that large there is no deleted-read count to report.
+- One row changes across the 9-sample set; no event class or confidence moves.
+
 ### R11c requires a minimum informative share
 
 - New `tract_read_min_frac` (0.10). R11c's homogeneity test runs over
