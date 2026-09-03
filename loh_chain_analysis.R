@@ -448,6 +448,14 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     fused_start_bp  = fused_start_bp[1],
     fused_end_bp    = fused_end_bp[1],
     n_sub_peaks     = if ("n_sub_peaks" %in% names(chr_fp)) n_sub_peaks[1] else 1L,
+    # The group's constituent peak positions. fused_pos_bp is their MEAN, which
+    # for a fused pair is a coordinate no peak actually occupies -- on RAD5_15
+    # chrI the 71,796 + 74,978 group anchors at 73,387, in the middle of the
+    # neighbouring ALT tract. Distance tests against a token boundary have to
+    # use the constituent nearest that boundary (see .peak_junction_pos), not
+    # the mean, or a group reads as ~1.6 kb further from the junction it
+    # actually marks than it is.
+    sub_peak_pos    = list(sort(as.numeric(snp_pos))),
     # best_edge_type is "singleton" for un-fused peaks — fall back to
     # haplotype_label which holds the per-read classification (gene_conversion,
     # binary, etc) set during Run Analysis.  haplotype_label is the ground truth
@@ -510,12 +518,19 @@ build_raw_chains <- function(loh_segments, chr_span, params,
           grp_rep$pair_edge_type[ri]   <- best_pair$edge_type
           grp_rep$pair_fusion_mode[ri] <- if ("fusion_mode" %in% names(best_pair))
                                             best_pair$fusion_mode else NA_character_
-          # Only a defined "partner" when pos is literally one of the pair's
-          # two endpoints (the normal case) — leave NA if pos merely falls
-          # inside the pair's span, since there's no single peak to name.
-          grp_rep$pair_partner_pos[ri] <- if (!is.na(best_pair$snp_pos_a) && best_pair$snp_pos_a == pos)
+          # Only a defined "partner" when this peak is literally one of the
+          # pair's two endpoints (the normal case) — leave NA if it merely
+          # falls inside the pair's span, since there's no single peak to name.
+          #
+          # Matched against the group's CONSTITUENT positions, not its anchor:
+          # fused_pos_bp is their mean, which for any fused group equals no
+          # endpoint of any pair, so keying off it left every fused group with
+          # pair_partner_pos = NA and its borrowed verdict unverifiable.
+          ends <- grp_rep$sub_peak_pos[[ri]]
+          if (length(ends) == 0 || all(is.na(ends))) ends <- pos
+          grp_rep$pair_partner_pos[ri] <- if (!is.na(best_pair$snp_pos_a) && best_pair$snp_pos_a %in% ends)
                                              best_pair$snp_pos_b
-                                           else if (!is.na(best_pair$snp_pos_b) && best_pair$snp_pos_b == pos)
+                                           else if (!is.na(best_pair$snp_pos_b) && best_pair$snp_pos_b %in% ends)
                                              best_pair$snp_pos_a
                                            else NA_real_
           if (is.na(grp_rep$best_edge_type[ri]))
@@ -2258,6 +2273,21 @@ rule_subres_tract <- list(
   collected
 }
 
+# The position at which `pk` meets a token boundary: the constituent peak
+# nearest `boundary` for a fused group, else the group anchor. A fused group's
+# fused_pos_bp is the mean of its members, so for anything but a singleton it
+# names a coordinate no peak occupies -- fine as a display anchor, wrong for
+# "how far is this peak from that junction".
+.peak_junction_pos <- function(pk, boundary) {
+  subs <- pk$sub_peak_pos
+  if (is.list(subs)) subs <- subs[[1]]
+  subs <- suppressWarnings(as.numeric(subs))
+  subs <- subs[!is.na(subs)]
+  if (length(subs) > 0 && !is.na(boundary))
+    return(subs[which.min(abs(subs - boundary))])
+  pk$fused_pos_bp %||% pk$snp_pos
+}
+
 # Left junction peak for an F token: the peak that marks the H→F transition.
 # Priority: F$peak_left > left_ctx$peak_right > left_ctx$peak_over (left of F)
 #           > F$peak_over (if its snp_pos is left of F.start)
@@ -2276,14 +2306,14 @@ rule_subres_tract <- list(
   if (!is.null(left_ctx$peak_right)) return(left_ctx$peak_right)
   pk <- left_ctx$peak_over
   if (!is.null(pk)) {
-    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    pos <- .peak_junction_pos(pk, f_tok$start)
     # <=, not <: a junction peak commonly lands exactly at the boundary
     # (that's where the allele switch is), not strictly inside the gap.
     if (!is.na(pos) && pos <= f_tok$start && f_tok$start - pos <= tol) return(pk)
   }
   pk <- f_tok$peak_over
   if (!is.null(pk)) {
-    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    pos <- .peak_junction_pos(pk, f_tok$start)
     if (!is.na(pos) && pos <= f_tok$start && f_tok$start - pos <= tol) return(pk)
   }
   NULL
@@ -2298,14 +2328,14 @@ rule_subres_tract <- list(
   if (!is.null(f_tok$peak_right)) return(f_tok$peak_right)
   pk <- f_tok$peak_over
   if (!is.null(pk)) {
-    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    pos <- .peak_junction_pos(pk, f_tok$end)
     # >=, not >: see .left_junction_peak — boundary-exact peaks are normal.
     if (!is.na(pos) && pos >= f_tok$end && pos - f_tok$end <= tol) return(pk)
   }
   if (!is.null(right_ctx$peak_left)) return(right_ctx$peak_left)
   pk <- right_ctx$peak_over
   if (!is.null(pk)) {
-    pos <- pk$fused_pos_bp %||% pk$snp_pos
+    pos <- .peak_junction_pos(pk, f_tok$end)
     if (!is.na(pos) && pos >= f_tok$end && pos - f_tok$end <= tol) return(pk)
   }
   NULL
@@ -2655,6 +2685,40 @@ rule_tract_read_evidence <- list(
   }
 )
 
+# Of `peaks`, those carrying a pair_edge_type = "crossover" record that
+# genuinely describes `f_tok`'s two junctions.
+#
+# .get_chr_peaks() overlays a pair onto a peak whenever the peak's position
+# falls anywhere within the pair's span (snp_pos_a .. snp_pos_b), so a peak can
+# inherit the verdict of a pair that spans a different tract entirely. A pair
+# describes THIS tract only if its two endpoints straddle it: one at or before
+# the tract's start, the other at or after its end, both within merge_gap_bp of
+# the boundary they mark.
+.crossover_pair_peaks <- function(peaks, f_tok, params) {
+  tol <- params$merge_gap_bp %||% 5000L
+  Filter(function(pk) {
+    if (is.null(pk)) return(FALSE)
+    if (!isTRUE(pk$pair_edge_type == "crossover")) return(FALSE)
+    partner <- pk$pair_partner_pos %||% NA_real_
+    # No named partner: the peak sits INSIDE the pair's span rather than at an
+    # endpoint, so there is no junction to check the verdict against.
+    if (is.null(partner) || is.na(partner)) return(FALSE)
+    # The pair's other endpoint is one of this peak's constituents; a fused
+    # group has more than one, so try each.
+    ends <- pk$sub_peak_pos
+    if (is.list(ends)) ends <- ends[[1]]
+    ends <- suppressWarnings(as.numeric(ends))
+    ends <- ends[!is.na(ends)]
+    if (length(ends) == 0) ends <- .peak_junction_pos(pk, f_tok$start)
+    if (length(ends) == 0 || all(is.na(ends))) return(FALSE)
+    any(vapply(ends, function(own) {
+      lo <- min(own, partner); hi <- max(own, partner)
+      lo <= f_tok$start && (f_tok$start - lo) <= tol &&
+        hi >= f_tok$end && (hi - f_tok$end) <= tol
+    }, logical(1)))
+  }, peaks)
+}
+
 # ── Rule R12: LOH-crossover (large interstitial LOH flanked by chimeric peaks) ─
 # Fires when an F token with a large LOH is flanked by two junction peaks that
 # share a pair record with edge_type = "crossover" from the LOH-crossover probing
@@ -2697,11 +2761,14 @@ rule_loh_crossover <- list(
     pk_r <- .right_junction_peak(tok, right_ctx, params)
     if (is.null(pk_l) || is.null(pk_r)) return(NULL)
 
-    # Both junction peaks must share a pair_edge_type = "crossover" record.
-    pair_et_l <- pk_l$pair_edge_type
-    pair_et_r <- pk_r$pair_edge_type
-    if (!isTRUE(pair_et_l == "crossover") && !isTRUE(pair_et_r == "crossover"))
-      return(NULL)
+    # At least one junction peak must carry a pair_edge_type = "crossover"
+    # record, AND that record must describe THIS tract. .get_chr_peaks()
+    # associates a peak with any pair whose span merely CONTAINS the peak's
+    # position, so a crossover pair belonging to a neighbouring tract can be
+    # overlaid onto a peak here; .crossover_pair_peaks() keeps only the peaks
+    # whose pair straddles this tract's two junctions.
+    xo <- .crossover_pair_peaks(list(pk_l, pk_r), tok, params)
+    if (length(xo) == 0) return(NULL)
 
     # Guard: don't match the same peak on both sides.
     pos_l <- pk_l$fused_pos_bp %||% pk_l$snp_pos
@@ -2709,32 +2776,42 @@ rule_loh_crossover <- list(
     if (!is.na(pos_l) && !is.na(pos_r) && pos_l == pos_r) return(NULL)
 
     list(span = c(i, ri), f_tok = tok, l_tok = left_ctx, r_tok = right_ctx,
-         pk_l = pk_l, pk_r = pk_r)
+         pk_l = pk_l, pk_r = pk_r, xo = xo)
   },
   fire_fn = function(m, chain, params) {
-    # n_spanning: both peaks share the same pair record, so avoid double-counting.
-    ns_raw <- m$pk_l$n_spanning %||% m$pk_r$n_spanning %||% NA_integer_
-    ns     <- if (is.null(ns_raw) || is.na(ns_raw)) NA_integer_ else as.integer(ns_raw)
-
-    # Spanning a large LOH requires exceptional read length; accept n >= 2
-    # (half of the default min_span floor of 3) because the fixed LOH allele
-    # on the far side supplies the complementary haplotype evidence.
-    loh_min_span <- max(2L, params$min_span - 1L)
-    has_count <- !is.na(ns) && ns > 0L
-    call <- if (has_count && ns < loh_min_span)
-      paste0("AMBIGUOUS(low_coverage)")
-    else
-      "CO_GC"
+    # Support comes from the pair that actually carries the crossover verdict,
+    # never from whichever peak happens to sit on the left. On RAD5_15 chrI
+    # pk_l was the 71,796 + 74,978 fusion group, whose n_spanning = 23 belongs
+    # to its own gene_conversion pair across the 2.7 kb ALT tract, while the
+    # crossover pair backing the call spans one read. Taking pk_l's count first
+    # reported 23 reads of support for a claim one read was making.
+    #
+    # When both junction peaks carry the verdict they normally share the one
+    # pair record; take the minimum anyway, on the same reasoning reconcile()
+    # uses for fused pairs -- a crossing is witnessed only by a read that
+    # cleared both junctions, so the thinner junction bounds the support.
+    ns_cands <- vapply(m$xo, function(pk) {
+      v <- pk$n_spanning %||% NA_integer_
+      if (is.null(v)) NA_real_ else as.numeric(v)
+    }, numeric(1))
+    ns_cands <- ns_cands[!is.na(ns_cands)]
+    ns <- if (length(ns_cands)) as.integer(min(ns_cands)) else NA_integer_
 
     notes        <- paste0("loh_crossover; state=", m$f_tok$state)
     support_kind <- NA_character_
 
-    # Corroborate the crossover claim at the tract itself (see rule header).
     n_ret  <- m$f_tok$n_tract_return   %||% NA_integer_
     n_swi  <- m$f_tok$n_tract_switch   %||% NA_integer_
     n_span <- m$f_tok$n_tract_spanning %||% NA_integer_
-    if (identical(call, "CO_GC") && !is.na(n_ret) && !is.na(n_swi)) {
+
+    if (!is.na(n_ret) && !is.na(n_swi)) {
+      # The tract's own junction-spanning reads decide the outcome (see rule
+      # header). This runs BEFORE the pair's coverage gate below: the counts
+      # are the direct measurement of what the pair verdict only proxies, so
+      # "no read crossed both junctions" is a better account of a thinly
+      # supported call than "low coverage" on the proxy.
       if (n_swi > 0L) {
+        call         <- "CO_GC"
         ns           <- n_swi
         support_kind <- "tract_reads"
         notes        <- paste0(notes, "; ", n_swi, "/", n_span,
@@ -2751,6 +2828,17 @@ rule_loh_crossover <- list(
                         n_span, " spanning, 0 informative)",
                         "; NCO/CO undetermined")
       }
+    } else {
+      # No counts (no full_read_loh supplied): fall back to the pair verdict.
+      # Spanning a large LOH requires exceptional read length; accept n >= 2
+      # (half of the default min_span floor of 3) because the fixed LOH allele
+      # on the far side supplies the complementary haplotype evidence.
+      loh_min_span <- max(2L, params$min_span - 1L)
+      has_count <- !is.na(ns) && ns > 0L
+      call <- if (has_count && ns < loh_min_span)
+        paste0("AMBIGUOUS(low_coverage)")
+      else
+        "CO_GC"
     }
 
     ev <- .make_event(call, chain$chrom,

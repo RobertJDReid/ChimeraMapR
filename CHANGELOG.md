@@ -37,6 +37,51 @@ read by `app.R` and `chimera_cli.R`.
   tract has 0 junction-spanning reads and no CO/NCO outcome is observable. No
   other RAD5_15 event changed (17 events, 14 high / 3 review).
 
+### R12's support comes from the pair that carries the verdict
+
+- `ns_raw <- m$pk_l$n_spanning %||% m$pk_r$n_spanning` took whichever junction
+  peak sat on the left, regardless of which one carried the `crossover` record.
+  On RAD5_15 `S288C_chrI` `pk_l` was the 71,796 + 74,978 fusion group, whose
+  `n_spanning = 23` belongs to its *own* `gene_conversion` pair across the
+  2.7 kb ALT tract; the crossover pair backing the call spans one read. The
+  event reported 23 reads of support for a claim one read was making — and 23
+  cleared `loh_min_span`, so it never reached the low-coverage branch either.
+- Support is now taken only from peaks whose `pair_edge_type` is `crossover`,
+  as the minimum across them when both carry it (a crossing is witnessed only
+  by a read that cleared both junctions, so the thinner junction bounds the
+  support — the same reasoning `reconcile()` uses for fused pairs). chrI's
+  `n_support` goes 23 → 1.
+- New `.crossover_pair_peaks()` also checks the borrowed verdict is about
+  *this* tract. `.get_chr_peaks()` overlays a pair onto a peak whenever the
+  peak's position falls anywhere within the pair's span, so a crossover pair
+  belonging to a neighbouring tract can be inherited; the pair's two endpoints
+  must now straddle the tract, each within `merge_gap_bp` of the boundary it
+  marks.
+- The tract corroboration added above now runs *ahead* of the pair's
+  `loh_min_span` gate. With the correct count the chrI call fell through to
+  `AMBIGUOUS(low_coverage)`, which is a worse account of the same fact: the
+  counts are the direct measurement of what the pair verdict only proxies, so
+  "no read crosses both tract junctions" should win over "low coverage" on the
+  proxy. The peak-based fallback is unchanged when no counts exist.
+
+### Junction distance is measured from the constituent, not the group mean
+
+- `fused_pos_bp` is the *mean* of a fusion group's members, so for anything but
+  a singleton it names a coordinate no peak occupies. `.left_junction_peak()` /
+  `.right_junction_peak()` measured their `merge_gap_bp` distance test against
+  it: chrI's 71,796 + 74,978 group anchors at 73,387, in the middle of the
+  neighbouring ALT tract, ~1.6 kb further from the junction it actually marks
+  than it is. `.get_chr_peaks()` now carries the constituent positions as
+  `sub_peak_pos`, and new `.peak_junction_pos()` picks the one nearest the
+  boundary being tested.
+- `pair_partner_pos` was keyed off `fused_pos_bp` too, and a group mean equals
+  no pair endpoint by construction — so every fused group carried
+  `pair_partner_pos = NA` and an unverifiable borrowed verdict. It now matches
+  against the constituents. This can make `classify_two_binary_junction()`
+  (R11) trust a fused group's `pair_edge_type` where it previously fell through
+  to `binary_no_pair`; no RAD5_15 event changed, but it widens R11's reach and
+  is worth watching in the full-set re-run.
+
 ## [0.8.14] - 2026-09-02
 
 ### Gene-conversion outcomes are decided by reads crossing the tract
