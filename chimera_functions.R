@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.15"
+APP_VERSION <- "0.8.16"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -316,6 +316,36 @@ run_chimera_analysis <- function(
       ))
     }
   }
+
+  # ── Deletion evidence for the chain caller ────────────────────────────────
+  # The block detector above decides only whether to KEEP these SNPs; its
+  # verdict never reached the event caller, which re-derived deletion status
+  # from coverage alone. That proxy is a knife edge -- on RAD5_03
+  # S288C_chrII:428,804-430,361 it reads 0.601 against a 0.60 threshold, while
+  # the reads say 30% deletion at every one of the tract's 12 SNPs with 0.94
+  # coherence -- so carry the read-level evidence forward and let
+  # rule_interstitial_deletion use it directly (.tract_deletion_evidence).
+  #
+  # Block BOUNDS are deliberately not carried: "contiguous" there means
+  # consecutive in the informative-SNP ordering, so two over-cutoff positions
+  # hundreds of kb apart are adjacent and a block can span most of a
+  # chromosome (RAD5_03 chrII: 16,711-797,337). The per-position statistics
+  # are sound; the extents are not, so the chain caller recomputes coherence
+  # over each tract's own span.
+  #
+  # Restricted to over-cutoff positions, which is all any consumer asks about
+  # and keeps this small -- 268 positions and ~27k pileup rows on RAD5_03.
+  del_snp_stats <- del_stats[del_frac > del_rate_cutoff]
+  del_evidence  <- list(
+    stats  = del_snp_stats,
+    pileup = if (nrow(del_snp_stats) > 0L)
+      read_data[mapq >= mapq_cutoff][del_snp_stats[, .(chrom, pos)],
+                                     on = .(chrom, pos), nomatch = 0L][
+        , .(chrom, pos, read_id, is_del)]
+    else
+      data.table(chrom = character(), pos = integer(),
+                 read_id = character(), is_del = integer())
+  )
 
   n_high_del <- sum(allele_data_used$high_del & !allele_data_used$in_del_block)
   if (n_high_del > 0L) {
@@ -650,6 +680,9 @@ run_chimera_analysis <- function(
     chr_span          = chr_span,
     del_blocks        = del_blocks,     # hemizygous-deletion blocks exempted
                                         # from the del_rate_cutoff QC filter
+    del_evidence      = del_evidence,   # per-SNP deletion stats + pileup at
+                                        # over-cutoff positions, for the chain
+                                        # caller's own per-tract assessment
     params = list(
       sample_name     = sample_name,
       mapq_cutoff     = mapq_cutoff,
@@ -2177,6 +2210,10 @@ classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_s
 #   than unanimity because a single miscalled base over a multi-kb tract is
 #   expected and should not discard the read.
 #
+#   `del_reads` names reads that are deletion-consistent across the tract (see
+#   .tract_deletion_evidence). They are never returns: an absent homolog has
+#   converted nothing.
+#
 #   Returns a list: n_spanning, n_return, n_switch, n_uninformative.
 # ---------------------------------------------------------------------------
 count_tract_junction_reads <- function(full_read_loh, chr_name,
@@ -2185,7 +2222,8 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
                                        right_start, right_end,
                                        tract_state = NA_character_,
                                        min_snps = 2L,
-                                       match_frac = 0.80) {
+                                       match_frac = 0.80,
+                                       del_reads = character(0)) {
   empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
                 n_uninformative = 0L)
   if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
@@ -2238,10 +2276,20 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
   # a multi-kb tract a single miscalled base is expected, and demanding a
   # perfect run discards real conversions (RAD5_09 chrII 91,510-98,709 is
   # carried by one read that is ALT at 35 of 36 in-tract SNPs).
+  #
+  # A read that is DELETED across the tract is excluded outright (`del_reads`,
+  # from .tract_deletion_evidence). It is the absent homolog, not a conversion,
+  # and it can still slip through everything above: on RAD5_03 S288C_chrII
+  # 428,804-430,361 read b24a404c registers a deletion at 11 of the tract's 12
+  # positions, and its one surviving base call -- a base_qual 10 call at
+  # 428,804, the breakpoint itself -- cleared `n_in > 0` and scored 1/1 against
+  # match_frac. Two such reads out of seventy carried an NCO_GC call over a
+  # hemizygous deletion.
   is_return <- !is_switch & span$n_in > 0L &
                !is.na(tract_state) & span$state_L != tract_state &
                !is.na(span$n_in_tract) &
-               span$n_in_tract >= match_frac * span$n_in
+               span$n_in_tract >= match_frac * span$n_in &
+               !(span$read_id %in% del_reads)
 
   list(
     n_spanning      = as.integer(nrow(span)),
@@ -2327,7 +2375,8 @@ count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
                                        left_start,  left_end,
                                        right_start, right_end,
                                        min_snps = 2L,
-                                       match_frac = 0.80) {
+                                       match_frac = 0.80,
+                                       del_reads = character(0)) {
   empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
                 n_uninformative = 0L)
   if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
@@ -2368,7 +2417,8 @@ count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
                           function(s) any(run_states != s), logical(1))
 
   is_return <- !is_switch & flank_differs & span$n_in > 0L &
-               span$n_in_block >= match_frac * span$n_in
+               span$n_in_block >= match_frac * span$n_in &
+               !(span$read_id %in% del_reads)
 
   list(
     n_spanning      = as.integer(nrow(span)),

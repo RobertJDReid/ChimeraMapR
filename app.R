@@ -742,6 +742,7 @@ server <- function(input, output, session) {
     coverage_segments       = NULL,   # coverage_segments from compute_coverage_map(); chromosome-wide depth_ratio
     coverage_table          = NULL,   # coverage_table from compute_coverage_map(); per-position depth for terminal-event rules
     full_read_loh           = NULL,   # MAPQ-only filtered reads from run_chimera_analysis(); used by get_chromosome_ploidy()
+    del_evidence            = NULL,   # per-SNP deletion stats + pileup at over-cutoff positions; rule Rd's read-level trigger
     ploidy_map              = NULL,   # data.table from get_chromosome_ploidy(); per-chromosome estimated_ploidy
     strain_ref              = "",     # display name for REF haplotype (from UI input)
     strain_alt              = "",      # display name for ALT haplotype (from UI input)
@@ -820,6 +821,7 @@ server <- function(input, output, session) {
     results$loh_map                <- NULL
     results$loh_segments           <- NULL
     results$full_read_loh          <- NULL
+    results$del_evidence           <- NULL
     results$ploidy_map             <- NULL
     results$chain_result           <- NULL
     results$event_table            <- NULL
@@ -875,6 +877,7 @@ server <- function(input, output, session) {
       results$strain_ref        <- trimws(input$strain_ref)
       results$strain_alt        <- trimws(input$strain_alt)
       results$full_read_loh     <- res$full_read_loh
+      results$del_evidence      <- res$del_evidence
 
       # Build LOH map using the beta-binomial EM + Viterbi HMM from chimera_functions.R.
       # full_read_loh applies only MAPQ + is_del filters (no base-quality filter)
@@ -1201,6 +1204,7 @@ server <- function(input, output, session) {
         snp_peaks         = results$snp_peaks,     # fallback when fused_peaks is NULL
         rt_df             = results$rt_df,
         full_read_loh     = results$full_read_loh,
+        del_evidence      = results$del_evidence,
         chr_span          = results$chr_span,
         coverage_segments = results$coverage_segments,
         coverage_table    = results$coverage_table,

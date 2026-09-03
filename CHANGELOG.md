@@ -4,6 +4,94 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.16] - 2026-09-03
+
+### A hemizygous deletion was being called a gene conversion
+
+- RAD5_03 `S288C_chrII` 428,804-430,361 reported `NCO_GC` on **2 of 70**
+  junction-spanning reads. The tract is a hemizygous deletion: 29-35% of
+  MAPQ-passing reads register a deletion at every one of its twelve SNPs
+  (flanks: 1.4% and 6.7%), 26 reads are deleted at every position they cover
+  against 82 at none, and read coherence is 0.98.
+- No peak is involved. The only peak in the window sits at 428,687 with height
+  **1.66**, far below `min_peak_height` (10), so it carries `snp_pos = NA` and
+  never reaches `compute_peak_pairs()`. The call came from R11c
+  (`rule_tract_read_evidence`), which by design needs no peak at all.
+- `rule_interstitial_deletion` (Rd) missed it by 0.001: `flank_depth_ratio`
+  = 0.601 against `depth_drop` = 0.60. The ratio is taken against the *lower*
+  of the two flanks — deliberately, so an inflated flank cannot manufacture a
+  deletion — and here that is the right flank at 104.3; against the left it is
+  0.573. The measurement is not wrong, it is just a proxy sitting on a knife
+  edge, and it was the only thing standing between a deletion and a
+  recombination call.
+
+### The pipeline already had the evidence and was discarding it
+
+- `find_hemizygous_del_blocks()` (0.8.12) measures exactly the right thing, but
+  its verdict was used only to decide whether to KEEP the SNPs; the event
+  caller never saw it and re-derived deletion status from depth.
+- `run_chimera_analysis()` now returns `del_evidence`: per-SNP `del_frac`
+  statistics plus the MAPQ-passing pileup, restricted to over-cutoff positions
+  (268 positions and ~27k rows on RAD5_03). It is threaded through
+  `chimera_cli.R` and `app.R` into `run_chain_analysis()`.
+- Block *bounds* are deliberately not carried. "Contiguous" in that function
+  means consecutive in the informative-SNP ordering, so two over-cutoff
+  positions hundreds of kb apart are adjacent and the RAD5_03 chrII block spans
+  16,711-797,337 — useless as an extent. New `.tract_deletion_evidence()`
+  recomputes the same statistics over each tract's own span, with the identical
+  coherence definition, and `annotate_tract_deletion_evidence()` attaches them
+  to every F token.
+
+### Rd gains a read-level trigger
+
+- Either signal now fires it: the existing depth ratio, or `del_snp_min` (5)
+  over-cutoff SNPs inside the tract with `del_frac_min` (0.20) mean deletion
+  fraction and `del_coherence_min` (0.50) read coherence. The
+  `.has_resolved_switch_peak()` veto still applies to both — a resolved
+  haplotype switch proves two homologs are present.
+- Reads outrank depth here, and the note says which trigger fired. Depth is
+  what a deletion does to the pileup in aggregate; a deletion call at a SNP is
+  the individual molecule saying the base is not there.
+
+### Deleted reads can no longer be gene-conversion support
+
+- `count_tract_junction_reads()` and `count_block_junction_reads()` take
+  `del_reads` and exclude them from the return count. An absent homolog has
+  converted nothing.
+- This matters because such a read can clear every other guard. Of the two
+  reads carrying the RAD5_03 call, `b24a404c` registers a deletion at **11 of
+  the tract's 12 positions**; its one surviving base call is a `base_qual` 10
+  call at 428,804 — the breakpoint itself, and exactly at `baseq_cutoff` — which
+  satisfied `n_in > 0` and then scored 1/1 against `match_frac`. The tract's
+  `n_tract_return` drops 2 → 1.
+
+### R11c requires a minimum informative share
+
+- New `tract_read_min_frac` (0.10). R11c's homogeneity test runs over
+  *informative* reads only — correctly, since an uninformative read is
+  genuinely uninformative and cannot vote — but with no floor, two returns and
+  no switches read as unanimous however many reads crossed the tract and said
+  nothing. RAD5_03 was 2 informative of 70 spanning: 2.9%, reported as 100%
+  agreement.
+- A share rather than an absolute count, because the absolute count is
+  legitimately tiny on a wide tract: RAD5_09 `S288C_chrII` 91,510-98,709 is one
+  returning read of five spanning and is real (0.8.14). Across the 9-sample set
+  the six genuine R11c calls sit at 17-65% informative; RAD5_03 is the only one
+  below 10%.
+
+### Effect on the 9-sample test set
+
+- 220 events before and after; **exactly one changes**: RAD5_03 `S288C_chrII`
+  428,804-430,361 `NCO_GC` (n=2, review) → `DELETION` (review), noting
+  "read-level deletion at 12 SNPs (mean del_frac=0.31, read coherence=0.98)".
+- Each mechanism was verified in isolation. With `del_evidence` withheld and
+  `tract_read_min_frac = 0` the run reproduces the 0.8.15 output exactly, so the
+  new plumbing is inert on its own. With the floor alone it removes that one
+  call and touches nothing else, confirming it separates the artifact from the
+  six genuine R11c calls.
+- Four diagnostic columns added to the chain token CSVs: `n_del_snps`,
+  `del_frac_mean`, `del_read_coherence`, `flank_depth_ratio`.
+
 ## [0.8.15] - 2026-09-03
 
 ### R12 corroborates its crossover claim at the tract

@@ -104,7 +104,27 @@ default_chain_params <- function() {
     # as POSSIBLE_GC rather than UNCATEGORIZED_LOH.
     # Should be set to the same value as the Minimum Run Length parameter
     # used during chimeric-read detection (default 2).
-    min_snps_for_peak = 2L
+    min_snps_for_peak = 2L,
+
+    # Read-level deletion gates for rule_interstitial_deletion's second
+    # trigger (see .tract_deletion_evidence). Mirrors the SNP-filter gates in
+    # find_hemizygous_del_blocks -- same evidence, measured over the tract's
+    # own span rather than over that function's SNP-ordering "blocks", whose
+    # extents can span most of a chromosome.
+    del_snp_min       = 5L,     # over-cutoff SNPs inside the tract
+    del_frac_min      = 0.20,   # mean deletion fraction across them
+    del_coherence_min = 0.50,   # share of deletion calls from deleted reads
+
+    # Minimum share of a tract's junction-spanning reads that must be
+    # informative before rule_tract_read_evidence (R11c) will call it. Its
+    # homogeneity test runs over informative reads ONLY, so two returns and no
+    # switches read as unanimous however many reads crossed and said nothing.
+    # A share, not an absolute floor: the absolute count is legitimately tiny
+    # on a wide tract (RAD5_09 chrII 91,510-98,709 is one returning read of
+    # five spanning, and real), whereas 2 informative of 70 spanning on
+    # RAD5_03 chrII 428,804-430,361 is a hemizygous deletion leaking two
+    # artifacts. Across the 9-sample set the genuine calls sit at 17-65%.
+    tract_read_min_frac = 0.10
   )
 }
 
@@ -1264,19 +1284,49 @@ rule_interstitial_deletion <- list(
     # fixed tract is a terminal deletion (R01), handled above — not here.
     if (is.null(.nearest_nonfixed_left(tokens, i)) ||
         is.null(.nearest_nonfixed_right(tokens, i))) return(NULL)
+    # Trigger 1 (depth): the tract sits below depth_drop against its lower
+    # flank. Trigger 2 (reads): the tract's own SNPs carry the deletion
+    # signature directly -- see .tract_deletion_evidence. Either suffices.
+    #
+    # The depth ratio alone is a proxy, and a brittle one. RAD5_03
+    # S288C_chrII 428,804-430,361 measures 0.601 against the 0.60 threshold
+    # (0.573 against its LEFT flank; min() picks the right one) and so fell
+    # through to be called NCO_GC by R11c, on two reads, over a deletion whose
+    # read-level signature is unambiguous. Reads outrank depth here: depth is
+    # what a deletion does to the pileup in aggregate, whereas a deletion call
+    # at a SNP is the individual molecule saying the base is not there.
     dr <- tok$meta$flank_depth_ratio
-    if (is.null(dr) || is.na(dr) || dr >= params$depth_drop) return(NULL)
+    depth_hit <- !is.null(dr) && !is.na(dr) && dr < params$depth_drop
+
+    n_ds  <- tok$meta$n_del_snps         %||% 0L
+    dfm   <- tok$meta$del_frac_mean      %||% NA_real_
+    coh   <- tok$meta$del_read_coherence %||% NA_real_
+    read_hit <- !is.na(dfm) && !is.na(coh) &&
+      n_ds >= as.integer(params$del_snp_min      %||% 5L)   &&
+      dfm  >= as.numeric(params$del_frac_min     %||% 0.20) &&
+      coh  >= as.numeric(params$del_coherence_min %||% 0.50)
+
+    if (!depth_hit && !read_hit) return(NULL)
     # A robust haplotype-switch peak on this tract is positive recombination
     # evidence — a deletion has no second homolog to switch to. Defer to the
     # recombination rules instead of over-calling a deletion.
     if (.has_resolved_switch_peak(tok, params)) return(NULL)
-    list(span = i, f_tok = tok, ratio = dr)
+    list(span = i, f_tok = tok, ratio = dr,
+         depth_hit = depth_hit, read_hit = read_hit,
+         n_del_snps = n_ds, del_frac_mean = dfm, coherence = coh)
   },
   fire_fn = function(m, chain, params) {
+    parts <- character(0)
+    if (m$depth_hit)
+      parts <- c(parts, sprintf("flank_depth_ratio=%.2f < %.2f (SNP-site depth)",
+                                m$ratio, params$depth_drop))
+    if (m$read_hit)
+      parts <- c(parts, sprintf(paste0("read-level deletion at %d SNPs ",
+                                       "(mean del_frac=%.2f, read coherence=%.2f)"),
+                                m$n_del_snps, m$del_frac_mean, m$coherence))
     ev <- .make_event("DELETION", chain$chrom, list(m$f_tok),
-                      notes = sprintf(paste0("interstitial hemizygous deletion; ",
-                                             "flank_depth_ratio=%.2f < %.2f (SNP-site depth)"),
-                                      m$ratio, params$depth_drop))
+                      notes = paste0("interstitial hemizygous deletion; ",
+                                     paste(parts, collapse = "; ")))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
   }
 )
@@ -2451,7 +2501,8 @@ annotate_tract_read_support <- function(chain, full_read_loh, params) {
       tract_state = if (is.null(tok$state) || is.na(tok$state)) NA_character_
                     else sub("_fixed$", "", tok$state),
       min_snps    = min_snps,
-      match_frac  = as.numeric(params$homog_frac %||% 0.80)
+      match_frac  = as.numeric(params$homog_frac %||% 0.80),
+      del_reads   = tok$meta$del_read_ids %||% character(0)
     )
 
     toks[[i]]$n_tract_spanning <- cnt$n_spanning
@@ -2514,7 +2565,11 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
       right_start = R$start,
       right_end   = min(R$end, R$start + flank_bp - 1L),
       min_snps    = min_snps,
-      match_frac  = as.numeric(params$homog_frac %||% 0.80)
+      match_frac  = as.numeric(params$homog_frac %||% 0.80),
+      # Any tract in the run being a deletion disqualifies that read: it is
+      # the absent homolog, not a molecule that converted across the block.
+      del_reads   = unique(unlist(lapply(f_toks, function(t)
+                            t$meta$del_read_ids %||% character(0))))
     )
 
     for (k in seq_along(blk$f_idx)) {
@@ -2650,6 +2705,82 @@ rule_composite_loh_block <- list(
                        peak = if (length(m$peaks)) m$peaks else NULL))
   }
 )
+
+# =============================================================================
+#  PER-TRACT DELETION EVIDENCE
+#
+#  A hemizygous deletion and a copy-neutral LOH tract look identical to the LOH
+#  map: one homolog's calls, all the way across. What separates them is that the
+#  deletion's reads say so -- at every SNP the absent homolog registers a
+#  deletion rather than a base -- and run_chimera_analysis has already measured
+#  exactly that (find_hemizygous_del_blocks, to decide whether to keep the
+#  SNPs). Until now the event caller never saw it and re-derived deletion status
+#  from a depth ratio, which is a proxy and a knife-edge one: RAD5_03
+#  S288C_chrII 428,804-430,361 measures 0.601 against a 0.60 threshold and was
+#  called NCO_GC, while its reads show 29-35% deletion at all twelve of its SNPs
+#  (flanks: 1.4% and 6.7%) with 26 reads deleted at every position they cover
+#  and 0.94 coherence.
+#
+#  The statistics are recomputed over the TRACT's own span rather than reusing
+#  the block extents, which are unreliable: "contiguous" in that function means
+#  consecutive in the informative-SNP ordering, so the RAD5_03 chrII block runs
+#  16,711-797,337. The coherence definition is otherwise identical.
+# =============================================================================
+
+.tract_deletion_evidence <- function(del_evidence, chr_name, start, end, params) {
+  empty <- list(n_del_snps = 0L, del_frac_mean = NA_real_,
+                coherence = NA_real_, del_read_ids = character(0))
+  if (is.null(del_evidence)) return(empty)
+  st <- del_evidence$stats
+  if (is.null(st) || nrow(st) == 0L || is.na(start) || is.na(end)) return(empty)
+
+  s <- st[as.character(chrom) == chr_name & pos >= start & pos <= end]
+  if (nrow(s) == 0L) return(empty)
+
+  pu <- del_evidence$pileup
+  if (is.null(pu) || nrow(pu) == 0L)
+    return(list(n_del_snps = nrow(s), del_frac_mean = mean(s$del_frac),
+                coherence = NA_real_, del_read_ids = character(0)))
+
+  rows <- pu[as.character(chrom) == chr_name & pos >= start & pos <= end]
+  if (nrow(rows) == 0L)
+    return(list(n_del_snps = nrow(s), del_frac_mean = mean(s$del_frac),
+                coherence = NA_real_, del_read_ids = character(0)))
+
+  # Per read: of the tract's over-cutoff positions it covers, what share are
+  # deletions? The absent homolog answers ~1.0; a read caught by a local
+  # misalignment answers ~1/n.
+  per_read <- rows[, .(n_cov = .N, n_del = sum(is_del == 1L)), by = read_id]
+  per_read[, consistent := n_cov >= 2L & (n_del / n_cov) >= 0.80]
+
+  del_rows  <- per_read[n_del > 0L]
+  coherence <- if (nrow(del_rows) == 0L) NA_real_
+               else sum(del_rows$n_del[del_rows$consistent]) / sum(del_rows$n_del)
+
+  list(n_del_snps    = nrow(s),
+       del_frac_mean = mean(s$del_frac),
+       coherence     = coherence,
+       del_read_ids  = per_read[consistent == TRUE, read_id])
+}
+
+# Attaches the above to every F token. Must run BEFORE the read-support
+# annotators, which exclude a tract's deleted reads from its return counts.
+annotate_tract_deletion_evidence <- function(chain, del_evidence, params) {
+  if (is.null(del_evidence)) return(chain)
+  toks <- chain$tokens
+  for (i in seq_along(toks)) {
+    tok <- toks[[i]]
+    if (tok$type != "F") next
+    ev <- .tract_deletion_evidence(del_evidence, chain$chrom,
+                                   tok$start, tok$end, params)
+    toks[[i]]$meta$n_del_snps         <- ev$n_del_snps
+    toks[[i]]$meta$del_frac_mean      <- ev$del_frac_mean
+    toks[[i]]$meta$del_read_coherence <- ev$coherence
+    toks[[i]]$meta$del_read_ids       <- ev$del_read_ids
+  }
+  chain$tokens <- toks
+  chain
+}
 
 # ── Rule R10: Direct classification from peak edge type ───────────────────────
 # Fires when an F token has a gene_conversion, crossover, or internal_crossover
@@ -2896,6 +3027,18 @@ rule_tract_read_evidence <- list(
     n_swi <- tok$n_tract_switch %||% NA_integer_
     if (is.na(n_ret) || is.na(n_swi)) return(NULL)   # no counts (no full_read_loh)
     if (n_ret + n_swi == 0L) return(NULL)            # nothing crossed informatively
+
+    # Enough of what crossed has to be informative. The homogeneity test in
+    # fire_fn runs over informative reads ONLY -- the uninformative ones are
+    # genuinely uninformative, so they cannot vote -- which means two returns
+    # and no switches read as unanimous no matter how many reads crossed the
+    # tract without saying anything. On RAD5_03 S288C_chrII 428,804-430,361
+    # that was 2 informative reads of 70, both artifacts of a hemizygous
+    # deletion, reported as a 100%-agreement NCO_GC.
+    n_span <- tok$n_tract_spanning %||% NA_integer_
+    min_fr <- as.numeric(params$tract_read_min_frac %||% 0)
+    if (!is.na(n_span) && n_span > 0L && min_fr > 0 &&
+        (n_ret + n_swi) / n_span < min_fr) return(NULL)
 
     list(span = c(i, i), f_tok = tok)
   },
@@ -3650,6 +3793,7 @@ run_chain_analysis <- function(loh_segments,
                                 snp_peaks    = NULL,
                                 rt_df        = NULL,
                                 full_read_loh = NULL,
+                                del_evidence  = NULL,
                                 chr_span,
                                 coverage_segments = NULL,
                                 coverage_table     = NULL,
@@ -3665,6 +3809,11 @@ run_chain_analysis <- function(loh_segments,
 
   # Per-tract read evidence, measured after canonicalise() has settled the
   # token spans the counts refer to.
+  # Deletion evidence first: the read-support annotators below exclude a
+  # tract's deleted reads from its return counts.
+  chains <- lapply(chains, annotate_tract_deletion_evidence,
+                   del_evidence = del_evidence, params = params)
+
   chains <- lapply(chains, annotate_tract_read_support,
                    full_read_loh = full_read_loh, params = params)
   chains <- lapply(chains, annotate_block_read_support,
