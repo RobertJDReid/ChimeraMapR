@@ -147,6 +147,16 @@ option_list <- list(
               metavar = "INT",
               help    = "Minimum consecutive same-allele calls to count as a run [default: %default]"),
 
+  make_option("--min-run-snps",
+              type    = "integer",
+              default = 2L,
+              metavar = "INT",
+              help    = paste("Minimum consecutive same-state SNPs for an LOH run to survive as",
+                              "its own segment; shorter runs between identical flanks are absorbed",
+                              "as flicker. This is the LOH channel's floor and is independent of",
+                              "--min-run: 1 lets a single HOM SNP stand as a fixed tract, 2",
+                              "requires a 2-SNP tract [default: %default]")),
+
   make_option("--min-peak-height",
               type    = "integer",
               default = 10L,
@@ -646,7 +656,8 @@ if (run_chain) {
 
   # ── Step 0: LOH map ───────────────────────────────────────────────────────────
   cat("[chain] Step 0: Computing LOH map ...\n")
-  loh_result <- compute_loh_map(results$full_read_loh)
+  loh_result <- compute_loh_map(results$full_read_loh,
+                                min_run_snps = as.integer(opts[["min-run-snps"]]))
   loh_segs   <- loh_result$loh_segments
 
   if (full_chain) {

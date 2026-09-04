@@ -4,6 +4,49 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.18] - 2026-09-04
+
+### `min_run_snps` is now wired, as the LOH channel's own floor
+
+- `compute_loh_map()`'s `min_run_snps` argument existed but was documented
+  "retained for API compatibility; not used by the HMM" and was in fact used
+  nowhere. The segment-collapse flicker suppressor hard-coded `n == 1L`, so the
+  threshold that decides whether an H-F-H structure exists at all was fixed at
+  two SNPs and unreachable from either front end.
+- It now drives that test (`n < min_run_snps`). New `--min-run-snps` on the CLI
+  and "Minimum LOH Segment SNPs" in the app, both defaulting to 2, which
+  reproduces the old singleton rule exactly — the events tables for `min_run`
+  1/2/3 on SYNv3 are byte-identical to 0.8.17 when the flag is not given.
+- It is deliberately NOT coupled to `min_run`. The two channels have different
+  noise sources and resolution limits, and coupling makes them fail together:
+  raising the LOH floor to 3 drops SYNv3's fixed segments from 14 to 9, and
+  since R11c needs an `F` token that would turn `min_run` 3's five `loh_only`
+  calls into five silent losses rather than five uncorroborated ones.
+
+### Setting it to 1 makes single-SNP conversions reachable
+
+- A one-SNP tract was previously unrecoverable at `min_run` >= 2 by any route:
+  no peak (the run-length filter), and no `F` token (the suppressor absorbed
+  it), so no rule could fire. It did not appear as an event, a review flag, or
+  a segment.
+- At `min_run_snps = 1` the tract keeps its own `F` token and R11c calls it from
+  tract-spanning reads. On SYNv3, `--min-run 2 --min-run-snps 1` recovers all
+  16 allele-balance-detectable tracts with no spurious events, against 14 at the
+  default — the two extra being 568,022 and 615,409, both at allele fraction
+  1.000 on 48+ reads. Reported as `loh_only`, which is exactly what they are.
+- On the degraded twin it also recovers 470,995, whose two-SNP tract loses
+  470,509 to `--del-rate-cutoff` (`del_frac` 0.264) and is left as an effective
+  singleton: 16/16 against 13/16 at the default, without having to relax the
+  deletion-rate gate.
+- The noise cost measured on both datasets is zero. `min_run_snps = 1` yields
+  exactly 2 (clean) and 3 (r15) single-SNP fixed segments, all real, all at
+  `balance_mean` <= 0.08. The Viterbi prior (`trans_stay` 0.999) is already
+  what suppresses balance flicker — a lone SNP is only decoded HOM on
+  overwhelming evidence, such as 0 of 51 reads — so the collapse-level
+  suppressor was a second, redundant filter that cost real events. This is
+  clean synthetic data at ~50x; the guard is cheap to re-measure on a new
+  dataset by counting 1-SNP segments in `compute_loh_map()$loh_segments`.
+
 ## [0.8.17] - 2026-09-04
 
 ### Events now record which evidence channels back them

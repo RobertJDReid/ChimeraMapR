@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.17"
+APP_VERSION <- "0.8.18"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -718,7 +718,22 @@ run_chimera_analysis <- function(
 #                   allele-balance estimates reflect the full pileup depth)
 #    min_depth     : hard minimum reads per position; positions below this are
 #                   excluded before fitting (default 5)
-#    min_run_snps  : retained for API compatibility; not used by the HMM
+#    min_run_snps  : minimum consecutive same-state SNPs for a run to survive
+#                   as its own LOH segment. Shorter runs sandwiched between
+#                   two runs of an identical flanking state are absorbed into
+#                   that state as flicker (see step 5). Not used by the HMM
+#                   itself -- the Viterbi decode is untouched, this gates only
+#                   the collapse into segments. 2 (the default) reproduces the
+#                   historical hard-coded singleton rule; 1 disables flicker
+#                   suppression entirely, letting a single HOM SNP stand as a
+#                   fixed tract; higher values also discard 2-SNP tracts.
+#
+#                   This is the LOH channel's own floor and is deliberately
+#                   INDEPENDENT of the chimeric-read min_run: the two channels
+#                   have different noise sources and different resolution
+#                   limits, and coupling them makes them fail together. A
+#                   single-position allele-balance blip from mismapping is no
+#                   less likely because the read-level run filter was relaxed.
 #    trans_stay    : HMM self-transition probability — higher values produce
 #                   fewer state changes / longer segments (default 0.999)
 #
@@ -848,17 +863,26 @@ compute_loh_map <- function(full_read_loh,
   snp_table <- summary_dt[, .(chrom, pos, n_ref, n_total, balance, AC, loh_state)]
 
   # ── 5. Collapse into contiguous LOH segments ──────────────────────────────
-  # A lone single-SNP run sandwiched between two runs of the identical
-  # flanking state (on both sides) is treated as a flicker, not a real
-  # transition: a true recombination/gene-conversion tract is expected to be
-  # supported by >= 2 consecutive SNPs. Such singletons are absorbed into
-  # their flanking state before segments are built, mirroring the run-collapse
-  # already applied to chimeric-read patterns in classify_peak_haplotype() /
-  # classify_fused_peak_haplotype(). snp_table above is built from the
-  # pre-collapse AC/loh_state, so per-SNP displays still show the raw,
-  # uncollapsed observed pattern (including the flicker position itself).
+  # A run shorter than `min_run_snps`, sandwiched between two runs of the
+  # identical flanking state (on both sides), is treated as flicker rather than
+  # a real transition: at the default of 2 a true recombination/gene-conversion
+  # tract is expected to be supported by >= 2 consecutive SNPs. Such runs are
+  # absorbed into their flanking state before segments are built, mirroring the
+  # run-collapse already applied to chimeric-read patterns in
+  # classify_peak_haplotype() / classify_fused_peak_haplotype().
+  #
+  # This is the gate that decides whether an H-F-H structure exists at all, and
+  # it is the LOH channel's floor alone -- see the min_run_snps notes in the
+  # header. Setting it to 1 disables absorption entirely: a lone HOM SNP then
+  # stands as its own fixed segment, which is what makes single-SNP gene
+  # conversions reachable by the chain rules instead of only by a peak.
+  #
+  # snp_table above is built from the pre-collapse AC/loh_state, so per-SNP
+  # displays still show the raw, uncollapsed observed pattern (including the
+  # flicker position itself).
   seg_dt <- copy(summary_dt)
   setorder(seg_dt, chrom, pos)
+  min_seg_snps <- max(1L, as.integer(min_run_snps))
   repeat {
     seg_dt[, run_id := rleid(AC), by = chrom]
     run_ac <- seg_dt[, .(n = .N, ac = AC[1]), by = .(chrom, run_id)]
@@ -866,7 +890,7 @@ compute_loh_map <- function(full_read_loh,
     run_ac[, ac_prev := shift(ac, 1L),  by = chrom]
     run_ac[, ac_next := shift(ac, -1L), by = chrom]
     to_absorb <- run_ac[
-      n == 1L & !is.na(ac_prev) & !is.na(ac_next) &
+      n < min_seg_snps & !is.na(ac_prev) & !is.na(ac_next) &
         ac_prev == ac_next & ac_prev != ac
     ]
     if (nrow(to_absorb) == 0L) break

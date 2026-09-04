@@ -404,6 +404,17 @@ ui <- fluidPage(
                    step = 1),
       helpText("Minimum consecutive same-allele calls to count as a run; increase for noisier data"),
 
+      numericInput("min_run_snps",
+                   "Minimum LOH Segment SNPs:",
+                   value = 2,
+                   min = 1,
+                   step = 1),
+      helpText(paste("Minimum consecutive same-state SNPs for an LOH run to stand as its own",
+                     "fixed segment; shorter runs between identical flanks are absorbed as",
+                     "flicker. Independent of Minimum Run Length — set to 1 to let a single",
+                     "homozygous SNP form a tract, making single-SNP gene conversions",
+                     "reachable without a chimeric-read peak.")),
+
       numericInput("min_peak_height",
                    "Minimum Peak Height:",
                    value = 10,
@@ -885,6 +896,7 @@ server <- function(input, output, session) {
       incProgress(0.87, detail = "Computing LOH map (HMM)")
       loh_out              <- compute_loh_map(
         res$full_read_loh,
+        min_run_snps = as.integer(input$min_run_snps),
         warn_fn = function(msg) showNotification(msg, type = "warning", duration = 10)
       )
       results$loh_map      <- loh_out$snp_table    # per-SNP; used by gap_has_loh()
@@ -2131,6 +2143,7 @@ server <- function(input, output, session) {
                                       " SNPs, coherence ",
                                       input$del_block_read_coherence, "\n",
       "  Min Run Length: ",           input$min_run,         "\n",
+      "  Min LOH Segment SNPs: ",     input$min_run_snps,    "\n",
       "  Min Peak Height: ",          input$min_peak_height, "\n",
       "  Whittaker Lambda (\u03bb): ",input$lambda,          "\n",
       "  Jaccard Threshold: ",        input$jaccard_threshold
