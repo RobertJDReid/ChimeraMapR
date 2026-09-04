@@ -613,6 +613,7 @@ if (run_chain) {
           length_bp       = as.integer(ev$length_bp),
           n_support       = as.integer(ev$n_support),
           peak_edge_types = ev$peak_edge_types %||% NA_character_,
+          evidence        = ev$evidence %||% NA_character_,
           notes           = ev$notes %||% ""
         )
       }
@@ -621,7 +622,8 @@ if (run_chain) {
       return(data.table::data.table(
         event_class=character(), chrom=character(),
         start=integer(), end=integer(), length_bp=integer(),
-        n_support=integer(), peak_edge_types=character(), notes=character()
+        n_support=integer(), peak_edge_types=character(),
+        evidence=character(), notes=character()
       ))
     data.table::rbindlist(rows, fill = TRUE)
   }

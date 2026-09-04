@@ -1195,6 +1195,26 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     ev_end   <- max(isl_ends,   na.rm = TRUE)
   }
 
+  # ── Evidence channels backing this call ───────────────────────────────────
+  # Which of the two INDEPENDENT detection channels corroborate the event:
+  #   peak — the chimeric-read junction signature (per-molecule: does a single
+  #          read cross the boundary and switch/return?)
+  #   loh  — the LOH map's fixed tract (population allele balance at each SNP)
+  # They have different resolution limits and fail independently. A tract with
+  # fewer SNPs than min_run raises no peak (chimera_functions.R run-length
+  # filter); a tract of one SNP leaves no F token (the segment-collapse flicker
+  # suppressor absorbs it). So a single-channel call is not weaker evidence of
+  # its kind -- it is uncorroborated, which is a different thing and one the
+  # confidence column cannot express: `confidence` scores how MUCH evidence
+  # backs the call, this records how many channels agree.
+  has_peak <- length(Filter(Negate(is.null), all_peaks)) > 0L
+  has_loh  <- any(vapply(tokens_involved,
+                         function(t) identical(t$type, "F"), logical(1)))
+  evidence <- if (has_peak && has_loh) "peak+loh"
+              else if (has_loh)        "loh_only"
+              else if (has_peak)       "peak_only"
+              else                     NA_character_
+
   list(
     event_class       = call,
     chrom             = chrom,
@@ -1203,6 +1223,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     length_bp         = as.integer(ev_end - ev_start),
     n_support         = as.integer(n_support),
     peak_edge_types   = pk_edge,
+    evidence          = evidence,
     phase_switch_frac = phase_frac,
     notes             = notes,
     # What n_support counts. "tract_reads" marks a call whose support is reads
@@ -3653,6 +3674,9 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         start = ev_st, end = ev_en,
         length_bp = as.integer(ev_en - ev_st), n_support = tract$n_support,
         peak_edge_types = u$edge_type %||% NA_character_,
+        # Promoted from a self-classifying peak that never attached to a token,
+        # so by construction there is no fixed tract behind it (see .make_event).
+        evidence = "peak_only",
         phase_switch_frac = u$phase_switch_frac %||% NA_real_,
         notes = "no_fixed_tract; peak_only", tokens = list())))
     } else {
@@ -3720,7 +3744,7 @@ build_event_table <- function(events, params = default_chain_params()) {
       event_class = character(), chrom = character(),
       start = integer(), end = integer(), length_kb = numeric(),
       n_support = integer(), n_fused = integer(), peak_edge_types = character(),
-      phase_switch_frac = numeric(),
+      phase_switch_frac = numeric(), evidence = character(),
       confidence = character(), notes = character()
     ))
 
@@ -3760,6 +3784,10 @@ build_event_table <- function(events, params = default_chain_params()) {
       n_fused         = as.integer(ev$n_fused %||% NA_integer_),
       peak_edge_types = ev$peak_edge_types %||% NA_character_,
       phase_switch_frac = ev$phase_switch_frac %||% NA_real_,
+      # Which independent channels back the call -- "peak+loh", "loh_only" or
+      # "peak_only". Set by .make_event(); NA only for an event built by some
+      # path that predates the field.
+      evidence        = ev$evidence %||% NA_character_,
       confidence      = confidence,
       notes           = ev$notes %||% ""
     )

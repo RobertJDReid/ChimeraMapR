@@ -4,6 +4,63 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.17] - 2026-09-04
+
+### Events now record which evidence channels back them
+
+- New `evidence` column on the events table: `peak+loh`, `loh_only` or
+  `peak_only`. Until now the only way to tell a peak-corroborated call from one
+  resting on read evidence alone was an empty `peak_edge_types` — incidental,
+  not a statement.
+- Computed in `.make_event()` from the peaks it already gathers for
+  `phase_switch_frac` (`evidence_peaks` plus the tokens' own
+  `peak_over`/`peak_left`/`peak_right`) and the presence of an `F` token among
+  `tokens_involved`. An R11c call that sits beside an unclaimed peak therefore
+  reads `peak+loh`, not `loh_only`.
+- The `*_subres` events built in `reconcile()` do not pass through
+  `.make_event()` — they are raw lists with `tokens = list()` — so they declare
+  `evidence = "peak_only"` at their construction site. Those are the only two
+  places an event is constructed; unclaimed LOH tokens never become events.
+- Threaded into the `--chain-all` step-3 CSV and the Shiny events table. In the
+  app `peak_edge_types` is relabelled "Peak Type": beside an Evidence column the
+  old "Peak Evidence" read as though it were the channel indicator, which it is
+  not — it is the peak's edge classification.
+
+### Why the distinction earns a column
+
+- The two channels have different resolution limits and fail independently. A
+  tract with fewer SNPs than `min_run` raises no peak — the run-length filter in
+  `run_chimera_analysis()` drops every call in a run shorter than `min_run`, so
+  an N-SNP tract cannot survive `min_run > N`. A one-SNP tract additionally
+  leaves no `F` token: the segment-collapse flicker suppressor in
+  `compute_loh_map()` absorbs any single-SNP run sitting between identical
+  flanks, whatever the depth behind it.
+- On `test_data/SYNv3_20Swaps_500bpLOH_sm50.csv.gz`, whose pileup yields 16
+  conversion tracts by allele balance, the split tracks that exactly:
+
+  | `min_run` | events | `peak+loh` | `loh_only` | `peak_only` |
+  |---|---|---|---|---|
+  | 1 | 16 | 14 | 0 | 2 |
+  | 2 | 14 | 14 | 0 | 0 |
+  | 3 | 14 |  9 | 5 | 0 |
+
+  The five `loh_only` calls at `min_run` 3 are precisely the five two-SNP
+  tracts. The two `peak_only` calls at `min_run` 1 are the two one-SNP tracts
+  (568,022 and 615,409, both at allele fraction 1.000 on 48+ reads), which have
+  no `F` token and therefore no R11c rescue path — they vanish entirely at
+  `min_run` >= 2.
+- The degraded-quality twin `SYNv3_20Swaps_500bpLOH_r15_sm50.csv.gz` behaves the
+  same way, with one addition: `--del-rate-cutoff` excludes 312 SNPs there
+  against 3 on the clean reads, which strips 470,509 (`del_frac` 0.264) from its
+  own two-SNP tract and drops it below both floors. Poor quality shrinks
+  effective tract SNP counts, so the effective detection floor sits above the
+  nominal one.
+- `confidence` is unchanged, and is not the place for this. Those five
+  `loh_only` calls carry 16-32 junction-spanning reads at 100% homogeneity —
+  strong evidence on their own channel, and flagging them `review` would be a
+  false alarm. `confidence` scores how MUCH evidence backs a call; `evidence`
+  records how many independent channels agree.
+
 ## [0.8.16] - 2026-09-03
 
 ### A hemizygous deletion was being called a gene conversion

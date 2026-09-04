@@ -2587,10 +2587,14 @@ server <- function(input, output, session) {
     
     setcolorder(et, c("event_class", "chrom", "Start (bp)", "End (bp)",
                       "Length (kb)", "n_support", "peak_edge_types",
-                      "confidence", "notes"))
+                      "evidence", "confidence", "notes"))
+    # "Peak Evidence" -> "Peak Type": with an Evidence column beside it the old
+    # label read as though it were the channel indicator, which it is not --
+    # peak_edge_types is the peak's edge classification (gene_conversion /
+    # binary), while Evidence says which channels back the call at all.
     setnames(et,
-             c("event_class", "chrom", "n_support", "peak_edge_types", "confidence"),
-             c("Event",       "Chr",   "N Support", "Peak Evidence",   "Confidence")
+             c("event_class", "chrom", "n_support", "peak_edge_types", "evidence", "confidence"),
+             c("Event",       "Chr",   "N Support", "Peak Type",       "Evidence", "Confidence")
     )
     et
   }, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "s", na = "\u2014")
