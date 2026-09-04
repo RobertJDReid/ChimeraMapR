@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: light dark }
+  html { -webkit-text-size-adjust: 100% }
+  body { margin:0; padding:0; font:14px -apple-system,BlinkMacSystemFont,sans-serif }
+  img { max-width:100% }
+  [hidden] { display:none !important }
+</style>
+<title>ChimeraMapR Event Calls</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Spectral:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  :root {
+    --paper:      #eceff0;
+    --surface:    #f8fafa;
+    --band:       #e3e8e9;
+    --ink:        #121a1c;
+    --muted:      #5c6b6e;
+    --line:       #c3cdcf;
+    --rule:       #d5dddd;
+
+    --call:       #10695d;
+    --call-bg:    #dfefec;
+    --review:     #9a6413;
+    --review-bg:  #f5ead6;
+    --del:        #97293c;
+    --del-bg:     #f6e1e4;
+    --flat:       #4a5a5d;
+    --flat-bg:    #e6ebec;
+
+    --hapA:       #2c5e7d;
+    --hapB:       #b0762c;
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body:    "Spectral", Georgia, "Times New Roman", serif;
+    --f-mono:    "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:     #0d1315;
+      --surface:   #151d20;
+      --band:      #1a2427;
+      --ink:       #e5ecec;
+      --muted:     #91a2a4;
+      --line:      #2b383b;
+      --rule:      #222e31;
+
+      --call:      #47bba6;
+      --call-bg:   #10312d;
+      --review:    #dd9a4b;
+      --review-bg: #33260f;
+      --del:       #e06b82;
+      --del-bg:    #341a20;
+      --flat:      #9dadb0;
+      --flat-bg:   #1b2427;
+
+      --hapA:      #74a8cb;
+      --hapB:      #d9a05a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:     #0d1315;
+    --surface:   #151d20;
+    --band:      #1a2427;
+    --ink:       #e5ecec;
+    --muted:     #91a2a4;
+    --line:      #2b383b;
+    --rule:      #222e31;
+
+    --call:      #47bba6;
+    --call-bg:   #10312d;
+    --review:    #dd9a4b;
+    --review-bg: #33260f;
+    --del:       #e06b82;
+    --del-bg:    #341a20;
+    --flat:      #9dadb0;
+    --flat-bg:   #1b2427;
+
+    --hapA:      #74a8cb;
+    --hapB:      #d9a05a;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1148px; margin: 0 auto; padding: 0 24px 96px; }
+  .prose { max-width: 68ch; }
+
+  h1, h2, h3, .lab { font-family: var(--f-display); text-wrap: balance; }
+  h1 {
+    font-size: clamp(30px, 4.6vw, 50px);
+    font-weight: 700;
+    letter-spacing: -0.022em;
+    line-height: 1.04;
+    margin: 0 0 14px;
+  }
+  h2 {
+    font-size: 23px; font-weight: 600; letter-spacing: -0.012em;
+    margin: 0 0 6px; padding-top: 4px;
+  }
+  h3 { font-size: 16px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.005em; }
+  p { margin: 0 0 14px; }
+  a { color: var(--call); }
+
+  .lab {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.13em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  code, .mono { font-family: var(--f-mono); font-size: 0.87em; }
+  code { background: var(--band); padding: 1px 5px; border-radius: 3px; }
+
+  /* ---- masthead ---- */
+  header { padding: 56px 0 34px; border-bottom: 1px solid var(--line); }
+  .deck {
+    font-size: 19px; line-height: 1.55; color: var(--ink);
+    max-width: 62ch; margin: 0 0 26px;
+  }
+  .deck em { font-style: italic; color: var(--muted); }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: stretch;
+    margin-top: 4px;
+  }
+  .tok {
+    display: flex; align-items: baseline; gap: 8px;
+    border: 1px solid var(--line); background: var(--surface);
+    border-radius: 2px; padding: 7px 11px;
+  }
+  .tok b { font-family: var(--f-mono); font-weight: 600; font-size: 13px; }
+  .tok span { font-size: 12.5px; color: var(--muted); }
+
+  /* ---- pipeline strip ---- */
+  .pipe {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(154px, 1fr));
+    gap: 1px; background: var(--line); border: 1px solid var(--line);
+    margin: 30px 0 0;
+  }
+  .pipe > div { background: var(--surface); padding: 12px 14px 14px; }
+  .pipe .n {
+    font-family: var(--f-mono); font-size: 11px; font-weight: 600;
+    color: var(--muted); letter-spacing: 0.06em;
+  }
+  .pipe .t { font-family: var(--f-mono); font-size: 12.5px; font-weight: 500; margin-top: 3px; }
+  .pipe .d { font-size: 12.5px; line-height: 1.4; color: var(--muted); margin-top: 5px; }
+
+  section { padding-top: 54px; }
+  .eyebrow { display: block; margin-bottom: 7px; }
+
+  /* ---- figures ---- */
+  figure { margin: 26px 0 0; }
+  .figbox {
+    border: 1px solid var(--line); background: var(--surface);
+    padding: 20px 18px 8px; overflow-x: auto;
+  }
+  .figbox svg { display: block; width: 100%; min-width: 720px; height: auto; color: var(--ink); }
+  figcaption {
+    font-size: 13.5px; line-height: 1.55; color: var(--muted);
+    margin-top: 12px; max-width: 78ch;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  /* svg primitives */
+  .fg .box   { fill: var(--surface); stroke: var(--line); stroke-width: 1; }
+  .fg .band  { fill: var(--band); stroke: none; }
+  .fg .callb { fill: var(--call-bg);   stroke: var(--call);   stroke-width: 1; }
+  .fg .revb  { fill: var(--review-bg); stroke: var(--review); stroke-width: 1; }
+  .fg .delb  { fill: var(--del-bg);    stroke: var(--del);    stroke-width: 1; }
+  .fg .flatb { fill: var(--flat-bg);   stroke: var(--line);   stroke-width: 1; }
+  .fg .edge  { fill: none; stroke: var(--muted); stroke-width: 1.25; }
+  .fg .ah    { fill: var(--muted); }
+  .fg text   { font-family: var(--f-mono); }
+  .fg .h     { font-family: var(--f-display); font-size: 13.5px; font-weight: 600; fill: var(--ink); }
+  .fg .s     { font-size: 11.5px; fill: var(--muted); }
+  .fg .rid   { font-size: 11px; font-weight: 600; fill: var(--muted); letter-spacing: 0.08em; }
+  .fg .cc    { font-size: 12.5px; font-weight: 600; fill: var(--call); }
+  .fg .cr    { font-size: 12.5px; font-weight: 600; fill: var(--review); }
+  .fg .cd    { font-size: 12.5px; font-weight: 600; fill: var(--del); }
+  .fg .cn    { font-size: 12.5px; font-weight: 600; fill: var(--flat); }
+  .fg .hapA  { fill: var(--hapA); }
+  .fg .hapB  { fill: var(--hapB); }
+  .fg .neu   { fill: var(--band); stroke: var(--line); stroke-width: 1; }
+
+  /* ---- tables ---- */
+  .scroll { overflow-x: auto; margin-top: 22px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  .rules { min-width: 920px; }
+  th {
+    font-family: var(--f-display); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+    text-align: left; padding: 0 14px 8px 0; border-bottom: 1px solid var(--line);
+    vertical-align: bottom;
+  }
+  td {
+    padding: 11px 14px 11px 0; border-bottom: 1px solid var(--rule);
+    vertical-align: top; line-height: 1.45;
+  }
+  td.k { font-family: var(--f-mono); font-size: 12px; white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+  td.m { font-family: var(--f-mono); font-size: 12.5px; white-space: nowrap; }
+  td.c { font-family: var(--f-mono); font-size: 12px; font-weight: 500; }
+  .rules tr:hover td { background: var(--surface); }
+  .co { color: var(--call); }
+  .rv { color: var(--review); }
+  .dl { color: var(--del); }
+  .nu { color: var(--flat); }
+
+  .params { min-width: 640px; }
+  .params td.v { font-family: var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* ---- notes grid ---- */
+  .notes {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(288px, 1fr));
+    gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 24px;
+  }
+  .notes > div { background: var(--surface); padding: 16px 18px 18px; }
+  .notes p { font-size: 14px; margin: 0; color: var(--muted); }
+  .notes p + p { margin-top: 9px; }
+  .notes h3 { font-family: var(--f-mono); font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em; }
+
+  .src {
+    font-family: var(--f-mono); font-size: 11.5px; color: var(--muted);
+    margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--rule);
+  }
+  header .src { border-top: 0; padding-top: 0; margin-top: 2px; margin-bottom: 22px; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+  ::selection { background: var(--call); color: var(--paper); }
+  a:focus-visible, td:focus-visible { outline: 2px solid var(--call); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="lab eyebrow">loh_chain_analysis.R &nbsp;·&nbsp; decision flow</span>
+  <h1>Calling an event in ChimeraMapR</h1>
+  <p class="deck">
+    Every event class the pipeline reports comes out of one pass over a chromosome's
+    LOH chain, where a fixed tract is tested against fourteen rules in a fixed
+    priority order. This is what each of those gates actually asks — and where a
+    tract goes when none of them can answer.
+  </p>
+
+  <p class="src">Line references below are against <b>1957a69</b> (2026-09-03). Re-check them after edits to <code>loh_chain_analysis.R</code>.</p>
+
+  <div class="legend">
+    <div class="tok"><b>F</b><span>fixed tract — one allele across, the LOH</span></div>
+    <div class="tok"><b>F&#772;</b><span>fixed tract of the opposite state</span></div>
+    <div class="tok"><b>H</b><span>heterozygous zone — phase is callable here</span></div>
+    <div class="tok"><b>G</b><span>unscored gap; most rules see through it</span></div>
+    <div class="tok"><b>TEL</b><span>chromosome end</span></div>
+    <div class="tok"><b>&#9679;</b><span>chimeric-read junction peak</span></div>
+  </div>
+
+  <div class="pipe">
+    <div><div class="n">01</div><div class="t">build_raw_chains</div><div class="d">LOH segments, coverage and peaks become a token chain per chromosome</div></div>
+    <div><div class="n">02</div><div class="t">canonicalise</div><div class="d">same-state runs merge across gaps up to merge_gap_bp</div></div>
+    <div><div class="n">03</div><div class="t">annotate_*</div><div class="d">per-tract deletion stats, then junction-spanning read counts</div></div>
+    <div><div class="n">04</div><div class="t">scan_chain</div><div class="d">propose, resolve, apply — the rules run here</div></div>
+    <div><div class="n">05</div><div class="t">reconcile</div><div class="d">orphan peaks promoted, orphan tracts sent to review</div></div>
+    <div><div class="n">06</div><div class="t">build_event_table</div><div class="d">each row scored high or review</div></div>
+  </div>
+</header>
+
+<section>
+  <span class="lab eyebrow">Figure 1</span>
+  <h2>The ladder a fixed tract falls down</h2>
+  <p class="prose">
+    The gates are not independent tests — they are a priority list, and the first
+    rule that can claim a tract keeps it. Reading top to bottom is reading
+    <code>MOTIF_RULES</code> in order.
+  </p>
+
+  <figure>
+    <div class="figbox fg">
+      <svg viewBox="0 0 1100 1424" role="img" aria-label="Decision flow: a fixed LOH tract is tested for embedded fragments, then homolog loss, then telomere contact, then composite blocks, then junction evidence, and finally falls through to reconciliation and confidence scoring.">
+        <defs>
+          <marker id="a1" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+            <polygon class="ah" points="0,0.5 9,4.5 0,8.5"></polygon>
+          </marker>
+        </defs>
+
+        <!-- entry -->
+        <rect class="band" x="48" y="20" width="420" height="52"></rect>
+        <text class="h" x="66" y="42">F — a fixed tract in the canonical chain</text>
+        <text class="s" x="66" y="60">bounded by H, G or TEL; depth and read counts attached</text>
+
+        <!-- loop back -->
+        <path class="edge" d="M48,152 H24 V46 H46" marker-end="url(#a1)"></path>
+        <text class="s" transform="rotate(-90 15 104)" x="15" y="104" text-anchor="middle">rewrite &#8594; re-propose</text>
+
+        <line class="edge" x1="258" y1="72" x2="258" y2="90" marker-end="url(#a1)"></line>
+
+        <!-- R06 -->
+        <rect class="box" x="48" y="96" width="420" height="82"></rect>
+        <text class="rid" x="66" y="118">R06</text>
+        <text class="h" x="66" y="138">A small opposite-state fragment in a run?</text>
+        <text class="s" x="66" y="156">len &lt; 0.10 &#215; (left + right flank), and shorter than the right flank</text>
+        <text class="s" x="66" y="172">carries its own peak, or has fewer than 2 SNPs</text>
+        <line class="edge" x1="468" y1="137" x2="552" y2="137" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="96" width="500" height="82"></rect>
+        <text class="cc" x="578" y="122">NCO_GC_in_terminal &#183; CO_GC &#183; POSSIBLE_GC</text>
+        <text class="s" x="578" y="142">one event per fragment, reported at its own span</text>
+        <text class="s" x="578" y="162">the two flanks then merge into one token and the whole</text>
+        <text class="s" x="578" y="176">chain is re-proposed, peeling one fragment at a time</text>
+
+        <line class="edge" x1="258" y1="178" x2="258" y2="196" marker-end="url(#a1)"></line>
+
+        <!-- deletion -->
+        <rect class="box" x="48" y="202" width="420" height="106"></rect>
+        <text class="rid" x="66" y="224">R01 &#183; Rd</text>
+        <text class="h" x="66" y="244">Is one homolog simply gone?</text>
+        <text class="s" x="66" y="262">terminal, TEL-adjacent: depth ratio &lt; 0.60</text>
+        <text class="s" x="66" y="278">interstitial, H-bounded: depth &lt; 0.60, or &#8805; 5 SNPs at</text>
+        <text class="s" x="66" y="294">&#8805; 20% deletion calls with read coherence &#8805; 0.50</text>
+        <line class="edge" x1="468" y1="248" x2="552" y2="248" marker-end="url(#a1)"></line>
+        <rect class="delb" x="560" y="202" width="500" height="106"></rect>
+        <text class="cd" x="578" y="228">TERMINAL_DELETION &#183; DELETION</text>
+        <text class="s" x="578" y="250">reads outrank depth: a long deletion halves coverage and</text>
+        <text class="s" x="578" y="266">reports no read count; a short one is spanned and counted</text>
+        <text class="s" x="578" y="288">veto — a resolved switch peak proves both homologs are</text>
+        <text class="s" x="578" y="302">present, so the tract is handed back to the CO/GC rules</text>
+
+        <line class="edge" x1="258" y1="308" x2="258" y2="326" marker-end="url(#a1)"></line>
+
+        <!-- telomere -->
+        <rect class="box" x="48" y="332" width="420" height="66"></rect>
+        <text class="rid" x="66" y="354">R03 &#183; R02 &#183; R02g &#183; R02c &#183; R02d</text>
+        <text class="h" x="66" y="374">Does the tract reach a telomere?</text>
+        <text class="s" x="66" y="390">within tel_tol_bp = 5 kb of the chain's last SNP</text>
+
+        <path class="edge" d="M468,362 H530 V546"></path>
+        <line class="edge" x1="530" y1="362" x2="552" y2="362" marker-end="url(#a1)"></line>
+        <line class="edge" x1="530" y1="424" x2="552" y2="424" marker-end="url(#a1)"></line>
+        <line class="edge" x1="530" y1="486" x2="552" y2="486" marker-end="url(#a1)"></line>
+        <line class="edge" x1="530" y1="546" x2="552" y2="546" marker-end="url(#a1)"></line>
+
+        <rect class="callb" x="560" y="334" width="500" height="56"></rect>
+        <text class="cc" x="578" y="358">R03 &#8594; TCO_CAPTURED_TCO</text>
+        <text class="s" x="578" y="378">peaks on both junctions; an opposite-state F runs to TEL</text>
+
+        <rect class="callb" x="560" y="396" width="500" height="56"></rect>
+        <text class="cc" x="578" y="420">R02 &#8594; CO_TERM<tspan class="s">&#160;&#160;or&#160;&#160;</tspan><tspan class="cr">CO_TERM_PROBABLE</tspan></text>
+        <text class="s" x="578" y="440">any resolved switch peak &#8594; CO_TERM; edge undefined &#8594; probable</text>
+
+        <rect class="callb" x="560" y="458" width="500" height="56"></rect>
+        <text class="cc" x="578" y="482">R02g &#8594; CO_TERM_GAPPED</text>
+        <text class="s" x="578" y="502">binary peak proximally, the internal switch lost in a SNP desert</text>
+
+        <rect class="revb" x="560" y="518" width="500" height="56"></rect>
+        <text class="cr" x="578" y="542">R02c &#183; R02d &#8594; CO_TERM_PROBABLE</text>
+        <text class="s" x="578" y="562">a subtelomeric misalignment HET, or a &#8805; 10 kb proximal gap</text>
+
+        <path class="edge" d="M258,398 V566" marker-end="url(#a1)"></path>
+        <text class="s" x="272" y="484">no &#8212; the tract is interstitial</text>
+
+        <!-- composite block -->
+        <rect class="box" x="48" y="572" width="420" height="90"></rect>
+        <text class="rid" x="66" y="594">R11d</text>
+        <text class="h" x="66" y="614">Two or more tracts with no callable HET between?</text>
+        <text class="s" x="66" y="632">inside a fixed tract every molecule reads the same allele, so</text>
+        <text class="s" x="66" y="648">such a run has one informative pair of ends, not one per tract</text>
+        <line class="edge" x1="468" y1="612" x2="552" y2="612" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="572" width="500" height="90"></rect>
+        <text class="cc" x="578" y="598">NCO_GC &#183; CO_GC &#183; <tspan class="cn">AMBIGUOUS(mixed_block_reads)</tspan></text>
+        <text class="cr" x="578" y="620">GC_UNRESOLVED &#8212; nothing reaches both flanks</text>
+        <text class="s" x="578" y="642">one call for the whole run, claiming every peak inside it,</text>
+        <text class="s" x="578" y="656">so the peak rules below cannot read the map back to itself</text>
+
+        <line class="edge" x1="258" y1="662" x2="258" y2="680" marker-end="url(#a1)"></line>
+
+        <!-- junction evidence -->
+        <rect class="band" x="48" y="686" width="420" height="60"></rect>
+        <text class="h" x="66" y="710">What sits on the tract's two junctions?</text>
+        <text class="s" x="66" y="730">tested in this order; the first rule to claim the tract wins it</text>
+
+        <path class="edge" d="M258,746 V754 H96 V1062"></path>
+        <line class="edge" x1="96" y1="790" x2="112" y2="790" marker-end="url(#a1)"></line>
+        <line class="edge" x1="96" y1="858" x2="112" y2="858" marker-end="url(#a1)"></line>
+        <line class="edge" x1="96" y1="926" x2="112" y2="926" marker-end="url(#a1)"></line>
+        <line class="edge" x1="96" y1="994" x2="112" y2="994" marker-end="url(#a1)"></line>
+        <line class="edge" x1="96" y1="1062" x2="112" y2="1062" marker-end="url(#a1)"></line>
+
+        <rect class="box" x="120" y="760" width="348" height="60"></rect>
+        <text class="rid" x="136" y="780">R12</text>
+        <text class="h" x="136" y="798">a crossover peak-pair straddles both</text>
+        <text class="s" x="136" y="814">the pair's verdict, checked against this tract's span</text>
+        <line class="edge" x1="468" y1="790" x2="552" y2="790" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="760" width="500" height="60"></rect>
+        <text class="cc" x="578" y="784">the tract's own reads decide &#8594; Fig. 2</text>
+        <text class="s" x="578" y="804">no counts at all: CO_GC, gated at n &#8805; 2 spanning reads</text>
+
+        <rect class="box" x="120" y="828" width="348" height="60"></rect>
+        <text class="rid" x="136" y="848">R10</text>
+        <text class="h" x="136" y="866">a peak on the tract types itself</text>
+        <text class="s" x="136" y="882">gene_conversion, crossover or internal_crossover</text>
+        <line class="edge" x1="468" y1="858" x2="552" y2="858" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="828" width="500" height="60"></rect>
+        <text class="cc" x="578" y="852">GC peak &#8594; the tract's reads decide &#183; CO peak &#8594; CO_GC</text>
+        <text class="s" x="578" y="872">a crossover signature is one junction, with no return to span</text>
+
+        <rect class="box" x="120" y="896" width="348" height="60"></rect>
+        <text class="rid" x="136" y="916">R11</text>
+        <text class="h" x="136" y="934">a binary peak at each junction</text>
+        <text class="s" x="136" y="950">neither peak types itself; the pair record does</text>
+        <line class="edge" x1="468" y1="926" x2="552" y2="926" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="896" width="500" height="60"></rect>
+        <text class="cc" x="578" y="920">crossover pair &#8594; CO_GC &#183; gene_conversion pair &#8594; NCO_GC</text>
+        <text class="cr" x="578" y="940">no pair record &#8594; GC_UNRESOLVED<tspan class="s">&#160;&#160;tract confirmed, outcome not</tspan></text>
+
+        <rect class="box" x="120" y="964" width="348" height="60"></rect>
+        <text class="rid" x="136" y="984">R11b</text>
+        <text class="h" x="136" y="1002">one binary peak, none opposite</text>
+        <text class="s" x="136" y="1018">not a weak peak opposite &#8212; genuinely none</text>
+        <line class="edge" x1="468" y1="994" x2="552" y2="994" marker-end="url(#a1)"></line>
+        <rect class="revb" x="560" y="964" width="500" height="60"></rect>
+        <text class="cr" x="578" y="988">GC_ONE_SIDED</text>
+        <text class="s" x="578" y="1008">the other breakpoint sits where no read can ever be scored</text>
+
+        <rect class="box" x="120" y="1032" width="348" height="60"></rect>
+        <text class="rid" x="136" y="1052">R11c</text>
+        <text class="h" x="136" y="1070">no usable peak, but reads cross it</text>
+        <text class="s" x="136" y="1086">&#8805; 10% of spanning reads must be informative</text>
+        <line class="edge" x1="468" y1="1062" x2="552" y2="1062" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="1032" width="500" height="60"></rect>
+        <text class="cc" x="578" y="1056">the tract's own reads decide &#8594; Fig. 2</text>
+        <text class="s" x="578" y="1076">claims the tract but not the peak, so a shared junction can</text>
+        <text class="s" x="578" y="1090">still back the neighbouring call</text>
+
+        <path class="edge" d="M96,1062 V1122" marker-end="url(#a1)"></path>
+
+        <!-- reconcile -->
+        <rect class="box" x="48" y="1128" width="420" height="62"></rect>
+        <text class="h" x="66" y="1152">Nothing claimed it</text>
+        <text class="s" x="66" y="1170">no rule matched, or the resolver awarded the tract</text>
+        <text class="s" x="66" y="1184">to a higher-priority candidate</text>
+        <line class="edge" x1="468" y1="1159" x2="552" y2="1159" marker-end="url(#a1)"></line>
+        <rect class="flatb" x="560" y="1128" width="500" height="62"></rect>
+        <text class="cn" x="578" y="1152">Other events &#8212; review list, not an event row</text>
+        <text class="s" x="578" y="1172">reason recorded: no attached peak, or n_snps below</text>
+        <text class="s" x="578" y="1186">min_snps_for_peak (lower Minimum Run Length to reach it)</text>
+
+        <line class="edge" x1="258" y1="1190" x2="258" y2="1208" marker-end="url(#a1)"></line>
+
+        <rect class="box" x="48" y="1214" width="420" height="62"></rect>
+        <text class="h" x="66" y="1238">A peak that never reached a tract</text>
+        <text class="s" x="66" y="1256">classify_tract() run on the peak alone &#8212; its per-read</text>
+        <text class="s" x="66" y="1270">haplotype pattern is the authoritative call</text>
+        <line class="edge" x1="468" y1="1245" x2="552" y2="1245" marker-end="url(#a1)"></line>
+        <rect class="callb" x="560" y="1214" width="500" height="62"></rect>
+        <text class="cc" x="578" y="1238">NCO_GC_subres &#183; CO_GC_subres</text>
+        <text class="s" x="578" y="1258">sub-resolution, not doubtful: the tract is shorter than the</text>
+        <text class="s" x="578" y="1272">LOH map resolves. Unresolvable peaks stay in Other events</text>
+
+        <line class="edge" x1="258" y1="1276" x2="258" y2="1294" marker-end="url(#a1)"></line>
+
+        <!-- confidence -->
+        <rect class="band" x="48" y="1300" width="1012" height="104"></rect>
+        <text class="h" x="66" y="1324">build_event_table() &#8212; confidence</text>
+        <line class="edge" x1="66" y1="1338" x2="1042" y2="1338" stroke-dasharray="2 4"></line>
+        <text class="cc" x="66" y="1362">high</text>
+        <text class="s" x="66" y="1380">NCO_GC, CO_GC, CO_TERM,</text>
+        <text class="s" x="66" y="1394">CO_TERM_GAPPED, TCO_CAPTURED_TCO</text>
+        <text class="cc" x="400" y="1362">high, but only above a floor</text>
+        <text class="s" x="400" y="1380">tract-read support needs n &#8805; 4;</text>
+        <text class="s" x="400" y="1394">a _subres peak needs n &#8805; 3</text>
+        <text class="cr" x="760" y="1362">review</text>
+        <text class="s" x="760" y="1380">every probable, one-sided, unresolved,</text>
+        <text class="s" x="760" y="1394">ambiguous or deletion call</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b>One tract, fourteen gates, in priority order.</b> Each rule proposes wherever it
+      matches; a global resolver then awards contested evidence to the highest-priority
+      candidate (Fig. 3). Two orderings are load-bearing rather than cosmetic: R06 peels
+      embedded fragments <em>before</em> the terminal rules, so a merged flank is never
+      mistaken for one small conversion, and R03 precedes R02 because both want the same
+      junction peak and only R03 also accounts for the captured tract.
+    </figcaption>
+  </figure>
+  <p class="src">loh_chain_analysis.R:3294 — MOTIF_RULES</p>
+</section>
+
+<section>
+  <span class="lab eyebrow">Figure 2</span>
+  <h2>The one question four rules share</h2>
+  <p class="prose">
+    R10, R11c, R11d and R12 all reach the same place: a peak establishes that a tract
+    is real, but only a read carrying homolog identity across <em>both</em> junctions can
+    say whether the tract closed. That measurement, not the peak's own label, decides
+    NCO against CO.
+  </p>
+
+  <figure>
+    <div class="figbox fg">
+      <svg viewBox="0 0 1040 330" role="img" aria-label="A read is informative only if it carries phase in both HET flanks; returns give NCO_GC, switches give CO_GC, no informative reads gives GC_UNRESOLVED, and a mixed population is ambiguous.">
+        <defs>
+          <marker id="a2" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+            <polygon class="ah" points="0,0.5 9,4.5 0,8.5"></polygon>
+          </marker>
+        </defs>
+
+        <text class="rid" x="60" y="26">WHAT COUNTS AS INFORMATIVE</text>
+
+        <text class="s" x="130" y="48" text-anchor="middle">phase callable</text>
+        <text class="s" x="320" y="48" text-anchor="middle">every molecule reads alike</text>
+        <text class="s" x="510" y="48" text-anchor="middle">phase callable</text>
+
+        <rect class="band" x="60" y="58" width="140" height="26"></rect>
+        <rect class="box"  x="200" y="58" width="240" height="26"></rect>
+        <rect class="band" x="440" y="58" width="140" height="26"></rect>
+        <text class="s" x="130" y="76" text-anchor="middle">H</text>
+        <text class="s" x="320" y="76" text-anchor="middle">F &#8212; fixed tract</text>
+        <text class="s" x="510" y="76" text-anchor="middle">H</text>
+
+        <!-- read A: returns -->
+        <rect class="hapA" x="112" y="104" width="88" height="16"></rect>
+        <rect class="neu"  x="200" y="104" width="240" height="16"></rect>
+        <rect class="hapA" x="440" y="104" width="60" height="16"></rect>
+        <rect class="callb" x="592" y="103" width="76" height="18"></rect>
+        <text class="cc" x="630" y="116" text-anchor="middle" font-size="11">returns</text>
+
+        <!-- read B: switches -->
+        <rect class="hapA" x="126" y="140" width="74" height="16"></rect>
+        <rect class="neu"  x="200" y="140" width="240" height="16"></rect>
+        <rect class="hapB" x="440" y="140" width="72" height="16"></rect>
+        <rect class="callb" x="592" y="139" width="76" height="18"></rect>
+        <text class="cc" x="630" y="152" text-anchor="middle" font-size="11">switches</text>
+
+        <!-- read C: silent -->
+        <rect class="neu"  x="266" y="176" width="174" height="16"></rect>
+        <rect class="hapB" x="440" y="176" width="82" height="16"></rect>
+        <rect class="flatb" x="592" y="175" width="76" height="18"></rect>
+        <text class="cn" x="630" y="188" text-anchor="middle" font-size="11">silent</text>
+
+        <text class="s" x="60" y="222">A read that starts inside the tract has no left-hand homolog identity to</text>
+        <text class="s" x="60" y="238">compare, so it cannot vote however far right it reaches.</text>
+
+        <rect class="hapA" x="60" y="266" width="14" height="12"></rect>
+        <text class="s" x="82" y="276">homolog A</text>
+        <rect class="hapB" x="176" y="266" width="14" height="12"></rect>
+        <text class="s" x="198" y="276">homolog B</text>
+        <rect class="neu"  x="292" y="266" width="14" height="12"></rect>
+        <text class="s" x="314" y="276">no information</text>
+
+        <line class="edge" x1="700" y1="20" x2="700" y2="300" stroke-dasharray="2 5"></line>
+
+        <text class="rid" x="730" y="26">HOW THE COUNTS RESOLVE</text>
+        <text class="s" x="730" y="48">informative = returns + switches</text>
+
+        <rect class="revb" x="730" y="62" width="286" height="42"></rect>
+        <text class="s"  x="744" y="80">informative = 0</text>
+        <text class="cr" x="744" y="97">GC_UNRESOLVED</text>
+
+        <rect class="callb" x="730" y="112" width="286" height="42"></rect>
+        <text class="s"  x="744" y="130">returns &#8805; 80% of informative</text>
+        <text class="cc" x="744" y="147">NCO_GC</text>
+
+        <rect class="callb" x="730" y="162" width="286" height="42"></rect>
+        <text class="s"  x="744" y="180">switches &#8805; 80% of informative</text>
+        <text class="cc" x="744" y="197">CO_GC</text>
+
+        <rect class="flatb" x="730" y="212" width="286" height="42"></rect>
+        <text class="s"  x="744" y="230">neither side reaches 80%</text>
+        <text class="cn" x="744" y="247">AMBIGUOUS(mixed_tract_reads)</text>
+
+        <text class="s" x="730" y="276">The tract is real either way, so an</text>
+        <text class="s" x="730" y="292">unobserved outcome downgrades the</text>
+        <text class="s" x="730" y="308">call rather than discarding it.</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b>Returns and switches, not the peak label, settle NCO against CO.</b>
+      R10 and R12 ask the same two questions in opposite order, and that order is
+      the rule's own claim under test: R10's gene_conversion peak claims a closed
+      tract, so a return confirms it and a switch overturns it to CO_GC; R12's pair
+      claims a crossover, so a switch confirms it and a return overturns it to NCO_GC.
+      Either way, nothing informative means GC_UNRESOLVED rather than a discarded event.
+    </figcaption>
+  </figure>
+  <p class="src">loh_chain_analysis.R:2500 — annotate_tract_read_support &nbsp;·&nbsp; :2560 — annotate_block_read_support</p>
+</section>
+
+<section>
+  <span class="lab eyebrow">Figure 3</span>
+  <h2>Why priority order is the decision</h2>
+  <p class="prose">
+    The scan is not a left-to-right cursor where whichever rule reaches a peak first
+    keeps it. Every rule proposes everywhere, and a single selector then settles the
+    contests — so the outcome depends on an inspectable objective rather than on the
+    order the chain happened to be walked.
+  </p>
+
+  <figure>
+    <div class="figbox fg">
+      <svg viewBox="0 0 1040 264" role="img" aria-label="Three phases: propose read-only candidates, resolve them by descending rule priority skipping any that reuse claimed evidence, then apply, with rewrites looping back to propose.">
+        <defs>
+          <marker id="a3" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+            <polygon class="ah" points="0,0.5 9,4.5 0,8.5"></polygon>
+          </marker>
+        </defs>
+
+        <rect class="box" x="40" y="40" width="280" height="120"></rect>
+        <text class="rid" x="58" y="64">PHASE 1</text>
+        <text class="h"   x="58" y="86">Propose</text>
+        <text class="s"   x="58" y="108">every rule, at every anchor,</text>
+        <text class="s"   x="58" y="124">read-only. Each match becomes</text>
+        <text class="s"   x="58" y="140">a candidate scored by its</text>
+        <text class="s"   x="58" y="156">position in MOTIF_RULES.</text>
+
+        <line class="edge" x1="320" y1="100" x2="372" y2="100" marker-end="url(#a3)"></line>
+
+        <rect class="box" x="380" y="40" width="280" height="120"></rect>
+        <text class="rid" x="398" y="64">PHASE 2</text>
+        <text class="h"   x="398" y="86">Resolve</text>
+        <text class="s"   x="398" y="108">accept by descending score,</text>
+        <text class="s"   x="398" y="124">skipping any candidate that</text>
+        <text class="s"   x="398" y="140">would reuse a claimed peak</text>
+        <text class="s"   x="398" y="156">position or a claimed F token.</text>
+
+        <line class="edge" x1="660" y1="100" x2="712" y2="100" marker-end="url(#a3)"></line>
+
+        <rect class="box" x="720" y="40" width="280" height="120"></rect>
+        <text class="rid" x="738" y="64">PHASE 3</text>
+        <text class="h"   x="738" y="86">Apply</text>
+        <text class="s"   x="738" y="108">commit the accepted events.</text>
+        <text class="s"   x="738" y="124">A structural rewrite is applied</text>
+        <text class="s"   x="738" y="140">alone, then the chain is</text>
+        <text class="s"   x="738" y="156">re-canonicalised.</text>
+
+        <path class="edge" d="M860,160 V206 H180 V162" marker-end="url(#a3)"></path>
+        <text class="s" x="520" y="228" text-anchor="middle">R06 only &#8212; peel one fragment, then propose the whole chain again</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b>Two candidates conflict when they want the same evidence.</b> A chimeric-read peak
+      backs a single event, and a fixed tract gets a single call — which is why R01 and R10
+      can no longer both claim one terminal F. R11c is the deliberate exception: it claims
+      its tract but leaves the junction peak free, because there the evidence is the reads
+      and the peak may legitimately be the boundary shared with the neighbouring event.
+    </figcaption>
+  </figure>
+  <p class="src">loh_chain_analysis.R:3392 — .generate_candidates &nbsp;·&nbsp; :3418 — .resolve_candidates</p>
+</section>
+
+<section>
+  <h2>The ladder, rule by rule</h2>
+  <p class="prose">
+    Row order is priority order. Everything in the <em>gate</em> column has to hold before
+    a rule will even propose.
+  </p>
+
+  <div class="scroll">
+    <table class="rules">
+      <thead>
+        <tr>
+          <th style="width:34px">#</th>
+          <th style="width:74px">Rule</th>
+          <th style="width:180px">Motif</th>
+          <th>Gate</th>
+          <th style="width:270px">Call</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="k">1</td><td class="k">R06</td><td class="m">F [F&#772;] F</td>
+          <td>fragment shorter than 10% of the combined flanks <em>and</em> shorter than the right flank; carries its own peak, or has too few SNPs to raise one</td>
+          <td class="c"><span class="rv">NCO_GC_in_terminal</span> · <span class="co">CO_GC</span> · <span class="rv">POSSIBLE_GC</span><br>+ merges the flanks, restarts the scan</td></tr>
+
+        <tr><td class="k">2</td><td class="k">R01</td><td class="m">TEL [F]</td>
+          <td>terminal depth ratio below depth_drop</td>
+          <td class="c"><span class="dl">TERMINAL_DELETION</span></td></tr>
+
+        <tr><td class="k">3</td><td class="k">Rd</td><td class="m">H [F] H</td>
+          <td>flank depth ratio below depth_drop, <em>or</em> the tract's own SNPs carry the deletion; no resolved switch peak on the tract</td>
+          <td class="c"><span class="dl">DELETION</span></td></tr>
+
+        <tr><td class="k">4</td><td class="k">R03</td><td class="m">H &#9679;[F]&#9679; F&#772; &#8594; TEL</td>
+          <td>junction peaks on both sides of the inner tract; an opposite-state fixed run continues to the telomere</td>
+          <td class="c"><span class="co">TCO_CAPTURED_TCO</span></td></tr>
+
+        <tr><td class="k">5</td><td class="k">R02</td><td class="m">TEL [F&#9679;] H</td>
+          <td>depth consistent with LOH; a junction peak at the internal boundary (or on the H beyond an unscored gap)</td>
+          <td class="c"><span class="co">CO_TERM</span> · <span class="rv">CO_TERM_PROBABLE</span> if the edge is undefined · <span class="nu">AMBIGUOUS(low_coverage)</span></td></tr>
+
+        <tr><td class="k">6</td><td class="k">R02g</td><td class="m">H [F&#9679;] {G} [F] … TEL</td>
+          <td>binary peak on the proximal junction; two or more fixed tokens separated only by gaps, reaching the telomere</td>
+          <td class="c"><span class="co">CO_TERM</span> when one · <span class="co">CO_TERM_GAPPED</span> with n_fused &gt; 1</td></tr>
+
+        <tr><td class="k">7</td><td class="k">R02c</td><td class="m">TEL [H] [F&#9679;]</td>
+          <td>the interposed HET is a thin subtelomeric artifact — F within tel_tol_bp, or the HET is both high-depth and narrow; no proximal peak, binary peak distally</td>
+          <td class="c"><span class="rv">CO_TERM_PROBABLE</span></td></tr>
+
+        <tr><td class="k">8</td><td class="k">R02d</td><td class="m">H {G &#8805; 10 kb} [F] TEL</td>
+          <td>peakless, full depth, reaching exactly one chromosome end, with a SNP desert wide enough to hide the junction</td>
+          <td class="c"><span class="rv">CO_TERM_PROBABLE</span></td></tr>
+
+        <tr><td class="k">9</td><td class="k">R11d</td><td class="m">H [F][F]… H</td>
+          <td>two or more fixed tracts with no phase-callable HET between them; flank-to-flank read counts present</td>
+          <td class="c"><span class="co">NCO_GC</span> · <span class="co">CO_GC</span> · <span class="rv">GC_UNRESOLVED</span> · <span class="nu">AMBIGUOUS(mixed_block_reads)</span></td></tr>
+
+        <tr><td class="k">10</td><td class="k">R12</td><td class="m">H &#9679;[F]&#9679; H</td>
+          <td>a peak-pair record typed <em>crossover</em> whose two endpoints straddle this tract's junctions</td>
+          <td class="c">tract reads decide · else <span class="co">CO_GC</span> at n &#8805; 2 · <span class="nu">AMBIGUOUS(low_coverage)</span></td></tr>
+
+        <tr><td class="k">11</td><td class="k">R10</td><td class="m">[F&#9679;]</td>
+          <td>a peak bound to the tract types itself as gene_conversion, crossover or internal_crossover</td>
+          <td class="c">GC peak: tract reads decide · CO peak: <span class="co">CO_GC</span></td></tr>
+
+        <tr><td class="k">12</td><td class="k">R11</td><td class="m">H &#9679;[F]&#9679; H</td>
+          <td>both junction peaks are binary; the pair record supplies the complementarity</td>
+          <td class="c"><span class="co">CO_GC</span> · <span class="co">NCO_GC</span> · <span class="rv">GC_UNRESOLVED</span> when no pair record exists</td></tr>
+
+        <tr><td class="k">13</td><td class="k">R11b</td><td class="m">H &#9679;[F] H</td>
+          <td>a binary peak on exactly one junction and no peak at all opposite — a weak peak opposite does not qualify</td>
+          <td class="c"><span class="rv">GC_ONE_SIDED</span></td></tr>
+
+        <tr><td class="k">14</td><td class="k">R11c</td><td class="m">[F]</td>
+          <td>no peak the rules above could use, but the tract's own reads cross both junctions, and enough of what crossed is informative</td>
+          <td class="c"><span class="co">NCO_GC</span> · <span class="co">CO_GC</span> · <span class="nu">AMBIGUOUS(mixed_tract_reads)</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="notes">
+    <div>
+      <h3>R11 and R12 share a motif</h3>
+      <p>Both are an interstitial tract with a peak on each junction. What separates them is
+      what the peaks say: R12 needs a pair record typed <em>crossover</em> that genuinely
+      straddles this tract, R11 takes two peaks that only classify as binary. R12 runs first
+      so a real crossover pair is never re-read as an unresolved binary pair.</p>
+    </div>
+    <div>
+      <h3>Why R11d comes before the peak rules</h3>
+      <p>The peak rules classify a tract from junction peaks whose zones are bounded by
+      neighbouring peaks, not by heterozygosity. On a run of tracts with no callable HET
+      between them, those zones fall inside fixed sequence — and the rule reads the LOH map
+      back to itself as if it were phase.</p>
+    </div>
+    <div>
+      <h3>What a deletion has to survive</h3>
+      <p>Depth alone is a knife-edge proxy: 0.601 against a 0.60 threshold once cost a real
+      1.6 kb deletion its call. Read-level evidence is the second, independent trigger, and
+      the count reported as n_support is the reads that register the deletion — reported only
+      when that trigger fired, since a long deletion removes its reads entirely.</p>
+    </div>
+    <div>
+      <h3>Disabled rules</h3>
+      <p><span class="mono">R04</span> (HET-bounded) was replaced by R10 and R11.
+      <span class="mono">R02b</span> (peakless terminal, HET abutting F) is off because a
+      missing peak there is not positive evidence of anything — R02d handles the case where
+      a wide gap explains the absence. <span class="mono">R07</span>–<span class="mono">R09</span>
+      remain disabled pending redesign.</p>
+    </div>
+  </div>
+  <p class="src">loh_chain_analysis.R:1225–3270 — rule builders</p>
+</section>
+
+<section>
+  <h2>The numbers behind the gates</h2>
+  <p class="prose">
+    Every threshold in Figure 1, as <code>default_chain_params()</code> ships them.
+  </p>
+
+  <div class="scroll">
+    <table class="params">
+      <thead>
+        <tr><th style="width:230px">Parameter</th><th style="width:96px">Default</th><th>Decides</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="k">depth_drop</td><td class="v">0.60</td><td>deletion against copy-neutral LOH (R01, Rd, and the depth check in every terminal rule)</td></tr>
+        <tr><td class="k">tel_tol_bp</td><td class="v">5,000</td><td>how close to the last SNP a tract must reach to count as terminal</td></tr>
+        <tr><td class="k">merge_gap_bp</td><td class="v">5,000</td><td>gap that canonicalise() will merge across; also the tolerance for binding a peak-pair to a tract</td></tr>
+        <tr><td class="k">peak_pad_bp</td><td class="v">200</td><td>how near a boundary a peak's SNP must sit to be that junction's peak</td></tr>
+        <tr><td class="k">min_span</td><td class="v">3</td><td>spanning reads below which a peak-based call becomes AMBIGUOUS(low_coverage)</td></tr>
+        <tr><td class="k">homog_frac</td><td class="v">0.80</td><td>share of informative reads that must agree before NCO or CO is called (Fig. 2)</td></tr>
+        <tr><td class="k">tract_read_min_frac</td><td class="v">0.10</td><td>share of spanning reads that must be informative before R11c will call at all</td></tr>
+        <tr><td class="k">tract_read_high_min</td><td class="v">4</td><td>returning or switching reads needed for high confidence on read-backed calls</td></tr>
+        <tr><td class="k">tract_flank_bp</td><td class="v">10,000</td><td>how far either side of a tract the flanking haplotype state is read</td></tr>
+        <tr><td class="k">small_frac</td><td class="v">0.10</td><td>fragment size, relative to its combined flanks, that makes R06 fire</td></tr>
+        <tr><td class="k">center_tol</td><td class="v">0.25</td><td>how near a token's midpoint a peak must sit to be "roughly centered"</td></tr>
+        <tr><td class="k">min_snps_for_peak</td><td class="v">2</td><td>below this a tract is too short to raise a peak — POSSIBLE_GC rather than uncategorised</td></tr>
+        <tr><td class="k">provisional_tco_min_gap_bp</td><td class="v">10,000</td><td>SNP desert wide enough for R02d to treat a missing junction peak as explained</td></tr>
+        <tr><td class="k">subtel_misalign_depth</td><td class="v">1.4</td><td rowspan="2">both must hold for R02c to treat a telomere-adjacent HET as a misalignment pileup rather than a real diploid arm</td></tr>
+        <tr><td class="k">subtel_misalign_max_bp</td><td class="v">25,000</td></tr>
+        <tr><td class="k">del_snp_min</td><td class="v">5</td><td rowspan="3">Rd's read-level trigger: over-cutoff SNPs inside the tract, their mean deletion fraction, and the share of deletion calls coming from consistently deleted reads</td></tr>
+        <tr><td class="k">del_frac_min</td><td class="v">0.20</td></tr>
+        <tr><td class="k">del_coherence_min</td><td class="v">0.50</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">loh_chain_analysis.R:30 — default_chain_params</p>
+</section>
+
+<section>
+  <h2>What never becomes an event</h2>
+  <div class="notes">
+    <div>
+      <h3>Unclaimed LOH tracts</h3>
+      <p>A fixed tract no rule claimed has no positive evidence for any mechanism, so it is
+      not promoted into the events table at all. It appears once, in <em>Other events</em>,
+      annotated with why — no attached peak, or too few SNPs to raise one.</p>
+    </div>
+    <div>
+      <h3>Unclaimed peaks</h3>
+      <p>A peak that never attached to a token is run through the same classifier the rules
+      use. If it resolves it becomes a <span class="mono">_subres</span> event, scored high at
+      or above min_span reads. If it does not — binary singleton, independent reads, no edge
+      type — it stays in Other events with the reason attached.</p>
+    </div>
+    <div>
+      <h3>Nothing is reported twice</h3>
+      <p>An interval is either a called event or an unclaimed one, never both. Fused peaks
+      are collapsed to one row per fusion group first, so a gene-conversion pair does not
+      surface as two identical calls differing only in read count.</p>
+    </div>
+    <div>
+      <h3>Ambiguity is not promoted</h3>
+      <p>An AMBIGUOUS call keeps its reason in the notes and always scores review, however
+      many reads sit behind it. Plenty of evidence for an unresolved question is still an
+      unresolved question.</p>
+    </div>
+  </div>
+  <p class="src">loh_chain_analysis.R:3511 — reconcile &nbsp;·&nbsp; :3729 — build_event_table</p>
+</section>
+
+</div>
+
+</body>
+</html>
