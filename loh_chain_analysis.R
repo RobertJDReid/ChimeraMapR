@@ -2555,6 +2555,22 @@ annotate_tract_read_support <- function(chain, full_read_loh, params) {
     toks[[i]]$n_tract_spanning <- cnt$n_spanning
     toks[[i]]$n_tract_return   <- cnt$n_return
     toks[[i]]$n_tract_switch   <- cnt$n_switch
+
+    # Which reads produced those counts, and the flanking zones they were
+    # judged in. A tract shorter than min_run raises no chimera peak, so an
+    # event called from these reads has no entry in transition_pos and the
+    # app's region plot cannot recover its evidence any other way. Keeping the
+    # zones alongside the ids lets the plot show WHERE each read was read from,
+    # which is what exposes a flank that was never phase-informative.
+    toks[[i]]$tract_read_ids <- list(
+      switch        = cnt$switch_reads,
+      return        = cnt$return_reads,
+      uninformative = cnt$uninformative_reads
+    )
+    toks[[i]]$tract_zone_L <- c(as.integer(max(L$start, tok$start - flank_bp)),
+                                as.integer(min(L$end,   tok$start - 1L)))
+    toks[[i]]$tract_zone_R <- c(as.integer(max(R$start, tok$end + 1L)),
+                                as.integer(min(R$end,   tok$end + flank_bp)))
   }
 
   chain$tokens <- toks
@@ -2628,6 +2644,15 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
       toks[[ti]]$n_block_spanning <- cnt$n_spanning
       toks[[ti]]$n_block_return   <- cnt$n_return
       toks[[ti]]$n_block_switch   <- cnt$n_switch
+      toks[[ti]]$block_read_ids   <- list(
+        switch        = cnt$switch_reads,
+        return        = cnt$return_reads,
+        uninformative = cnt$uninformative_reads
+      )
+      toks[[ti]]$block_zone_L <- c(as.integer(max(L$start, L$end - flank_bp + 1L)),
+                                   as.integer(L$end))
+      toks[[ti]]$block_zone_R <- c(as.integer(R$start),
+                                   as.integer(min(R$end, R$start + flank_bp - 1L)))
     }
   }
 

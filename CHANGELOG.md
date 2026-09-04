@@ -4,6 +4,54 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.19] - 2026-09-04
+
+### An LOH-channel call can now be inspected read by read
+
+- A tract shorter than `min_run` raises no chimeric read by construction, so
+  the Selected Region view — which drew only chimeric reads — had nothing to
+  show for it. The Chromosome View brush was the only way in, and it needs a
+  coverage peak to aim at, which these calls do not have. Every event R11c or
+  R11d called from tract-spanning reads was therefore uninspectable in the app.
+- The evidence was already computed and discarded. `count_tract_junction_reads()`
+  and `count_block_junction_reads()` returned only counts; they now also return
+  `switch_reads` / `return_reads` / `uninformative_reads`, carried through the
+  token by the two annotators along with the flank zones the homolog identities
+  were voted in, and read back off the event by `event_evidence_reads()`.
+- The counts themselves are unchanged. Event tables are byte-identical on
+  SRR_5006 (38 events), SYNv3 clean and degraded at `min_run_snps` 1 and 3, and
+  RAD5_02/03/09.
+
+### Selected Region: two entry points, and reads grouped by their role
+
+- Each chromosome tab now offers **Plot Chimeric Reads** (the previous
+  behaviour) and **Plot All Reads**. The second is the only way to see a
+  sub-`min_run` call; asking for the first in a window with no chimeric read
+  says so and points at the other button.
+- Reads are faceted by role — switch (CO), return (NCO), spanning but
+  uninformative, chimeric, background — and the flanking zones are shaded.
+  Showing the evidence reads alone would hide the failure mode that matters:
+  on SRR_5006 chrV 441812–444855 a `CO_GC` rests on one switching read, and
+  only the backdrop reveals that 31 of the 32 callable reads in its right flank
+  vote ALT, so "the flanks disagree" was guaranteed and measured nothing.
+- Reads are ordered by ALT fraction, then start, then length
+  (`order_reads_by_composition()`), which separates the pile into homolog
+  bands. `order_reads_by_junction()` is kept for the peak views, where every
+  read is chimeric by construction and a junction anchor means something.
+- Facet heights follow membership with a floor of 8 rows, imposed by an
+  invisible `geom_blank` that sets the panel's y range — without it
+  `space = "free_y"` gives a one-read evidence group a sliver of the panel,
+  which inverts the emphasis. A rule separates adjacent groups.
+- Membership and the "chimeric" label are both judged over the display window,
+  not the brush, so a read that switches inside the padding is not labelled as
+  background against the picture. Only the background group is thinned, at 250
+  reads, and the subtitle says when that fired.
+- An **Inspect event reads** control on the Events tab opens the view directly
+  on any called event, which is the route for calls with no peak to brush.
+- The `.rds` download keeps its column order and gains `read_class` and
+  `read_row`; `read_id`'s factor levels are re-set to the drawn row order so
+  `read_order = "as-is"` still reproduces the plot.
+
 ## [0.8.18] - 2026-09-04
 
 ### `min_run_snps` is now wired, as the LOH channel's own floor

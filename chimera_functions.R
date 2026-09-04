@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.18"
+APP_VERSION <- "0.8.19"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -1362,6 +1362,99 @@ order_reads_by_junction <- function(dt) {
 }
 
 # -----------------------------------------------------------------------------
+#  order_reads_by_composition()
+#
+#  Row ordering for the whole-pile region view, where order_reads_by_junction()
+#  is the wrong metric. That function anchors on where a read SWITCHES allele,
+#  which is the right thing when every plotted read is chimeric by construction
+#  (the peak views) but says nothing about the great majority of reads in a
+#  window, which never switch: they all collapse into the junction-less bucket
+#  and stack in arbitrary order, so the pile reads as noise.
+#
+#  Sorting on composition instead -- ALT fraction over the plotted window, then
+#  start position, then extent (longest first) -- groups the two homologs into
+#  contiguous bands with the chimeric reads between them. A flank zone in which
+#  every read carries the same allele then shows up as a solid block rather
+#  than as speckle distributed down the panel, which is the thing the view
+#  exists to make visible.
+#
+#  Returns a character vector of read_ids in plot order, suitable for
+#  factor(read_id, levels = .).
+# -----------------------------------------------------------------------------
+order_reads_by_composition <- function(dt) {
+  o <- dt[, {
+    ir <- IS_REF[!is.na(IS_REF)]
+    list(alt_frac = if (length(ir) > 0L) mean(!ir) else NA_real_,
+         start    = min(pos, na.rm = TRUE),
+         len      = max(pos, na.rm = TRUE) - min(pos, na.rm = TRUE))
+  }, by = read_id]
+  # na.last keeps all-NA reads (no callable allele anywhere in the window) at
+  # the end rather than sorting them to one homolog's band.
+  setorder(o, alt_frac, start, -len, na.last = TRUE)
+  as.character(o$read_id)
+}
+
+# -----------------------------------------------------------------------------
+#  event_evidence_reads()
+#
+#  Recovers the reads that a chain event was actually called from, together
+#  with the flanking zones their homolog identity was voted in.
+#
+#  Needed because the two detection channels leave different traces. A peak
+#  event's reads are recoverable from transition_pos: the peak IS a pile of
+#  read junctions. A tract event called by R11c/R11d has no peak by
+#  construction -- the tract carries fewer than min_run SNPs in a row, or the
+#  reads that cross it failed the base-quality filter that the LOH read set
+#  deliberately omits -- so nothing about which reads spoke survives into
+#  transition_pos or rt_df. count_tract_junction_reads() knows; this pulls
+#  that back off the tokens .make_event() carried onto the event.
+#
+#  Precedence when a read appears under more than one token of a multi-tract
+#  event: switch > return > uninformative. A read that switched homolog
+#  anywhere in the event is a switch read for the event.
+#
+#  Returns list(switch, return, uninformative, zones) where zones is a
+#  data.table(side, start, end) of the flank intervals used.
+# -----------------------------------------------------------------------------
+event_evidence_reads <- function(event) {
+  out <- list(switch = character(0), return = character(0),
+              uninformative = character(0),
+              zones = data.table(side = character(0),
+                                 start = integer(0), end = integer(0)))
+  if (is.null(event) || is.null(event$tokens)) return(out)
+
+  zl <- list()
+  for (tk in event$tokens) {
+    if (is.null(tk) || !is.list(tk)) next
+    for (pfx in c("tract", "block")) {
+      ids <- tk[[paste0(pfx, "_read_ids")]]
+      if (!is.null(ids)) {
+        # No %||% here: chimera_functions.R is sourced standalone by scripts
+        # that do not define it, and base R only gained it in 4.4.
+        .g <- function(x) if (is.null(x)) character(0) else as.character(x)
+        out$switch        <- c(out$switch,        .g(ids$switch))
+        out$return        <- c(out$return,        .g(ids$return))
+        out$uninformative <- c(out$uninformative, .g(ids$uninformative))
+      }
+      for (side in c("L", "R")) {
+        z <- tk[[paste0(pfx, "_zone_", side)]]
+        if (!is.null(z) && length(z) == 2L && !anyNA(z))
+          zl[[length(zl) + 1L]] <- data.table(
+            side  = if (side == "L") "left" else "right",
+            start = as.integer(z[1]), end = as.integer(z[2]))
+      }
+    }
+  }
+
+  out$switch        <- unique(out$switch)
+  out$return        <- unique(setdiff(out$return, out$switch))
+  out$uninformative <- unique(setdiff(out$uninformative,
+                                      c(out$switch, out$return)))
+  if (length(zl) > 0) out$zones <- unique(rbindlist(zl))
+  out
+}
+
+# -----------------------------------------------------------------------------
 #  Overview plot builder
 #
 #  Expressed as a plain function that returns a single ggplot object.
@@ -2248,8 +2341,16 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
                                        min_snps = 2L,
                                        match_frac = 0.80,
                                        del_reads = character(0)) {
+  # The *_reads vectors name the reads behind each count. They exist so the
+  # app can plot the evidence for a call that raised no chimera peak: such a
+  # call is invisible in the peak channel, so "which reads said so" cannot be
+  # recovered downstream from rt_df. Carried through the token onto the event
+  # (see annotate_tract_read_support) and consumed by build_region_plot().
   empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
-                n_uninformative = 0L)
+                n_uninformative = 0L,
+                switch_reads        = character(0),
+                return_reads        = character(0),
+                uninformative_reads = character(0))
   if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
   if (anyNA(c(tract_start, tract_end, left_start, left_end,
               right_start, right_end)))                    return(empty)
@@ -2315,11 +2416,16 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
                span$n_in_tract >= match_frac * span$n_in &
                !(span$read_id %in% del_reads)
 
+  is_uninf <- !is_switch & !is_return
+
   list(
     n_spanning      = as.integer(nrow(span)),
     n_return        = as.integer(sum(is_return)),
     n_switch        = as.integer(sum(is_switch)),
-    n_uninformative = as.integer(sum(!is_switch & !is_return))
+    n_uninformative = as.integer(sum(is_uninf)),
+    switch_reads        = as.character(span$read_id[is_switch]),
+    return_reads        = as.character(span$read_id[is_return]),
+    uninformative_reads = as.character(span$read_id[is_uninf])
   )
 }
 
@@ -2402,7 +2508,10 @@ count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
                                        match_frac = 0.80,
                                        del_reads = character(0)) {
   empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
-                n_uninformative = 0L)
+                n_uninformative = 0L,
+                switch_reads        = character(0),
+                return_reads        = character(0),
+                uninformative_reads = character(0))
   if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
   if (length(tracts) == 0)                                 return(empty)
   if (anyNA(c(left_start, left_end, right_start, right_end))) return(empty)
@@ -2444,11 +2553,16 @@ count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
                span$n_in_block >= match_frac * span$n_in &
                !(span$read_id %in% del_reads)
 
+  is_uninf <- !is_switch & !is_return
+
   list(
     n_spanning      = as.integer(nrow(span)),
     n_return        = as.integer(sum(is_return)),
     n_switch        = as.integer(sum(is_switch)),
-    n_uninformative = as.integer(sum(!is_switch & !is_return))
+    n_uninformative = as.integer(sum(is_uninf)),
+    switch_reads        = as.character(span$read_id[is_switch]),
+    return_reads        = as.character(span$read_id[is_return]),
+    uninformative_reads = as.character(span$read_id[is_uninf])
   )
 }
 

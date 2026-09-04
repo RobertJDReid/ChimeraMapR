@@ -539,7 +539,7 @@ ui <- fluidPage(
 
         tabPanel("Chromosome Plots",
                  h4("Per-Chromosome Coverage Plots"),
-                 helpText("Select a chromosome tab, brush an x region, then click 'Plot Selected Region' to view chimeric reads in that interval."),
+                 helpText("Select a chromosome tab, brush an x region, then click 'Plot Chimeric Reads' to view only the reads that switch allele there, or 'Plot All Reads' to see every read in the window."),
                  br(),
                  uiOutput("chr_plots_tabs")
         ),
@@ -628,6 +628,19 @@ ui <- fluidPage(
                  ),
                  br(),
                  tableOutput("event_table_output"),
+                 br(),
+                 # Jump straight to an event's reads. The Chromosome View brush
+                 # is the only other way into the region plot, and it needs a
+                 # coverage peak to aim at -- which an LOH-channel event does
+                 # not have. Without this the events that most need inspecting
+                 # are the ones with no landmark to brush.
+                 fluidRow(
+                   column(7, selectInput("jump_event", "Inspect event reads:",
+                                         choices = character(0), width = "100%")),
+                   column(3, br(), actionButton("jump_to_event", "View Reads",
+                                                class = "btn-primary"))
+                 ),
+                 helpText("Opens the Selected Region tab on that event, with the reads that produced the call grouped and the flanking zones its homolog identities were voted in shaded."),
                  br(),
                  fluidRow(
                    column(3, downloadButton("download_event_table",
@@ -1721,6 +1734,7 @@ server <- function(input, output, session) {
       plot_id  <- paste0("chr_cov_plot_", chr_name)
       brush_id <- paste0("chr_cov_brush_", chr_name)
       btn_id   <- paste0("chr_plot_btn_", chr_name)
+      all_id   <- paste0("chr_plot_all_btn_", chr_name)
       txt_id   <- paste0("chr_region_text_", chr_name)
       png_id   <- paste0("dl_chr_png_", chr_name)
       rds_id   <- paste0("dl_chr_rds_", chr_name)
@@ -1739,9 +1753,14 @@ server <- function(input, output, session) {
           column(4, downloadButton(rds_id, "Download Plot Data (.rds)", class = "btn-sm btn-default"))
         ),
         br(),
+        # Two entry points into the same view. "Chimeric Reads" is the
+        # historical behaviour and stays the default; "All Reads" is the only
+        # way to see an LOH-channel call, whose tract is shorter than min_run
+        # and so raises no chimeric read at all.
         fluidRow(
-          column(3, actionButton(btn_id, "Plot Selected Region", class = "btn-primary")),
-          column(9, verbatimTextOutput(txt_id))
+          column(3, actionButton(btn_id, "Plot Chimeric Reads", class = "btn-primary")),
+          column(3, actionButton(all_id, "Plot All Reads", class = "btn-default")),
+          column(6, verbatimTextOutput(txt_id))
         ),
         br()
       )
@@ -1793,6 +1812,7 @@ server <- function(input, output, session) {
       plot_id  <- paste0("chr_cov_plot_", chr_c)
       brush_id <- paste0("chr_cov_brush_", chr_c)
       btn_id   <- paste0("chr_plot_btn_",  chr_c)
+      all_id   <- paste0("chr_plot_all_btn_", chr_c)
       txt_id   <- paste0("chr_region_text_", chr_c)
       png_id   <- paste0("dl_chr_png_", chr_c)
       rds_id   <- paste0("dl_chr_rds_", chr_c)
@@ -1801,6 +1821,7 @@ server <- function(input, output, session) {
         .plot_id       <- plot_id
         .brush_id      <- brush_id
         .btn_id        <- btn_id
+        .all_id        <- all_id
         .txt_id        <- txt_id
         .png_id        <- png_id
         .rds_id        <- rds_id
@@ -2076,12 +2097,18 @@ server <- function(input, output, session) {
           )
         })
 
-        observeEvent(input[[.btn_id]], {
+        .plot_region <- function(mode) {
           reg <- results$selected_regions[[.chr]]
           req(!is.null(reg))
+          reg$mode <- mode
           results$selected_region <- reg
           rv_trigger_region(isolate(rv_trigger_region()) + 1L)
-        }, ignoreNULL = TRUE)
+        }
+
+        observeEvent(input[[.btn_id]], .plot_region("chimeric"),
+                     ignoreNULL = TRUE)
+        observeEvent(input[[.all_id]], .plot_region("all"),
+                     ignoreNULL = TRUE)
       })
     })
   })
@@ -2151,58 +2178,211 @@ server <- function(input, output, session) {
   })
 
   # ── Shared helper: build and display the selected-region read plot ───────────
+  #
+  # The read set is EVERY read in the display window (full_read_loh), not just
+  # the chimeric ones. Two separate reasons the chimeric-only set was the wrong
+  # unit of display:
+  #
+  #   * An event called from the LOH channel alone (R11c / R11d) raises no peak
+  #     BY CONSTRUCTION -- its tract carries fewer than min_run SNPs in a row,
+  #     or its reads failed the base-quality filter that the LOH read set
+  #     deliberately omits (chimera_functions.R: full_read vs full_read_loh).
+  #     transition_pos therefore holds nothing for it and this view came up
+  #     empty, so the calls that most need inspecting were the ones that could
+  #     not be inspected at all.
+  #   * Plotting only the reads that SUPPORT a call hides the reads that
+  #     contradict it. A tract call rests on the claim that its flanking zones
+  #     are phase-informative; that claim is only checkable against the whole
+  #     pile, where a flank in which nearly every read votes the same way is
+  #     obvious at a glance and invisible among the supporting reads alone.
+  #
+  # Reads are grouped into facet ROWS by their role in the call instead of one
+  # facet each. facet_grid(space = "free_y") sizes each group to its membership,
+  # so the panel carries the 70-200 reads a real window holds (measured on W303
+  # SRR_5006: 68 distinct reads in 10 kb, 103 in 20 kb; RAD5 flank zones reach
+  # ~180) rather than collapsing into unreadable 4 px per-read strips.
+  #
+  # reg$evidence, when present, is event_evidence_reads() output attached by the
+  # jump-to-event control. A plain brush selection leaves it NULL and the
+  # chimeric reads become the highlighted group, which preserves the previous
+  # behaviour of this view as the special case it always was.
   build_region_plot <- function() {
-    req(results$selected_region, results$rt_df, results$transition_pos)
+    req(results$selected_region, results$full_read_loh)
 
     reg <- results$selected_region
-
-    touching_ids <- results$transition_pos[
-      as.character(chrom) == reg$chrom & pos >= reg$start & pos <= reg$end,
-      unique(read_id)
-    ]
-
-    if (length(touching_ids) == 0) {
-      showNotification("No chimeric reads overlap the selected region.", type = "warning")
-      return(NULL)
-    }
+    ev  <- reg$evidence
+    # "chimeric" reproduces the historical view: only reads that actually
+    # switch allele in the window (plus, on an event jump, the reads the call
+    # was made from). "all" adds the rest of the window as a backdrop, which
+    # is what an LOH-channel call needs -- it has no chimeric read to show.
+    mode <- if (is.null(reg$mode)) "all" else reg$mode
 
     pad_bp <- 5000L
 
     chr_positions <- results$snp_coverage[as.character(chrom) == reg$chrom, pos]
+    if (length(chr_positions) == 0) {
+      showNotification("No SNP positions on that chromosome.", type = "warning")
+      return(NULL)
+    }
     chr_min <- min(chr_positions, na.rm = TRUE)
     chr_max <- max(chr_positions, na.rm = TRUE)
 
-    plot_start <- max(chr_min, reg$start - pad_bp)
-    plot_end   <- min(chr_max, reg$end + pad_bp)
+    # Widen the window to contain the flanking zones the call was voted in --
+    # they can sit up to tract_flank_bp outside the event and are the point of
+    # the plot when the question is whether those zones were informative.
+    win_lo <- reg$start - pad_bp
+    win_hi <- reg$end   + pad_bp
+    if (!is.null(ev) && nrow(ev$zones) > 0) {
+      win_lo <- min(win_lo, min(ev$zones$start, na.rm = TRUE))
+      win_hi <- max(win_hi, max(ev$zones$end,   na.rm = TRUE))
+    }
+    plot_start <- max(chr_min, win_lo)
+    plot_end   <- min(chr_max, win_hi)
 
-    plot_df <- results$rt_df[
+    plot_df <- results$full_read_loh[
       as.character(chrom) == reg$chrom &
-        read_id %in% touching_ids &
         pos >= plot_start &
         pos <= plot_end
     ]
-
     if (nrow(plot_df) == 0) {
-      showNotification("No plotted points available in the padded selected region.", type = "warning")
+      showNotification("No reads overlap the selected region.", type = "warning")
       return(NULL)
     }
+    plot_df <- copy(plot_df)
 
-    # Facet rows in junction order so the crossovers line up as a staircase
-    # rather than scattering alphabetically. Applied BEFORE the copy below so
-    # the exported .rds carries the same row order the app displayed, keeping
-    # replot_selection_view()'s read_order = "as-is" a faithful reproduction.
-    lev <- order_reads_by_junction(plot_df)
-    plot_df[, read_id := factor(read_id, levels = lev)]
-    setorder(plot_df, read_id, pos)
+    # ── Role of each read in the call ─────────────────────────────────────────
+    # Judged over the DISPLAY window, not the selection. The old code used the
+    # selection because this set decided which reads existed at all; as a
+    # grouping label it has to describe the read as drawn, and a read that
+    # switches allele 2 kb outside the brush is still visibly chimeric on the
+    # plot. Scoring it on the selection put it in "Other reads in window",
+    # which is a claim about the read that the picture contradicts.
+    chim_ids <- if (!is.null(results$transition_pos))
+      results$transition_pos[
+        as.character(chrom) == reg$chrom & pos >= plot_start & pos <= plot_end,
+        unique(as.character(read_id))
+      ] else character(0)
+
+    CLASS_LEVELS <- c("Switch (CO)", "Return (NCO)", "Spans, uninformative",
+                      "Chimeric read", "Other reads in window")
+    # Display-only, via a labeller: rotated strip text is bounded by the PANEL
+    # HEIGHT, and an evidence group holding one read gets the MIN_ROWS floor --
+    # about ten characters' worth. Wrapping trades that for strip width, which
+    # is the cheap direction. The data column keeps the full names; the .rds
+    # contract and every comparison below are on CLASS_LEVELS, not these.
+    CLASS_LABELS <- stats::setNames(
+      c("Switch\n(CO)", "Return\n(NCO)", "Spans,\nuninform.",
+        "Chimeric\nread", "Other reads\nin window"),
+      CLASS_LEVELS)
+    sw <- if (is.null(ev)) character(0) else ev$switch
+    rt <- if (is.null(ev)) character(0) else ev$return
+    un <- if (is.null(ev)) character(0) else ev$uninformative
+
+    plot_df[, read_id := as.character(read_id)]
+    plot_df[, read_class := fcase(
+      read_id %in% sw,       CLASS_LEVELS[1],
+      read_id %in% rt,       CLASS_LEVELS[2],
+      read_id %in% un,       CLASS_LEVELS[3],
+      read_id %in% chim_ids, CLASS_LEVELS[4],
+      default =              CLASS_LEVELS[5]
+    )]
+
+    if (mode == "chimeric") {
+      plot_df <- plot_df[read_class != CLASS_LEVELS[5]]
+      if (nrow(plot_df) == 0) {
+        showNotification(
+          paste0("No chimeric reads in that window. Use 'Plot All Reads' to ",
+                 "see the reads a sub-min_run call rests on."),
+          type = "warning", duration = 10)
+        return(NULL)
+      }
+    }
+
+    # Composition order first, so any subsampling below preserves the banding.
+    lev <- order_reads_by_composition(plot_df)
+
+    # ── Background cap ────────────────────────────────────────────────────────
+    # Evidence and chimeric reads are never dropped; only the "other reads"
+    # backdrop is thinned, evenly along junction order so the staircase keeps
+    # its shape. The cap exists for deep samples, not the ~100-read windows
+    # measured above, and the caption says when it fired.
+    max_bg <- 250L
+    bg_ids <- lev[lev %in% plot_df[read_class == CLASS_LEVELS[5],
+                                   unique(read_id)]]
+    n_bg_dropped <- 0L
+    if (length(bg_ids) > max_bg) {
+      keep_bg      <- bg_ids[round(seq(1, length(bg_ids), length.out = max_bg))]
+      n_bg_dropped <- length(bg_ids) - length(unique(keep_bg))
+      plot_df      <- plot_df[read_class != CLASS_LEVELS[5] |
+                                read_id %in% keep_bg]
+      lev          <- lev[lev %in% unique(plot_df$read_id)]
+    }
+
+    plot_df[, read_id    := factor(read_id, levels = lev)]
+    plot_df[, read_class := droplevels(factor(read_class, levels = CLASS_LEVELS))]
+    setorder(plot_df, read_class, read_id, pos)
+
+    # y is a numeric row index WITHIN the class, not the read_id factor, so the
+    # facet heights below can be driven by a range we control. read_id stays in
+    # the table: it is part of the .rds contract replot_selection_view.R reads.
+    rows <- unique(plot_df[, .(read_class, read_id)])
+    rows[, read_row := seq_len(.N), by = read_class]
+    plot_df <- merge(plot_df, rows, by = c("read_class", "read_id"))
+    setorder(plot_df, read_class, read_row, pos)
+
+    # Re-level read_id to the FINAL row order and restore the original column
+    # order ahead of the two new columns. The .rds this table is downloaded as
+    # is consumed by replot_selection_view.R with read_order = "as-is", which
+    # takes the row order and the factor levels as the plot order -- grouping
+    # by class changed both, so both are made to agree with what was drawn.
+    plot_df[, read_id := factor(as.character(read_id),
+                                levels = unique(as.character(read_id)))]
+    setcolorder(plot_df, c("chrom", "pos", "read_id", "IS_REF", "ALLELE",
+                           "read_class", "read_row"))
     results$selected_region_data <- copy(plot_df)
 
     x_lims <- c(plot_start, plot_end) / 1000
 
+    # One backbone line per read marks its extent, so a read that simply does
+    # not reach a junction is distinguishable from one that reaches it and
+    # disagrees -- the difference between "no evidence" and "counter-evidence".
+    backbone <- plot_df[, .(x = min(pos) / 1000, xend = max(pos) / 1000),
+                        by = .(read_class, read_row)]
+
+    # ── Facet heights: proportional, with a floor ─────────────────────────────
+    # space = "free_y" alone scales each group to its membership, which is
+    # backwards here: the evidence groups are usually the smallest (a call can
+    # rest on a single read) and are the subject of the plot, while the
+    # backdrop is large and only has to show a pattern. Equal heights instead
+    # would waste most of the panel on groups holding one read. So: heights
+    # follow membership, but no group is sized below MIN_ROWS. An invisible
+    # geom_blank sets each panel's y range, which is what space = "free_y"
+    # measures -- the floor never adds a drawn row.
+    MIN_ROWS <- 8L
+    # Headroom above row 1 and below row N so the group divider below has room
+    # to sit inside the panel rather than being half-clipped at its edge.
+    floors <- rows[, .(read_row = c(0.2, max(.N, MIN_ROWS) + 0.8)), by = read_class]
+    floors[, pos_kb := x_lims[1]]
+
+    # A rule at the top of every group EXCEPT the first: panel spacing alone
+    # does not separate a dense backdrop from the reads above it, and the
+    # boundary between "chimeric" and "other" is the one the eye needs.
+    dividers <- data.table(
+      read_class = factor(levels(plot_df$read_class)[-1],
+                          levels = levels(plot_df$read_class)),
+      y          = 0.5
+    )
+
+    zone_rects <- if (!is.null(ev) && nrow(ev$zones) > 0)
+      ev$zones[, .(xmin = pmax(start, plot_start) / 1000,
+                   xmax = pmin(end,   plot_end)   / 1000)][xmax > xmin]
+    else NULL
+
     # ── LOH strip (bottom band) ────────────────────────────────────────────────
     # Mirrors the fixed-haplotype LOH band on the Overview plot.  Because every
-    # read_id facet here is the SAME chromosome, the LOH band is shared across
-    # the whole plot and rendered as a single strip beneath the reads (via
-    # patchwork), rather than a per-facet geom_rect as on the Overview plot.
+    # read here is the SAME chromosome, the LOH band is shared across the whole
+    # plot and rendered as a single strip beneath the reads (via patchwork),
+    # rather than a per-facet geom_rect as on the Overview plot.
     # loh_segments may be NULL if the LOH analysis has not been run yet.
     s_ref <- if (!is.null(results$strain_ref) && nzchar(results$strain_ref))
       results$strain_ref else "REF"
@@ -2227,13 +2407,49 @@ server <- function(input, output, session) {
     # Persist the LOH strip data so it can be bundled into the .rds download.
     results$selected_region_loh <- if (has_loh_strip) copy(loh_win) else data.table()
 
-    p <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
+    n_reads <- uniqueN(plot_df$read_id)
+    subtitle <- if (!is.null(ev))
+      paste0("Evidence: ", length(sw), " switch, ", length(rt), " return, ",
+             length(un), " spanning-uninformative; ",
+             n_reads, " reads shown",
+             if (n_bg_dropped > 0)
+               paste0(" (", n_bg_dropped, " background reads not drawn)") else "")
+    else
+      paste0(length(chim_ids), " chimeric read(s) in window; ",
+             n_reads, " reads shown",
+             if (n_bg_dropped > 0)
+               paste0(" (", n_bg_dropped, " background reads not drawn)") else "")
+    subtitle <- paste0(subtitle, "  [",
+                       if (mode == "chimeric") "chimeric reads only"
+                       else "all reads", "]")
+
+    p <- ggplot(plot_df, aes(x = pos / 1000, y = read_row))
+
+    if (!is.null(zone_rects) && nrow(zone_rects) > 0)
+      p <- p + geom_rect(
+        data = zone_rects,
+        aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+        inherit.aes = FALSE, fill = "grey60", alpha = 0.18
+      )
+
+    p <- p +
       geom_vline(xintercept = reg$start / 1000,
                  color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.8, linetype = 2) +
       geom_vline(xintercept = reg$end / 1000,
                  color = CHIMERA_COLOURS[["peak_bound"]], linewidth = 0.8, linetype = 2) +
-      geom_point() +
-      facet_grid(read_id ~ .) +
+      geom_blank(data = floors, aes(x = pos_kb, y = read_row), inherit.aes = FALSE) +
+      geom_hline(data = dividers, aes(yintercept = y), inherit.aes = FALSE,
+                 colour = "grey55", linewidth = 0.35) +
+      geom_segment(data = backbone,
+                   aes(x = x, xend = xend, y = read_row, yend = read_row),
+                   inherit.aes = FALSE, colour = "grey85", linewidth = 0.25) +
+      geom_point(aes(colour = IS_REF), size = 0.7) +
+      facet_grid(read_class ~ ., scales = "free_y", space = "free_y",
+                 switch = "y",
+                 labeller = labeller(read_class = CLASS_LABELS)) +
+      # Reversed so row 1 -- the most REF-heavy read of its group -- sits at the
+      # TOP of each band and the pile reads downward like a browser track.
+      scale_y_reverse(breaks = NULL, expand = expansion(mult = 0)) +
       scale_color_manual(
         values   = c(`FALSE` = CHIMERA_COLOURS[["alt"]],
                      `TRUE`  = CHIMERA_COLOURS[["ref"]]),
@@ -2248,21 +2464,29 @@ server <- function(input, output, session) {
         legend.position  = "none",
         plot.background  = element_blank(),
         strip.background = element_blank(),
-#        panel.border     = element_rect(linewidth = 0.1, linetype = 3),
+        strip.placement  = "outside",
+        # Rotated: horizontal labels reserve as much width as the longest
+        # group name ("Other reads in window"), which is width taken from the
+        # reads themselves. Vertical costs one line height instead.
+        strip.text.y.left = element_text(angle = 90, hjust = 0.5, size = 8,
+                                         lineheight = 0.95),
         panel.border     = element_blank(),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
-        strip.text.y     = element_blank(),
-        panel.spacing    = unit(0, "mm")
+        panel.spacing    = unit(3, "mm")
       ) +
       xlab("Position (Kbp)") +
-      ggtitle(paste0(
-        "Selected Region: Chr ", reg$chrom,
-        "  (Selected: ", round(reg$start / 1000, 2), " - ",
-        round(reg$end   / 1000, 2), " Kb;  Display: ",
-        round(plot_start / 1000, 2), " - ",
-        round(plot_end   / 1000, 2), " Kb)"
-      ))
+      ggtitle(
+        paste0(
+          if (!is.null(reg$label)) paste0(reg$label, "  —  ") else "",
+          "Chr ", reg$chrom,
+          "  (Selected: ", round(reg$start / 1000, 2), " - ",
+          round(reg$end   / 1000, 2), " Kb;  Display: ",
+          round(plot_start / 1000, 2), " - ",
+          round(plot_end   / 1000, 2), " Kb)"
+        ),
+        subtitle = subtitle
+      )
 
     if (has_loh_strip) {
       # Blank the read panel's x-axis; the LOH strip below carries it.
@@ -2314,7 +2538,7 @@ server <- function(input, output, session) {
           title = "Selected Region",
           value = "Selected Region",
           h4("Regional Read Plot"),
-          helpText("Shows all chimeric reads touching the selected interval, plotted in a padded display window. When LOH analysis has been run, a fixed-haplotype LOH strip is shown beneath the reads (blue = REF, red = ALT)."),
+          helpText("Chromosome View offers two entry points: 'Plot Chimeric Reads' shows only reads that switch allele in the window, and 'Plot All Reads' adds the rest of the window as a backdrop \u2014 the only way to see a call whose tract is shorter than min_run. Reads are grouped by their role in the call: switch (crossover), return (conversion), spanning but uninformative, chimeric, or background. Shaded bands mark the flanking zones the call's homolog identities were voted in \u2014 a band in which nearly every read is one colour was never phase-informative. When LOH analysis has been run, a fixed-haplotype LOH strip is shown beneath the reads (blue = REF, red = ALT)."),
           plotOutput("selected_region_plot", height = "800px"),
           br(),
           fluidRow(
@@ -2331,6 +2555,52 @@ server <- function(input, output, session) {
 
   observeEvent(rv_trigger_region(), {
     if (rv_trigger_region() > 0L) build_region_plot()
+  }, ignoreInit = TRUE)
+
+  # ── Jump-to-event ───────────────────────────────────────────────────────────
+  # Keyed on position in chain_result$events rather than on a label, because
+  # labels are not unique (two events of the same class on the same chromosome
+  # are ordinary) and the event object is what carries the tokens that
+  # event_evidence_reads() reads the supporting read ids off.
+  .event_choice_labels <- function(events) {
+    if (length(events) == 0) return(character(0))
+    labs <- vapply(seq_along(events), function(k) {
+      e <- events[[k]]
+      paste0(e$event_class, "  ", e$chrom, ":",
+             format(e$start, big.mark = ",", scientific = FALSE), "-",
+             format(e$end,   big.mark = ",", scientific = FALSE),
+             "  (", round((e$end - e$start) / 1000, 2), " kb)")
+    }, character(1))
+    stats::setNames(as.character(seq_along(events)), labs)
+  }
+
+  observe({
+    ev <- results$chain_result$events
+    updateSelectInput(session, "jump_event",
+                      choices  = .event_choice_labels(ev),
+                      selected = isolate(input$jump_event))
+  })
+
+  observeEvent(input$jump_to_event, {
+    events <- results$chain_result$events
+    k      <- suppressWarnings(as.integer(input$jump_event))
+    if (is.null(events) || is.na(k) || k < 1L || k > length(events)) {
+      showNotification("Run the event caller first, then pick an event.",
+                       type = "warning")
+      return(NULL)
+    }
+    e <- events[[k]]
+    results$selected_region <- list(
+      chrom    = as.character(e$chrom),
+      start    = as.integer(e$start),
+      end      = as.integer(e$end),
+      label    = paste0(e$event_class, " (", e$evidence, ")"),
+      # Always all-reads: an event reached from this control may well have no
+      # chimeric read, which is exactly why the control exists.
+      mode     = "all",
+      evidence = event_evidence_reads(e)
+    )
+    rv_trigger_region(isolate(rv_trigger_region()) + 1L)
   }, ignoreInit = TRUE)
 
   output$selected_region_plot <- renderPlot({
