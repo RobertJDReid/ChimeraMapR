@@ -4,6 +4,49 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.20] - 2026-09-10
+
+### Allele runs are read *per alignment block*, not per read id
+
+- A split (supplementary) alignment puts the same `read_id` on two
+  chromosomes. `full_read` was sorted `read_id, pos` and the chimeric-read
+  RLE grouped `by = read_id`, so a read's two alignment blocks concatenated
+  into one allele sequence and the rle drew a run boundary at the chromosome
+  seam. `transition_pos` grouped the same way and emitted a junction there —
+  at the last SNP of one block and the first SNP of the other.
+- Such a read is single-allele within each of its own blocks, so it carries
+  no haplotype switch at all. It was nonetheless called chimeric, and its
+  phantom junction landed on a real SNP position where it stacked with every
+  other read sharing that seam into a peak.
+- The peak view filters to one chromosome, so only the half of the pattern
+  on the displayed chromosome was drawn: a pile of reads plotted as chimeras
+  showing REF at every position and no ALT anywhere. The other half was on
+  another chromosome and not in the panel.
+- The three groupings now key on `(read_id, chrom)`, and `chrom` joins the
+  sort key so rows stay position-ordered within each block. A run boundary,
+  and therefore a junction, may only be drawn between two SNPs of the same
+  alignment block. Every downstream `by = read_id` already operates on a
+  chromosome-filtered table and is unaffected.
+
+### Effect on S01_CPT
+
+- 221 of 3268 chimeric reads spanned more than one chromosome; 201 of those
+  had no within-chromosome allele switch whatsoever. Cross-chromosome reads
+  in `rt_df` go 221 → 0, chimeric reads 3268 → 3066.
+- Exactly four peaks are removed, and they are exactly the four the peak
+  classifier had labelled `undefined`: chrII 470287 (h 21.9) and 474487
+  (h 4.6), chrIV 47998 (h 20.7) and 50198 (h 3.8) — the two ends of a single
+  chrIV↔chrII seam, reported once from each side. The `undefined` class is
+  now empty; peak types go from binary 27 / gene_conversion 7 / undefined 4
+  to binary 27 / gene_conversion 7.
+- Nothing genuine is lost. All 32 peaks above `min_peak_height` survive, 28
+  with an unchanged height and 4 shifted −0.1 to −2.3 where cross-chromosome
+  reads had padded the count. No new peaks appear, and the events table is
+  byte-identical — no called event rested on the artifact peaks.
+- SYNv3 is unchanged at `min_run` 1/2/3 (1252/450/260 chimeric reads,
+  216/18/13 raw peaks, 16/14/14 events), as expected for a single-chromosome
+  dataset with no seams to correct.
+
 ## [0.8.19] - 2026-09-04
 
 ### An LOH-channel call can now be inspected read by read

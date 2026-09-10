@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.8.19"
+APP_VERSION <- "0.8.20"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -385,7 +385,7 @@ run_chimera_analysis <- function(
   )]
   full_read <- full_read[ALLELE != "OTHER"]
   full_read <- full_read[, .(chrom, pos, read_id, IS_REF, ALLELE)]
-  setorder(full_read, read_id, pos)
+  setorder(full_read, read_id, chrom, pos)
 
   # Snapshot of all filtered reads BEFORE chimeric-only subsetting.
   # Returned as $full_read so the caller can build a population-level LOH map
@@ -417,12 +417,17 @@ run_chimera_analysis <- function(
 
   # ── 3. Detect chimeric reads via RLE ─────────────────────────────────────────
   message("  Detecting chimeric reads ...")
-  full_read[, runs := rle_helper(ALLELE), by = read_id]
+  # Grouped by (read_id, chrom), never read_id alone: a split/supplementary
+  # alignment puts the SAME read_id on two chromosomes, and an rle over the
+  # concatenation manufactures an allele run boundary at the chromosome seam.
+  # Those reads are each single-allele within their own alignment block, so
+  # grouping per block drops them here instead of calling them chimeric.
+  full_read[, runs := rle_helper(ALLELE), by = .(read_id, chrom)]
   full_read <- full_read[runs >= min_run]
-  full_read[, new_runs := rle_helper(ALLELE), by = read_id]
+  full_read[, new_runs := rle_helper(ALLELE), by = .(read_id, chrom)]
 
   rt_df <- full_read[
-    full_read[, .I[.N > min_run & new_runs[1] != .N], by = read_id]$V1
+    full_read[, .I[.N > min_run & new_runs[1] != .N], by = .(read_id, chrom)]$V1
   ]
   rt_df[, c("runs", "new_runs") := NULL]
 
@@ -430,11 +435,14 @@ run_chimera_analysis <- function(
 
   # ── 4. Extract transition boundaries ─────────────────────────────────────────
   message("  Extracting transition boundaries ...")
+  # Same (read_id, chrom) grouping as the RLE above -- a transition may only be
+  # drawn between two SNPs of the same alignment block, never across the seam
+  # joining a read's two chromosomes.
   transition_pos <- rt_df[, {
     is_last_of_run  <- c(ALLELE[-1] != ALLELE[-.N], FALSE)
     is_first_of_run <- c(FALSE, ALLELE[-1] != ALLELE[-.N])
-    .SD[is_last_of_run | is_first_of_run, .(chrom, pos)]
-  }, by = read_id]
+    .SD[is_last_of_run | is_first_of_run, .(pos)]
+  }, by = .(read_id, chrom)]
 
   pos_count <- transition_pos[, .(n = .N), by = .(chrom, pos)]
 
