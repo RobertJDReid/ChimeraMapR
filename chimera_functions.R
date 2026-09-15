@@ -80,6 +80,114 @@ load_read_data <- function(path) {
   fread(path)
 }
 
+# -----------------------------------------------------------------------------
+#  split_alignment_units()
+#
+#  Rewrites read_id so each id names one contiguous alignment of a read rather
+#  than the read as a whole. Every downstream step reads a read_id as one
+#  molecule traversing the genome in order -- the chimeric-read RLE, the peak
+#  classifier's zones, count_tract_junction_reads()'s "same homolog on both
+#  flanks" -- and that only holds within a single alignment.
+#
+#  A long read commonly aligns in pieces on the SAME chromosome: a primary
+#  record plus supplementary ones. Grouping by (read_id, chrom) splices them
+#  back into one allele sequence and lets a run span the seam, the within-
+#  chromosome counterpart of the cross-chromosome seam that grouping fixed. On
+#  YPD_sup S288C_chrV the SK1 homolog's reads align up to 32,325, then resume
+#  as a supplementary at 34,368 (read e66f429b: read_pos 20,468 -> 228). The
+#  REF calls at 32,313/32,325 made each read ALT-REF-ALT across the gap: 26
+#  "returns" behind an NCO_GC over what is an alignment break.
+#
+#  What makes a seam dangerous is the SNPs it skips: the read holds no call
+#  there, yet the splice lets it be read as having traversed them. Same-strand,
+#  non-overlapping pieces are therefore rejoined when either
+#    * the read provably runs straight through -- read_pos advances in step
+#      with the reference across the junction (within max(join_tol_bp,
+#      join_tol_frac * gap)) -- so it is one molecule whatever the aligner did;
+#    * or the seam skips no SNP position, so the spliced allele sequence is
+#      exactly what an unbroken alignment would have given.
+#  Everything else stays split: a discontinuous seam that skips SNPs (a hard-
+#  clipped supplementary restarts read_pos near 0, so its continuity cannot be
+#  shown -- the chrV case above skips five), a strand flip (foldback read), or
+#  pieces overlapping on the reference. Splitting every seam instead cost
+#  10-20% of read support genome-wide on the RAD5 panel, almost all at seams
+#  between adjacent SNPs where nothing can be fabricated.
+#
+#  "SNP position" means any position present in read_data for the chromosome,
+#  i.e. the pileup's own site list.
+#
+#  Records are recovered from the columns present: flag separates primary from
+#  supplementary and strand from strand; within one flag, read_pos falling back
+#  marks a new record. Rows without read_pos (deletions) inherit the record of
+#  the nearest preceding call. Inputs lacking read_pos split on flag alone and
+#  rejoin only at seams that skip no SNP; inputs lacking flag are returned
+#  unchanged.
+#
+#  The first unit keeps the original id; later ones get "#2", "#3", ... in
+#  reference order.
+# -----------------------------------------------------------------------------
+split_alignment_units <- function(read_data, join_tol_bp = 200L,
+                                  join_tol_frac = 0.20) {
+  if (!all(c("read_id", "chrom", "pos", "flag") %in% names(read_data)))
+    return(read_data)
+  has_rp <- "read_pos" %in% names(read_data)
+
+  rd <- copy(read_data)
+  rd[, .ord := .I]
+  if (!has_rp) rd[, read_pos := NA_integer_]
+  setorder(rd, read_id, chrom, flag, pos)
+
+  # Records: a flag change, or read_pos stepping backwards within one flag.
+  rd[, .rp := nafill(nafill(as.numeric(read_pos), "locf"), "nocb"),
+     by = .(read_id, chrom, flag)]
+  rd[, .rec := {
+    back <- c(FALSE, !is.na(.rp[-1]) & !is.na(.rp[-.N]) & .rp[-1] < .rp[-.N])
+    cumsum(back)
+  }, by = .(read_id, chrom, flag)]
+
+  rec <- rd[, .(start = min(pos), end = max(pos),
+                rp_first = .rp[1], rp_last = .rp[.N]),
+            by = .(read_id, chrom, flag, .rec)]
+  # Only reads with more than one record on a chromosome need any work.
+  rec[, n_rec := .N, by = .(read_id, chrom)]
+  multi <- rec[n_rec > 1L]
+  if (nrow(multi) == 0L) {
+    if (!has_rp) rd[, read_pos := NULL]
+    setorder(rd, .ord)
+    rd[, c(".ord", ".rp", ".rec") := NULL]
+    return(rd[])
+  }
+
+  # Rank of each site along its chromosome, to count the SNPs a seam skips.
+  sites <- unique(rd[, .(chrom, pos)])
+  setorder(sites, chrom, pos)
+  sites[, rank := seq_len(.N), by = chrom]
+  multi[sites, on = .(chrom, start = pos), rank_start := i.rank]
+  multi[sites, on = .(chrom, end   = pos), rank_end   := i.rank]
+
+  setorder(multi, read_id, chrom, start)
+  multi[, strand_bit := bitwAnd(flag, 16L)]
+  multi[, unit := {
+    gap      <- start[-1] - end[-.N]
+    drp      <- rp_first[-1] - rp_last[-.N]
+    skipped  <- rank_start[-1] - rank_end[-.N] - 1L
+    in_step  <- has_rp & !is.na(drp) &
+                abs(drp - gap) <= pmax(join_tol_bp, join_tol_frac * gap)
+    joins    <- strand_bit[-1] == strand_bit[-.N] & gap > 0 &
+                (in_step | skipped == 0L)
+    cumsum(c(TRUE, !joins))
+  }, by = .(read_id, chrom)]
+
+  rd[multi, on = .(read_id, chrom, flag, .rec), .unit := i.unit]
+  rd[multi[unit > 1L], on = .(read_id, chrom, flag, .rec),
+     read_id := paste0(read_id, "#", i.unit)]
+
+  if (!has_rp) rd[, read_pos := NULL]
+  setorder(rd, .ord)
+  rd[, c(".ord", ".rp", ".rec", ".unit") := NULL]
+  rd[]
+}
+
 #' Load SNP data — auto-detects VCF (.vcf, .vcf.gz) vs plain CSV.
 #' Returns a data.table with columns: CHROM, POS, REF, ALT  (+ QUAL for VCF)
 load_snp_data <- function(path) {
@@ -246,6 +354,9 @@ run_chimera_analysis <- function(
   # ── 1. Load data ─────────────────────────────────────────────────────────────
   message("  Loading read data ...")
   read_data   <- load_read_data(read_data_path)
+  # One read_id per contiguous alignment, before anything groups by read_id
+  # (see split_alignment_units).
+  read_data   <- split_alignment_units(read_data)
   chromosomes <- unique(read_data$chrom)
 
   message("  Loading SNP data ...")
