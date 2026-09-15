@@ -742,7 +742,8 @@ if (run_chain) {
   # Per-tract deletion evidence first (rule Rd's read-level trigger, and the
   # del_reads exclusion the read-support annotators apply).
   canonical_chains <- lapply(canonical_chains, annotate_tract_deletion_evidence,
-                             del_evidence = results$del_evidence, params = cp)
+                             del_evidence = results$del_evidence, params = cp,
+                             transition_pos = results$transition_pos)
   canonical_chains <- lapply(canonical_chains, annotate_tract_read_support,
                              full_read_loh = results$full_read_loh, params = cp)
   # Block-level counts for runs of fixed tracts with no callable HET zone

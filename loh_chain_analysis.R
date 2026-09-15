@@ -141,6 +141,7 @@ make_token <- function(type,           # "F"=fixed | "H"=HET | "G"=NA gap | "TEL
                        n_snps   = NA_integer_,
                        depth_ratio  = NA_real_,  # token median depth / chrom median
                        peak_over    = NULL,   # peak/pair whose window spans this token
+                       peaks_over   = NULL,   # EVERY peak whose window spans it (see .attach_peaks)
                        peak_left    = NULL,   # junction peak entering this token
                        peak_right   = NULL,   # junction peak leaving this token
                        bridged_gap  = FALSE,  # TRUE if a sub-merge_gap NA gap was absorbed
@@ -156,6 +157,7 @@ make_token <- function(type,           # "F"=fixed | "H"=HET | "G"=NA gap | "TEL
       n_snps      = as.integer(n_snps),
       depth_ratio = as.numeric(depth_ratio),
       peak_over   = peak_over,
+      peaks_over  = peaks_over,
       peak_left   = peak_left,
       peak_right  = peak_right,
       bridged_gap = bridged_gap,
@@ -455,6 +457,15 @@ build_raw_chains <- function(loh_segments, chr_span, params,
                 snp_pos >  tok$end &&
                 snp_pos <= (tok$end + peak_pad_bp)
 
+    # peak_over is a single slot, so when several peak windows overlap the
+    # token the last one (in position order) wins it. Every positional consumer
+    # (.left/.right_junction_peak, R06, ...) is written against that slot, so it
+    # keeps its meaning; peaks_over additionally records all of them. Without
+    # it a short tract whose two junction peaks both overlap it only ever
+    # exposed the right-hand one: YPD_sup chrV 32,313-34,010 kept the binary
+    # peak at 34,368 and lost the gene_conversion peak at 32,313, so R10 never
+    # saw a self-classifying peak there.
+    if (overlaps)  tok$peaks_over <- c(tok$peaks_over, list(pk))
     if (overlaps)  tok$peak_over  <- pk
     if (at_left)   tok$peak_left  <- pk
     if (at_right)  tok$peak_right <- pk
@@ -669,6 +680,7 @@ canonicalise <- function(chain, params) {
             n_snps      = as.integer(sum(c(a$n_snps, b$n_snps), na.rm = TRUE)),
             depth_ratio = mean(c(a$depth_ratio, b$depth_ratio), na.rm = TRUE),
             peak_over   = a$peak_over %||% b$peak_over,
+            peaks_over  = .union_peaks(a$peaks_over, b$peaks_over),
             peak_left   = a$peak_left,
             peak_right  = b$peak_right,
             bridged_gap = TRUE,
@@ -710,6 +722,7 @@ canonicalise <- function(chain, params) {
             n_snps      = as.integer(sum(c(a$n_snps, cc$n_snps), na.rm = TRUE)),
             depth_ratio = mean(c(a$depth_ratio, cc$depth_ratio), na.rm = TRUE),
             peak_over   = a$peak_over %||% b$peak_over %||% cc$peak_over,
+            peaks_over  = .union_peaks(a$peaks_over, b$peaks_over, cc$peaks_over),
             peak_left   = a$peak_left,
             peak_right  = cc$peak_right,
             bridged_gap = TRUE,
@@ -743,6 +756,7 @@ canonicalise <- function(chain, params) {
             n_snps      = as.integer(sum(c(a$n_snps, b$n_snps), na.rm = TRUE)),
             depth_ratio = mean(c(a$depth_ratio, b$depth_ratio), na.rm = TRUE),
             peak_over   = a$peak_over %||% b$peak_over,
+            peaks_over  = .union_peaks(a$peaks_over, b$peaks_over),
             peak_left   = a$peak_left,
             peak_right  = b$peak_right,
             bridged_gap = TRUE,
@@ -1121,6 +1135,15 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   NULL
 }
 
+# Concatenate peak lists, dropping repeats of the same peak (by position).
+.union_peaks <- function(...) {
+  pks <- Filter(Negate(is.null), c(...))
+  if (length(pks) == 0) return(NULL)
+  pos <- vapply(pks, function(p) as.numeric(p$fused_pos_bp %||% p$snp_pos %||% NA_real_),
+                numeric(1))
+  pks[!duplicated(pos) | is.na(pos)]
+}
+
 .best_peak <- function(token) {
   # Return the peak with the most spanning reads, or peak_over if all equal
   candidates <- Filter(Negate(is.null),
@@ -1142,7 +1165,11 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 .has_resolved_switch_peak <- function(token, params) {
   peaks <- Filter(Negate(is.null),
                   list(token$peak_over, token$peak_left, token$peak_right))
+  # A peak raised by the tract's own deletion reads is not a second homolog
+  # (see annotate_tract_deletion_evidence).
+  borne <- token$meta$del_borne_peak_pos %||% numeric(0)
   for (pk in peaks) {
+    if ((pk$fused_pos_bp %||% pk$snp_pos %||% NA_real_) %in% borne) next
     et <- pk$best_edge_type %||% pk$edge_type
     if (is.null(et) || is.na(et)) next
     if (!(et %in% c("binary", "compound_binary", "crossover",
@@ -2908,7 +2935,8 @@ rule_composite_loh_block <- list(
 
 # Attaches the above to every F token. Must run BEFORE the read-support
 # annotators, which exclude a tract's deleted reads from its return counts.
-annotate_tract_deletion_evidence <- function(chain, del_evidence, params) {
+annotate_tract_deletion_evidence <- function(chain, del_evidence, params,
+                                             transition_pos = NULL) {
   if (is.null(del_evidence)) return(chain)
   toks <- chain$tokens
   for (i in seq_along(toks)) {
@@ -2920,6 +2948,32 @@ annotate_tract_deletion_evidence <- function(chain, del_evidence, params) {
     toks[[i]]$meta$del_frac_mean      <- ev$del_frac_mean
     toks[[i]]$meta$del_read_coherence <- ev$coherence
     toks[[i]]$meta$del_read_ids       <- ev$del_read_ids
+
+    # Peaks built from this tract's own deletion reads. A read that lacks the
+    # tract still calls the reference base at a SNP sitting on the deletion's
+    # edge, so across the tract it reads flank-allele / REF / flank-allele --
+    # an allele switch at each breakpoint, stacked into a chimera peak that
+    # classify_peak_haplotype() labels gene_conversion. YPD_sup chrV
+    # 374,984-376,745: 33/33 and 33/34 of the reads switching at its two
+    # junction peaks are deleted across it. Such a peak is the deletion seen
+    # from the chimera channel, not a second homolog, so it must not veto the
+    # deletion call (.has_resolved_switch_peak).
+    if (length(ev$del_read_ids) > 0L && !is.null(transition_pos)) {
+      pks <- .union_peaks(tok$peaks_over %||% list(tok$peak_over),
+                          list(tok$peak_left, tok$peak_right))
+      borne <- numeric(0)
+      for (pk in pks) {
+        p_pos <- suppressWarnings(as.numeric(unlist(pk$sub_peak_pos)))
+        if (length(p_pos) == 0L || all(is.na(p_pos)))
+          p_pos <- pk$fused_pos_bp %||% pk$snp_pos
+        ids <- unique(transition_pos[as.character(chrom) == chain$chrom &
+                                       pos %in% p_pos, read_id])
+        if (length(ids) > 0L &&
+            mean(ids %in% ev$del_read_ids) >= as.numeric(params$homog_frac %||% 0.80))
+          borne <- c(borne, pk$fused_pos_bp %||% pk$snp_pos)
+      }
+      toks[[i]]$meta$del_borne_peak_pos <- borne
+    }
   }
   chain$tokens <- toks
   chain
@@ -2953,11 +3007,19 @@ rule_peak_direct <- list(
   match_fn = function(tokens, i, chain, params) {
     tok <- tokens[[i]]
     if (tok$type != "F") return(NULL)
-    pk <- .best_peak(tok)
-    if (is.null(pk)) return(NULL)
-    et <- pk$best_edge_type %||% pk$edge_type
-    if (is.null(et) || is.na(et)) return(NULL)
-    if (!et %in% c("gene_conversion", "crossover", "internal_crossover")) return(NULL)
+    # Pick from the self-classifying peaks among ALL those attached to the
+    # token, not the best of peak_over/left/right: peak_over holds only the
+    # last overlapping window, and a binary peak sitting there hid the
+    # gene_conversion peak at the tract's other junction (see .attach_peaks).
+    pks <- .union_peaks(tok$peaks_over %||% list(tok$peak_over),
+                        list(tok$peak_left, tok$peak_right))
+    pks <- Filter(function(p) {
+      et <- p$best_edge_type %||% p$edge_type
+      !is.null(et) && !is.na(et) &&
+        et %in% c("gene_conversion", "crossover", "internal_crossover")
+    }, pks)
+    if (length(pks) == 0) return(NULL)
+    pk <- pks[[which.max(vapply(pks, .ns, integer(1)))]]
     list(span = c(i, i), f_tok = tok, pk = pk)
   },
   fire_fn = function(m, chain, params) {
@@ -3638,10 +3700,32 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   })
   claimed_ranges <- unlist(claimed_ranges, recursive = FALSE)
 
+  # Junction zones of the claimed tracts: at each end of a claimed F token, the
+  # stretch from the nearest HET SNP outside it, across any SNP gap, to
+  # peak_pad_bp inside the tract. A peak in either zone marks one of the tract's
+  # own junctions, so the event already called on the tract explains it. The
+  # tract's interior is deliberately left out: a self-classifying peak deep
+  # inside a long tract is a separate embedded event (RAD5_03 chrXVI: an
+  # NCO_GC_subres at 156,908 inside a 276 kb CO_TERM).
+  #
+  # Rules claim peaks only through the fields they match on, so a tract whose
+  # event did not consume BOTH junction peaks left the other one "unclaimed",
+  # and the promotion below turned it into a second event. That happens
+  # whenever the pair never fused: a peak that self-labels gene_conversion is
+  # excluded from compute_peak_pairs() (FUSION_HEURISTICS$excluded_peak_classes),
+  # so its partner at the tract's far junction is a separate singleton. On
+  # YPD_sup chrV, R11c called NCO_GC 32,313-34,010 from tract reads, claiming no
+  # peak, and the gene_conversion peak at 32,313 came back as an NCO_GC_subres
+  # at that same position; R10 called 374,984-376,745 through the peak at
+  # 376,745 and the one at 374,984 was promoted the same way.
+  claimed_zones <- list()
+
   unclaimed_loh <- list()
   for (cname in names(chains)) {
     chain <- chains[[cname]]
-    for (tok in chain$tokens) {
+    toks  <- chain$tokens
+    for (ti in seq_along(toks)) {
+      tok <- toks[[ti]]
       if (tok$type != "F") next
       tok_mid <- (tok$start + tok$end) / 2
       # A token is claimed if any event's claimed range contains its midpoint.
@@ -3652,7 +3736,21 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
           !is.na(cr$start) && !is.na(cr$end) &&
           cr$start <= tok_mid && cr$end >= tok_mid
       }))
-      if (!already_claimed) {
+      if (already_claimed) {
+        # Walk out over G tokens; stop at the last HET SNP of a flanking H
+        # (a junction peak often sits on it, e.g. 34,368 above). Any other
+        # neighbour (TEL, an adjacent F) bounds the zone at the gap's edge.
+        lo <- tok$start; j <- ti - 1L
+        while (j >= 1L && toks[[j]]$type == "G") { lo <- toks[[j]]$start; j <- j - 1L }
+        if (j >= 1L && toks[[j]]$type == "H") lo <- toks[[j]]$end
+        hi <- tok$end;   j <- ti + 1L
+        while (j <= length(toks) && toks[[j]]$type == "G") { hi <- toks[[j]]$end; j <- j + 1L }
+        if (j <= length(toks) && toks[[j]]$type == "H") hi <- toks[[j]]$start
+        pad <- params$peak_pad_bp %||% 200L
+        claimed_zones <- c(claimed_zones, list(
+          list(chrom = cname, start = lo, end = min(tok$start + pad, tok$end)),
+          list(chrom = cname, start = max(tok$end - pad, tok$start), end = hi)))
+      } else {
         unclaimed_loh <- c(unclaimed_loh, list(list(
           chrom = cname, start = tok$start, end = tok$end,
           state = tok$state, n_snps = tok$n_snps
@@ -3724,8 +3822,11 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   unclaimed_peaks <- list()
   if (!is.null(peak_source_for_reconcile)) {
     for (ri in seq_len(nrow(peak_source_for_reconcile))) {
-      pos <- peak_source_for_reconcile$pos_col[ri]
-      if (!is.na(pos) && !pos %in% all_claimed_pos) {
+      pos   <- peak_source_for_reconcile$pos_col[ri]
+      chrom <- peak_source_for_reconcile$chrom[ri]
+      in_claimed_zone <- any(vapply(claimed_zones, function(z)
+        z$chrom == chrom && z$start <= pos && pos <= z$end, logical(1)))
+      if (!is.na(pos) && !pos %in% all_claimed_pos && !in_claimed_zone) {
         unclaimed_peaks <- c(unclaimed_peaks, list(list(
           chrom          = peak_source_for_reconcile$chrom[ri],
           snp_pos        = pos,
@@ -3909,6 +4010,9 @@ build_event_table <- function(events, params = default_chain_params()) {
 #'                       used to corroborate gene-conversion outcome calls.
 #'                       When NULL those counts are absent and the rules fall
 #'                       back to peak-based classification alone.
+#' @param transition_pos run_chimera_analysis()$transition_pos; identifies peaks
+#'                       raised by a tract's own deletion reads, which must not
+#'                       veto the deletion call. NULL skips that check.
 #' @param chr_span       data.table from run_chimera_analysis()$chr_span
 #' @param coverage_segments data.table from compute_coverage_map()$coverage_segments;
 #'                       chromosome-wide depth_ratio (general-purpose fallback).
@@ -3944,6 +4048,7 @@ run_chain_analysis <- function(loh_segments,
                                 rt_df        = NULL,
                                 full_read_loh = NULL,
                                 del_evidence  = NULL,
+                                transition_pos = NULL,
                                 chr_span,
                                 coverage_segments = NULL,
                                 coverage_table     = NULL,
@@ -3962,7 +4067,8 @@ run_chain_analysis <- function(loh_segments,
   # Deletion evidence first: the read-support annotators below exclude a
   # tract's deleted reads from its return counts.
   chains <- lapply(chains, annotate_tract_deletion_evidence,
-                   del_evidence = del_evidence, params = params)
+                   del_evidence = del_evidence, params = params,
+                   transition_pos = transition_pos)
 
   chains <- lapply(chains, annotate_tract_read_support,
                    full_read_loh = full_read_loh, params = params)
