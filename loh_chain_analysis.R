@@ -377,25 +377,34 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     # by the terminal rules and never disturbs the chromosome-wide proxy
     # used elsewhere. G-typed flanks (no defined SNPs) are skipped in favor
     # of the nearest H, via .nearest_nonfixed_right()/.nearest_nonfixed_left().
+    #
+    # The reference depth is read from the coverage segment abutting the
+    # tract (via .abutting_flank_depth()), not averaged over the whole flank
+    # token: flank tokens are routinely tens of kb wide and depth drifts
+    # substantially across that distance, which dilutes a real drop toward 1
+    # (RAD5_01 S288C_chrIII 11,280-82,573: whole-flank averaging gives 0.70,
+    # masking a real depth halving that reads 0.60 against the segment
+    # actually abutting the tract). Same rationale as Rd's
+    # .interstitial_flank_depth_ratio, which shares this helper.
     real_idx <- which(vapply(tokens, `[[`, character(1), "type") != "TEL")
     if (length(real_idx) > 0) {
       first_i <- real_idx[1]
       last_i  <- real_idx[length(real_idx)]
 
-      annotate_terminal <- function(idx, nb_idx) {
+      annotate_terminal <- function(idx, nb_idx, side) {
         if (is.null(nb_idx) || tokens[[idx]]$type != "F") return(invisible(NULL))
-        d_f  <- .lookup_mean_depth(coverage_table, chr_name,
-                                   tokens[[idx]]$start, tokens[[idx]]$end)
-        d_nb <- .lookup_mean_depth(coverage_table, chr_name,
-                                   tokens[[nb_idx]]$start, tokens[[nb_idx]]$end)
+        tract <- tokens[[idx]]
+        d_f  <- .lookup_mean_depth(coverage_table, chr_name, tract$start, tract$end)
+        d_nb <- .abutting_flank_depth(tract, tokens[[nb_idx]], side, chr_name,
+                                      coverage_table, coverage_segments)
         if (!is.na(d_f) && !is.na(d_nb) && d_nb > 0)
           tokens[[idx]]$meta$terminal_depth_ratio <<- d_f / d_nb
         invisible(NULL)
       }
 
-      annotate_terminal(first_i, .nearest_nonfixed_right(tokens, first_i))
+      annotate_terminal(first_i, .nearest_nonfixed_right(tokens, first_i), "right")
       if (last_i != first_i)
-        annotate_terminal(last_i, .nearest_nonfixed_left(tokens, last_i))
+        annotate_terminal(last_i, .nearest_nonfixed_left(tokens, last_i), "left")
     }
 
     # ── Interstitial fixed tokens: flank-relative depth ratio ─────────────────
@@ -1017,19 +1026,56 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 # a false deletion call (see RAD5_3 chrIII: tract 81.8 == left flank 82.0, but
 # right sub-telomeric flank inflated to 139 → 0.59 vs max, 1.00 vs min).
 #
-# Each flank depth is measured over the coverage segment ABUTTING the tract, not
-# over the whole flank token. Flank tokens are routinely 50-100 kb wide and
-# sequencing depth drifts substantially across that distance, so a whole-token
-# mean averages across coverage changepoints far from the event and can sit well
-# below the depth immediately beside the tract — inflating the ratio past the
-# deletion threshold. (SYNv1 chrXI: the real 5 kb hemizygous deletion at
-# 500.2-505.3 kb measures 31.7 against a 68 kb left flank averaging 51.2 → 0.62,
-# missing depth_drop=0.60; against the 8.8 kb coverage segment actually abutting
-# it (491.0-499.8 kb, mean 54.5) → 0.58, a clear call.) compute_coverage_map()
-# has already located those changepoints, so the abutting segment is the local
-# diploid baseline by construction — no arbitrary window width to choose. Falls
-# back to the whole flank token when no segmentation is available. Returns NA
-# unless a coverage_table was supplied and both flanks are HET-resolvable.
+# Mean depth of the coverage segment abutting `tract` on `side`, restricted to
+# segments that overlap `flank_tok` so an unrelated region beyond the flank
+# can never become the reference. Flank tokens are routinely 50-100 kb wide
+# and sequencing depth drifts substantially across that distance, so a
+# whole-token mean averages across coverage changepoints far from the event
+# and can sit well below (or above) the depth immediately beside the tract —
+# diluting a real drop toward 1. (SYNv1 chrXI: the real 5 kb hemizygous
+# deletion at 500.2-505.3 kb measures 31.7 against a 68 kb left flank
+# averaging 51.2 → 0.62, missing depth_drop=0.60; against the 8.8 kb coverage
+# segment actually abutting it (491.0-499.8 kb, mean 54.5) → 0.58, a clear
+# call. RAD5_01 chrIII 11,280-82,573 shows the same pattern on a terminal
+# tract: whole 24 kb flank-token averaging gives 0.70, the abutting segment
+# 0.60.) compute_coverage_map() has already located those changepoints, so
+# the abutting segment is the local diploid baseline by construction — no
+# arbitrary window width to choose. Falls back to the whole flank token when
+# no segmentation is available, or none qualifies. Shared by Rd's
+# .interstitial_flank_depth_ratio (both flanks) and R01's annotate_terminal()
+# in build_raw_chains() (single flank on the open side).
+.abutting_flank_depth <- function(tract, flank_tok, side, chr_name,
+                                  coverage_table, coverage_segments = NULL) {
+  d <- NA_real_
+  if (!is.null(coverage_segments) && nrow(coverage_segments) > 0) {
+    cs <- coverage_segments[as.character(chrom) == chr_name &
+                              end >= flank_tok$start & start <= flank_tok$end]
+    cs <- if (side == "left") cs[end <= tract$start] else cs[start >= tract$end]
+    if (nrow(cs) > 0) {
+      pick <- if (side == "left") which.max(cs$end) else which.min(cs$start)
+      d <- cs$depth_mean[pick]
+    }
+  }
+  if (!is.na(d) && d > 0) return(d)
+  .lookup_mean_depth(coverage_table, chr_name, flank_tok$start, flank_tok$end)
+}
+
+# Flank-relative depth ratio for an INTERSTITIAL fixed token: the token's mean
+# real read depth divided by the abutting-segment depth (see
+# .abutting_flank_depth) of the *lower* of its two nearest non-fixed (HET)
+# flanks (skipping unscored G gaps). A hemizygous deletion of one homolog
+# yields a fixed-allele tract whose total depth is ~half its flanking diploid
+# regions; a copy-neutral LOH tract (gene conversion / crossover) keeps full
+# depth, giving a ratio near 1. The MIN flank — not the max or the average — is
+# the reference so the ratio only falls below threshold when the tract is
+# depth-depressed against BOTH flanks, i.e. a genuine hemizygous drop. Using the
+# max flank instead lets a single anomalously HIGH flank (very common for short
+# sub-telomeric HET islands, where repetitive/duplicated content inflates the
+# mapped depth) drag a full-depth tract's ratio below threshold and manufacture
+# a false deletion call (see RAD5_3 chrIII: tract 81.8 == left flank 82.0, but
+# right sub-telomeric flank inflated to 139 → 0.59 vs max, 1.00 vs min).
+# Returns NA unless a coverage_table was supplied and both flanks are
+# HET-resolvable.
 .interstitial_flank_depth_ratio <- function(tokens, idx, chr_name, coverage_table,
                                             coverage_segments = NULL) {
   li <- .nearest_nonfixed_left(tokens, idx)
@@ -1039,28 +1085,10 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   tract <- tokens[[idx]]
   d_f <- .lookup_mean_depth(coverage_table, chr_name, tract$start, tract$end)
 
-  # Mean depth of the coverage segment nearest the tract on `side`, restricted
-  # to segments that overlap the flank token so an unrelated region beyond the
-  # flank can never become the reference. NA when no segment qualifies.
-  abutting_depth <- function(flank_tok, side) {
-    if (is.null(coverage_segments) || nrow(coverage_segments) == 0)
-      return(NA_real_)
-    cs <- coverage_segments[as.character(chrom) == chr_name &
-                              end >= flank_tok$start & start <= flank_tok$end]
-    cs <- if (side == "left") cs[end <= tract$start] else cs[start >= tract$end]
-    if (nrow(cs) == 0) return(NA_real_)
-    pick <- if (side == "left") which.max(cs$end) else which.min(cs$start)
-    cs$depth_mean[pick]
-  }
-
-  flank_depth <- function(flank_tok, side) {
-    d <- abutting_depth(flank_tok, side)
-    if (!is.na(d) && d > 0) return(d)
-    .lookup_mean_depth(coverage_table, chr_name, flank_tok$start, flank_tok$end)
-  }
-
-  d_l <- flank_depth(tokens[[li]], "left")
-  d_r <- flank_depth(tokens[[ri]], "right")
+  d_l <- .abutting_flank_depth(tract, tokens[[li]], "left",  chr_name,
+                               coverage_table, coverage_segments)
+  d_r <- .abutting_flank_depth(tract, tokens[[ri]], "right", chr_name,
+                               coverage_table, coverage_segments)
   ref <- suppressWarnings(min(d_l, d_r, na.rm = TRUE))
   if (is.na(d_f) || !is.finite(ref) || ref <= 0) return(NA_real_)
   d_f / ref
@@ -1245,36 +1273,79 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 
 # ── Rule builders ─────────────────────────────────────────────────────────────
 
-# Rule 1: Terminal deletion — T [F] ... (depth low)
+# Rule 1: Terminal deletion — T [F] ... (depth low, or the tract's own SNPs
+# carry the deletion signature directly).
+#
+# Depth-only was a knife-edge proxy here exactly as it is for Rd below: a long
+# terminal deletion can sit just above depth_drop against even its abutting
+# flank segment (RAD5_01 S288C_chrIII 11,280-82,573: 0.60 against 0.60) with
+# no recourse, since a terminal tract only has one flank to test against — no
+# second (lower) side the way an interstitial tract's min() gets to fall back
+# on. So R01 gets the same second, independent trigger Rd has: the tract's own
+# SNPs carrying the deletion signature directly (.tract_deletion_evidence).
+# Either trigger suffices; a resolved switch peak still vetoes, since that is
+# positive evidence both homologs are present at the junction — incompatible
+# with a hemizygous deletion, and instead the signature of a real terminal
+# crossover (R02/R03) that this rule must not preempt.
 rule_terminal_deletion <- list(
   id = "R01_terminal_deletion",
   match_fn = function(tokens, i, chain, params) {
     n <- length(tokens)
+
+    .match_side <- function(f_tok, span, direction) {
+      dr <- .terminal_depth_ratio(f_tok)
+      depth_hit <- !is.na(dr) && dr < params$depth_drop
+
+      n_ds  <- f_tok$meta$n_del_snps         %||% 0L
+      dfm   <- f_tok$meta$del_frac_mean      %||% NA_real_
+      coh   <- f_tok$meta$del_read_coherence %||% NA_real_
+      read_hit <- !is.na(dfm) && !is.na(coh) &&
+        n_ds >= as.integer(params$del_snp_min       %||% 5L)   &&
+        dfm  >= as.numeric(params$del_frac_min      %||% 0.20) &&
+        coh  >= as.numeric(params$del_coherence_min %||% 0.50)
+
+      if (!depth_hit && !read_hit) return(NULL)
+      if (.has_resolved_switch_peak(f_tok, params)) return(NULL)
+      list(span = span, direction = direction, f_tok = f_tok,
+           ratio = dr, depth_hit = depth_hit, read_hit = read_hit,
+           n_del_snps = n_ds, del_frac_mean = dfm, coherence = coh,
+           n_del_reads = length(f_tok$meta$del_read_ids %||% character(0)))
+    }
+
     # Forward: TEL [F] ...
     if (i + 1L <= n &&
-        tokens[[i]]$type == "TEL" &&
-        tokens[[i + 1L]]$type == "F" &&
-        !is.na(.terminal_depth_ratio(tokens[[i + 1L]])) &&
-        .terminal_depth_ratio(tokens[[i + 1L]]) < params$depth_drop)
-      return(list(span = c(i, i + 1L), direction = "fwd",
-                  f_tok = tokens[[i + 1L]]))
+        tokens[[i]]$type == "TEL" && tokens[[i + 1L]]$type == "F") {
+      m <- .match_side(tokens[[i + 1L]], c(i, i + 1L), "fwd")
+      if (!is.null(m)) return(m)
+    }
 
     # Reverse: ... [F] TEL
     if (i >= 2L &&
-        tokens[[i]]$type == "F" &&
-        tokens[[i + 1L]]$type == "TEL" &&
-        !is.na(.terminal_depth_ratio(tokens[[i]])) &&
-        .terminal_depth_ratio(tokens[[i]]) < params$depth_drop)
-      return(list(span = c(i, i + 1L), direction = "rev",
-                  f_tok = tokens[[i]]))
+        tokens[[i]]$type == "F" && tokens[[i + 1L]]$type == "TEL") {
+      m <- .match_side(tokens[[i]], c(i, i + 1L), "rev")
+      if (!is.null(m)) return(m)
+    }
 
     NULL
   },
   fire_fn = function(m, chain, params) {
+    parts <- character(0)
+    if (m$depth_hit)
+      parts <- c(parts, sprintf("depth_ratio=%.2f < %.2f", m$ratio, params$depth_drop))
+    if (m$read_hit)
+      parts <- c(parts, sprintf(paste0("read-level deletion at %d SNPs ",
+                                       "(mean del_frac=%.2f, read coherence=%.2f)"),
+                                m$n_del_snps, m$del_frac_mean, m$coherence))
+
+    # Same reporting rule as Rd: n_support is only meaningful when the read
+    # trigger itself fired (see the long comment on that in fire_fn below) —
+    # a depth-only terminal call has no deleted-read count to report.
+    ns <- if (isTRUE(m$read_hit) && m$n_del_reads > 0L)
+      as.integer(m$n_del_reads) else NA_integer_
+
     ev <- .make_event("TERMINAL_DELETION", chain$chrom,
-                      list(m$f_tok),
-                      notes = sprintf("depth_ratio=%.2f < %.2f",
-                                      .terminal_depth_ratio(m$f_tok), params$depth_drop))
+                      list(m$f_tok), n_support = ns,
+                      notes = paste(parts, collapse = "; "))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
   }
 )
