@@ -44,6 +44,12 @@ default_chain_params <- function() {
     # AMBIGUOUS(low_coverage)
     min_span        = 3L,
 
+    # SNPs examined on each side of a peak-only crossover's junction when
+    # reconcile() decides CROSSOVER_NO_TRACT vs CO_GC_subres. Any per-SNP
+    # (pre-min_run collapse) fixed call among them is a conversion tract too
+    # short for the LOH map -> CO_GC_subres; all HET -> no tract at all.
+    no_tract_flank_snps = 2L,
+
     # Fraction of spanning reads sharing the return pattern for NCO_GC
     homog_frac      = 0.80,
 
@@ -3688,7 +3694,8 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
 # =============================================================================
 
 reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
-                      snp_peaks = NULL, params = default_chain_params()) {
+                      snp_peaks = NULL, params = default_chain_params(),
+                      loh_snps = NULL) {
 
   all_events <- unlist(lapply(scan_results, `[[`, "events"), recursive = FALSE)
 
@@ -3854,12 +3861,40 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   # genuinely cannot resolve (binary singleton, independent_events, no
   # edge_type, low coverage, ...) are not events — they stay in
   # `unclaimed_peaks` for manual review, tagged with the reason.
+  #
+  # A crossover peak splits further on the per-SNP LOH calls at its junction
+  # (compute_loh_map()$snp_table, before min_run collapse). A conversion tract
+  # too short for the LOH map still leaves fixed SNPs there that the collapse
+  # absorbed back into HET -> CO_GC_subres. When every SNP within
+  # no_tract_flank_snps either side is HET, the reads switch haplotype with no
+  # tract at all -> CROSSOVER_NO_TRACT. R08, which named that class, only
+  # matched two adjacent opposite-state fixed tokens and is disabled, so a
+  # clean crossover inside a HET region had no path to it. Without loh_snps
+  # the split cannot be made and the call stays CO_GC_subres.
+  .junction_has_fixed_snp <- function(chrom, pos) {
+    if (is.null(loh_snps) || nrow(loh_snps) == 0) return(NA)
+    s <- loh_snps[as.character(loh_snps$chrom) == chrom & !is.na(loh_snps$loh_state)]
+    if (nrow(s) == 0) return(NA)
+    s <- s[order(s$pos)]
+    k <- as.integer(params$no_tract_flank_snps %||% 2L)
+    left  <- which(s$pos <= pos)
+    right <- which(s$pos >  pos)
+    idx <- c(utils::tail(left, k + 1L), utils::head(right, k))
+    any(s$loh_state[idx] != "HET")
+  }
+
   uncat_peak_events   <- list()
   still_unclaimed_pks <- list()
   for (u in unclaimed_peaks) {
     tract <- classify_tract(list(best_edge_type = u$edge_type,
                                  n_spanning = u$n_read_support), params)
     if (tract$call %in% c("NCO_GC", "CO_GC")) {
+      has_fixed <- if (tract$call == "CO_GC")
+        .junction_has_fixed_snp(u$chrom, u$snp_pos) else NA
+      ev_class  <- if (isFALSE(has_fixed)) "CROSSOVER_NO_TRACT"
+                   else paste0(tract$call, "_subres")
+      ev_notes  <- if (isFALSE(has_fixed)) "no_tract; all junction SNPs HET; peak_only"
+                   else "no_fixed_tract; peak_only"
       # If phase-rescued, report the event over the excised island tract;
       # otherwise it is a point event at the peak's SNP position.
       u_isl_s <- u$phase_island_start
@@ -3867,7 +3902,7 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
       ev_st <- if (!is.null(u_isl_s) && !is.na(u_isl_s)) as.integer(u_isl_s) else as.integer(u$snp_pos)
       ev_en <- if (!is.null(u_isl_e) && !is.na(u_isl_e)) as.integer(u_isl_e) else as.integer(u$snp_pos)
       uncat_peak_events <- c(uncat_peak_events, list(list(
-        event_class = paste0(tract$call, "_subres"), chrom = u$chrom,
+        event_class = ev_class, chrom = u$chrom,
         start = ev_st, end = ev_en,
         length_bp = as.integer(ev_en - ev_st), n_support = tract$n_support,
         peak_edge_types = u$edge_type %||% NA_character_,
@@ -3875,7 +3910,7 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         # so by construction there is no fixed tract behind it (see .make_event).
         evidence = "peak_only",
         phase_switch_frac = u$phase_switch_frac %||% NA_real_,
-        notes = "no_fixed_tract; peak_only", tokens = list())))
+        notes = ev_notes, tokens = list())))
     } else {
       u$reason <- tract$reason
       still_unclaimed_pks <- c(still_unclaimed_pks, list(u))
@@ -3961,10 +3996,14 @@ build_event_table <- function(events, params = default_chain_params()) {
     confidence <- if (identical(ev$support_kind %||% NA_character_, "tract_reads") &&
                       ev$event_class %in% HIGH_CONF_CLASSES) {
       if (!is.na(ns) && ns >= tract_read_high_min) "high" else "review"
+    } else if (ev$event_class %in% SUBRES_CLASSES ||
+               (identical(ev$event_class, "CROSSOVER_NO_TRACT") &&
+                identical(ev$evidence %||% NA_character_, "peak_only"))) {
+      # A peak-only CROSSOVER_NO_TRACT (reconcile()) has the same single-peak
+      # evidence as the _subres classes, so it takes the same min_span floor.
+      if (!is.na(ns) && ns >= min_span) "high" else "review"
     } else if (ev$event_class %in% HIGH_CONF_CLASSES) {
       "high"
-    } else if (ev$event_class %in% SUBRES_CLASSES) {
-      if (!is.na(ns) && ns >= min_span) "high" else "review"
     } else {
       "review"
     }
@@ -4023,6 +4062,10 @@ build_event_table <- function(events, params = default_chain_params()) {
 #'                       terminal deletion apart from a terminal LOH/
 #'                       crossover that is simply missing its junction peak.
 #'                       NULL falls back to coverage_segments/SNP-density.
+#' @param loh_snps       optional compute_loh_map()$snp_table. Per-SNP LOH calls
+#'                       (before min_run collapse) that let reconcile() tell a
+#'                       peak-only CROSSOVER_NO_TRACT from a CO_GC_subres.
+#'                       NULL leaves every such crossover CO_GC_subres.
 #' @param params         named list; defaults from default_chain_params()
 #'
 #' @return named list:
@@ -4052,6 +4095,7 @@ run_chain_analysis <- function(loh_segments,
                                 chr_span,
                                 coverage_segments = NULL,
                                 coverage_table     = NULL,
+                                loh_snps     = NULL,
                                 params       = default_chain_params()) {
 
   message("  [chain] Building raw chains ...")
@@ -4088,7 +4132,7 @@ run_chain_analysis <- function(loh_segments,
 
   message("  [chain] Reconciling unclaimed tokens ...")
   rec <- reconcile(scan_results, chains, fused_peaks, peak_pairs, snp_peaks,
-                   params = params)
+                   params = params, loh_snps = loh_snps)
 
   event_table <- build_event_table(rec$events, params = params)
 

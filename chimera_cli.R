@@ -789,7 +789,8 @@ if (run_chain) {
     chains       = canonical_chains,
     fused_peaks  = fusion_res$fused_peaks,
     peak_pairs   = fusion_res$peak_pairs,
-    snp_peaks    = results$snp_peaks
+    snp_peaks    = results$snp_peaks,
+    loh_snps     = loh_result$snp_table
   )
 
   final_events <- build_event_table(rec$events)

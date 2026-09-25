@@ -1234,6 +1234,7 @@ server <- function(input, output, session) {
         chr_span          = results$chr_span,
         coverage_segments = results$coverage_segments,
         coverage_table    = results$coverage_table,
+        loh_snps          = results$loh_map,       # per-SNP; CROSSOVER_NO_TRACT vs CO_GC_subres
         params            = cp
       )
       

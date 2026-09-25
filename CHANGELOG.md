@@ -4,6 +4,29 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Tract-less crossovers are called `CROSSOVER_NO_TRACT`, not `CO_GC_subres`
+
+- A crossover with no conversion tract inside a HET region has no fixed token
+  for a motif rule to anchor on. Its `internal_crossover` peak falls through
+  to `reconcile()`'s peak-only promotion, which named every crossover
+  `CO_GC_subres`. `CROSSOVER_NO_TRACT` was reachable only through R08, which
+  matches two adjacent opposite-state fixed tokens and is disabled, so the
+  class never fired.
+- `reconcile()` now reads the per-SNP LOH calls (`compute_loh_map()$snp_table`,
+  before min_run collapse) at the peak's junction. Any fixed SNP within
+  `no_tract_flank_snps` (default 2) either side marks a tract too short for the
+  LOH map, so the call stays `CO_GC_subres`. If every SNP there is HET, the call
+  is `CROSSOVER_NO_TRACT`. A peak-only `CROSSOVER_NO_TRACT` gets the same
+  `min_span` confidence floor as the `_subres` classes.
+- The CLI and app pass the table through (`run_chain_analysis(loh_snps = )`).
+  Without it, the old behaviour is kept.
+- Effect on results: on
+  `test_data/Het_S288C_SYNv1_20Swaps_0bpLOH_alpha1_seed1_co20_sm0.csv.gz`
+  (20 crossovers with 0 bp tracts), all 20 are now `CROSSOVER_NO_TRACT` (high)
+  rather than `CO_GC_subres`. The SYNv3 sets are unchanged.
+
 ## [0.8.20] - 2026-09-10
 
 ### Allele runs are read *per alignment block*, not per read id
