@@ -4,7 +4,7 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.21] - 2026-09-25
 
 ### Tract-less crossovers are called `CROSSOVER_NO_TRACT`, not `CO_GC_subres`
 
