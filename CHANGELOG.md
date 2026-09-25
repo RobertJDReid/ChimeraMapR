@@ -25,7 +25,17 @@ read by `app.R` and `chimera_cli.R`.
 - Effect on results: on
   `test_data/Het_S288C_SYNv1_20Swaps_0bpLOH_alpha1_seed1_co20_sm0.csv.gz`
   (20 crossovers with 0 bp tracts), all 20 are now `CROSSOVER_NO_TRACT` (high)
-  rather than `CO_GC_subres`. The SYNv3 sets are unchanged.
+  rather than `CO_GC_subres`. On `test_data/RAD5_01.csv.gz`, chrI 108,033
+  (36 reads, all junction SNPs HET) becomes `CROSSOVER_NO_TRACT`. chrXI 391,787
+  and chrXIII 11,463 each have a single fixed SNP at the peak, so they stay
+  `CO_GC_subres`. The SYNv3 sets are unchanged.
+
+### CLI chain settings reach reconcile and the event table
+
+- `chimera_cli.R` called `reconcile()` and `build_event_table()` without the
+  chain settings, so they used the defaults. `--min-span` and `--peak-pad` were
+  ignored when scoring confidence and claiming junction zones. Both calls now
+  get the same settings as the rest of the chain steps.
 
 ## [0.8.20] - 2026-09-10
 

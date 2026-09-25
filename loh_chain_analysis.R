@@ -3871,16 +3871,20 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   # matched two adjacent opposite-state fixed tokens and is disabled, so a
   # clean crossover inside a HET region had no path to it. Without loh_snps
   # the split cannot be made and the call stays CO_GC_subres.
-  .junction_has_fixed_snp <- function(chrom, pos) {
+  # Arguments are not named chrom/pos: inside loh_snps[...] data.table would
+  # resolve those to the columns, and the chromosome filter would match every row.
+  .junction_has_fixed_snp <- function(pk_chrom, pk_pos) {
     if (is.null(loh_snps) || nrow(loh_snps) == 0) return(NA)
-    s <- loh_snps[as.character(loh_snps$chrom) == chrom & !is.na(loh_snps$loh_state)]
-    if (nrow(s) == 0) return(NA)
-    s <- s[order(s$pos)]
+    keep <- which(as.character(loh_snps$chrom) == pk_chrom & !is.na(loh_snps$loh_state))
+    if (length(keep) == 0) return(NA)
+    s_pos   <- loh_snps$pos[keep]
+    s_state <- loh_snps$loh_state[keep][order(s_pos)]
+    s_pos   <- sort(s_pos)
     k <- as.integer(params$no_tract_flank_snps %||% 2L)
-    left  <- which(s$pos <= pos)
-    right <- which(s$pos >  pos)
+    left  <- which(s_pos <= pk_pos)
+    right <- which(s_pos >  pk_pos)
     idx <- c(utils::tail(left, k + 1L), utils::head(right, k))
-    any(s$loh_state[idx] != "HET")
+    any(s_state[idx] != "HET")
   }
 
   uncat_peak_events   <- list()

@@ -790,10 +790,11 @@ if (run_chain) {
     fused_peaks  = fusion_res$fused_peaks,
     peak_pairs   = fusion_res$peak_pairs,
     snp_peaks    = results$snp_peaks,
+    params       = cp,
     loh_snps     = loh_result$snp_table
   )
 
-  final_events <- build_event_table(rec$events)
+  final_events <- build_event_table(rec$events, params = cp)
   ev_summary   <- sprintf("(%d total; %d high, %d review)",
                           nrow(final_events),
                           sum(final_events$confidence == "high"),
