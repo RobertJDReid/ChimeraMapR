@@ -4,7 +4,7 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.22] - 2026-09-26
 
 ### R06 calls a gene conversion nested in a long LOH run from the LOH structure
 
