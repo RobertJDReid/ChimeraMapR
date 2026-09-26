@@ -6,6 +6,39 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [Unreleased]
 
+### R06 calls a gene conversion nested in a long LOH run from the LOH structure
+
+- Since 0.8.15, peak-pair outer zones vote on heterozygous positions only. A
+  small opposite-state fragment inside a long fixed run has none on either
+  side, so its two binary junction peaks form an `unresolvable` pair and never
+  fuse. Every read is REF-ALT-REF (or ALT-REF-ALT) across the fragment whichever
+  homolog it came from, so the reads really cannot tell NCO from CO there.
+- R06 (`rule_opp_sandwich`) then fell through to `AMBIGUOUS(binary_single_peak)`
+  or `POSSIBLE_GC`. It only saw a junction peak when it was attached to the
+  fragment itself, and it dropped a binary peak sitting just outside the
+  fragment. RAD5_01 chrIV 783,664-784,405 (left peak 231 bp outside,
+  past `peak_pad_bp`) and 959,807-960,839 (right peak just past its end) are
+  the cases.
+- New `.fragment_junction_peaks()` looks for a binary peak at each junction
+  among the peaks on the fragment and on both flanks. If `compute_peak_pairs()`
+  found the pair between them unphased (`unresolvable`, with an outer zone
+  below `ZONE_CALL_HEURISTICS$min_evidence_snps` het SNPs), the fragment is
+  called `NCO_GC_in_terminal` with a `loh_structural` note, at review
+  confidence. The same-state flanks R06 already requires are the evidence.
+  `n_support` is the pair's shared-read count, and the note says those reads
+  are phase-uninformative.
+- `.get_chr_peaks()` records each peak's unphased partners
+  (`unphased_partner_pos`, `unphased_n_shared`) from every pair it ends, not
+  only the `best_pair`.
+- A fragment carrying its own self-classifying peak keeps the read-based path.
+- Effect on the 10-sample set (8 RAD5 + SYNv3 clean/r15): 8 events change
+  class in place, with the same spans and no event added or removed. RAD5_01
+  chrIV 783,664 and 959,807 and chrXV 776,962, 854,136 and 1,031,122 change,
+  as do RAD5_02 chrIV 1,390,561 and chrXII 370,492 and 375,239. All
+  go from `AMBIGUOUS(binary_single_peak)` / `POSSIBLE_GC` to
+  `NCO_GC_in_terminal`. Their junction peaks leave the unexplained-peaks
+  output. The other 8 samples, including RAD5_15 chrI, are byte-identical.
+
 ### R03 (`TCO_CAPTURED_TCO`) no longer bridges a callable HET zone
 
 - R03's late anchor treated any non-fixed token as the gap between the inner

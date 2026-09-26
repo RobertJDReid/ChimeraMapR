@@ -586,6 +586,35 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     }
   }
 
+  # Partners this peak forms an UNPHASED pair with: the pair went
+  # "unresolvable" because an outer zone held too few heterozygous SNPs for
+  # classify_zone_state() to call (compute_peak_pairs() votes the outer zones
+  # on het positions only). Both junctions of a small fragment nested inside a
+  # long fixed run land here -- every read is REF-ALT-REF across it whichever
+  # homolog it came from -- so R06 uses this to recognise its junction pair
+  # from the LOH structure instead (see .fragment_junction_peaks). Recorded for
+  # EVERY pair the peak is an endpoint of, not just the best_pair above, which
+  # is chosen by n_spanning and an unphased pair has none. Needs the
+  # zone_*_het_snps columns; older peak_pairs tables leave these empty.
+  grp_rep[, unphased_partner_pos := rep(list(numeric(0)), .N)]
+  grp_rep[, unphased_n_shared    := rep(list(integer(0)), .N)]
+  if (!is.null(peak_pairs) && nrow(peak_pairs) > 0 &&
+      all(c("zone_l_het_snps", "zone_r_het_snps") %in% names(peak_pairs))) {
+    callable <- as.integer(ZONE_CALL_HEURISTICS$min_evidence_snps)
+    up <- peak_pairs[as.character(chrom) == chr_name &
+                       edge_type == "unresolvable" &
+                       (zone_l_het_snps < callable | zone_r_het_snps < callable)]
+    for (ri in seq_len(nrow(grp_rep))) {
+      ends <- grp_rep$sub_peak_pos[[ri]]
+      if (length(ends) == 0 || all(is.na(ends))) ends <- grp_rep$fused_pos_bp[ri]
+      as_a <- up[snp_pos_a %in% ends]
+      as_b <- up[snp_pos_b %in% ends]
+      if (nrow(as_a) + nrow(as_b) == 0) next
+      grp_rep$unphased_partner_pos[[ri]] <- c(as_a$snp_pos_b, as_b$snp_pos_a)
+      grp_rep$unphased_n_shared[[ri]]    <- as.integer(c(as_a$n_shared, as_b$n_shared))
+    }
+  }
+
   # Peaks with no peak_pairs evidence at all (n_spanning still at the 0L
   # default — no eligible partner found, or excluded from pairing entirely)
   # fall back to their own per-read switch count so a real terminal binary
@@ -2133,6 +2162,65 @@ rule_het_bounded <- list(
 #   reported). Only the walk's outermost L and final R get merged into one
 #   background token; every fragment token in between is consumed and
 #   reported without being folded into that merge.
+#   Structural fallback (.fragment_junction_peaks). A fragment nested in a long
+#   fixed run has no heterozygous sequence near either junction, so the pair
+#   its two binary junction peaks form is "unresolvable": every read is
+#   REF-ALT-REF (or ALT-REF-ALT) across it whichever homolog it came from, and
+#   that pattern carries no phase. The reads cannot say NCO vs CO -- but the
+#   LOH structure the match already established (opposite-state fragment,
+#   same-state flanks) is itself the gene-conversion evidence, so such a
+#   fragment is called NCO_GC_in_terminal with a "loh_structural" note rather
+#   than falling through to AMBIGUOUS(binary_single_peak) / POSSIBLE_GC.
+#   RAD5_01 S288C_chrIV 783,664-784,405 (ALT in REF) and 959,807-960,839 (REF
+#   in ALT) are the cases: the junction peaks sit 231 bp outside the fragment
+#   (past peak_pad_bp, so attached to the flank instead) and just past its
+#   end (so discarded as a flank-boundary marker) respectively.
+
+# The binary peak marking each junction of fragment `ftk`, looked for among
+# every peak attached to the fragment and to its two flanking F tokens -- a
+# junction peak's SNP is the last/first SNP of whichever segment it bounds,
+# so .attach_peaks can file it under either side, and past peak_pad_bp under
+# the flank only. Each junction's search window runs from the flank's inner
+# SNP to the fragment's (plus peak_pad_bp either way) but never past the
+# fragment's midpoint, so a short fragment can't hand one peak both roles.
+# Returns list(pk_l, pk_r, n_shared) only when both are binary AND
+# compute_peak_pairs() found the pair between them unphased; else NULL.
+.fragment_junction_peaks <- function(l_tok, ftk, r_tok, params) {
+  pad <- params$peak_pad_bp %||% 0L
+  pks <- do.call(.union_peaks,
+    lapply(list(l_tok, ftk, r_tok), function(tk)
+      c(tk$peaks_over %||% list(tk$peak_over),
+        list(tk$peak_left, tk$peak_right))))
+  if (length(pks) == 0) return(NULL)
+
+  mid <- (ftk$start + ftk$end) / 2
+  pick <- function(boundary, lo, hi) {
+    best <- NULL; best_d <- Inf
+    for (pk in pks) {
+      et <- pk$best_edge_type %||% pk$edge_type
+      if (!isTRUE(et == "binary")) next
+      p <- .peak_junction_pos(pk, boundary)
+      if (is.na(p) || p < lo || p > hi) next
+      d <- abs(p - boundary)
+      if (d < best_d) { best <- pk; best_d <- d }
+    }
+    best
+  }
+  pk_l <- pick(ftk$start, l_tok$end - pad, min(ftk$start + pad, mid))
+  pk_r <- pick(ftk$end,   max(ftk$end - pad, mid), r_tok$start + pad)
+  if (is.null(pk_l) || is.null(pk_r) || identical(pk_l, pk_r)) return(NULL)
+
+  pos_r    <- .peak_junction_pos(pk_r, ftk$end)
+  partners <- pk_l$unphased_partner_pos
+  shared   <- pk_l$unphased_n_shared
+  if (is.list(partners)) partners <- partners[[1]]
+  if (is.list(shared))   shared   <- shared[[1]]
+  hit <- which(partners == pos_r)
+  if (length(hit) == 0) return(NULL)
+
+  list(pk_l = pk_l, pk_r = pk_r, n_shared = as.integer(shared[hit[1]]))
+}
+
 rule_opp_sandwich <- list(
   id = "R06_opp_sandwich",
   match_fn = function(tokens, i, chain, params) {
@@ -2200,6 +2288,25 @@ rule_opp_sandwich <- list(
       # the cascade from ever reaching the far telomere.
       too_small_for_peak <- !is.na(ftk$n_snps) && ftk$n_snps < params$min_snps_for_peak
 
+      # Structural fallback (see the header): two binary junction peaks whose
+      # pair is unphased. Checked ahead of the peak_over handling below, which
+      # would otherwise discard a junction peak sitting just outside ftk. A
+      # self-classifying peak on ftk keeps the read-based path.
+      et_own <- if (is.null(pk)) NA_character_ else (pk$best_edge_type %||% pk$edge_type)
+      if (is.null(pk) || isTRUE(et_own == "binary")) {
+        jp <- .fragment_junction_peaks(cur_bg, ftk, r, params)
+        if (!is.null(jp)) {
+          fragments[[length(fragments) + 1L]] <- list(
+            f_tok = ftk, pk = NULL, pk_l = jp$pk_l, pk_r = jp$pk_r,
+            too_small_for_peak = FALSE,
+            structural = TRUE, n_shared = jp$n_shared
+          )
+          cur_bg     <- r
+          cur_bg_idx <- ri
+          next
+        }
+      }
+
       # A peak attached as peak_over may have its SNP position (fused_pos_bp)
       # outside the fragment's own [start, end] span — this happens when a
       # wide chimeric-peak window overlaps the fragment edge but the
@@ -2252,7 +2359,9 @@ rule_opp_sandwich <- list(
                     make_token("F", start = frag$f_tok$start, end = frag$f_tok$end,
                                peak_over = frag$pk_l), params$center_tol)
 
-      tract <- if (frag$too_small_for_peak && is.null(frag$pk))
+      tract <- if (isTRUE(frag$structural))
+        list(call = "NCO_GC", reason = "loh_structural", n_support = frag$n_shared)
+      else if (frag$too_small_for_peak && is.null(frag$pk))
         list(call = "POSSIBLE_GC", reason = "too_small_for_peak", n_support = 0L)
       else if (!is.null(frag$pk_l) && !is.null(frag$pk_r))
         classify_two_binary_junction(frag$pk_l, frag$pk_r, frag$f_tok$state, params)
@@ -2279,7 +2388,12 @@ rule_opp_sandwich <- list(
                   evidence_peaks = Filter(Negate(is.null),
                                           list(frag$pk, frag$pk_l, frag$pk_r)),
                   n_support = tract$n_support,
-                  notes = paste0("small_opp_fragment; centered=", centered))
+                  notes = paste0("small_opp_fragment; centered=", centered,
+                                 if (isTRUE(frag$structural))
+                                   paste0("; loh_structural: no het SNPs flank the",
+                                          " junctions, so the ", tract$n_support,
+                                          " reads crossing both are phase-uninformative")
+                                 else ""))
     })
 
     # Rewrite: combine the walk's outermost flanking F tokens into one (every
