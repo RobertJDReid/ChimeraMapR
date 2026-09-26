@@ -2018,7 +2018,15 @@ rule_tco_captured_tco <- list(
     # time, with fbar's fully-merged, telomere-reaching extent by the last
     # one. Tried second so the early form (cheaper, no merge required)
     # still wins outright when it's already sufficient.
-    fi <- .nearest_fixed_left(tokens, i)
+    #
+    # The anchor must be a real gap: a G token or an H island too thin to
+    # phase. A callable HET zone between ftk and fbar means the chromosome
+    # returned to heterozygosity, so the two tracts are separate events, not
+    # one terminal CO over another. Without this guard the late form bridged
+    # a 48 kb, 313-SNP HET zone in SYNv1 chrXI (REF 609,379-611,236 ... ALT
+    # 660,224-661,506), turning two ordinary CO_GCs into one "2 X TCO".
+    fi <- if (.zone_callable(tokens[[i]], params)) NULL
+          else .nearest_fixed_left(tokens, i)
     if (!is.null(fi)) {
       hi  <- .nearest_nonfixed_left(tokens, fi)
       fbi <- .nearest_fixed_right(tokens, i)

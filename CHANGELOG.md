@@ -4,6 +4,23 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### R03 (`TCO_CAPTURED_TCO`) no longer bridges a callable HET zone
+
+- R03's late anchor treated any non-fixed token as the gap between the inner
+  tract and the opposite-state terminal tract, including a phase-callable HET
+  zone. In SYNv1 chrXI it bridged 48 kb and 313 HET SNPs between REF
+  609,379-611,236 and ALT 660,224-661,506. The ALT tract ends within
+  `tel_tol_bp` of the last SNP, so it counted as terminal, and the two
+  crossovers were called one `2 X TCO` plus a stray `CO_GC_subres`. Both are
+  now `CO_GC`.
+- The late anchor must now be a G gap or an H island too thin to phase
+  (`.zone_callable()`), which is also what the early anchor allows.
+- RAD5_03 chrXII: a `TCO_CAPTURED_TCO` spanning 169,700-1,057,331 across a
+  257 kb HET zone is replaced by `GC_UNRESOLVED` (159,037-194,754) and
+  `CO_TERM_PROBABLE` (485,198-1,057,331). Both are flagged for review.
+
 ## [0.8.21] - 2026-09-25
 
 ### Tract-less crossovers are called `CROSSOVER_NO_TRACT`, not `CO_GC_subres`
