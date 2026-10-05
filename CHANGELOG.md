@@ -28,6 +28,27 @@ read by `app.R` and `chimera_cli.R`.
   31,549 drops out. Its tract is still called `NCO_GC` at high confidence, by
   R11c from the read evidence (`loh_only` instead of `peak+loh`), and the call
   count stays at 14.
+- **Known limitation: median depth is the wrong denominator when read length
+  differs between samples.** Peak height counts reads that cross a junction
+  with `min_run` SNPs on each side, and how many do depends on read length as
+  much as on depth. Tested on RAD5_11/01/03/08/10 at 0.15 and 0.2:
+
+  | sample | median depth | median read span | cutoff (0.15 / 0.2) | peaks (0 / 0.15 / 0.2) | events (0 / 0.15 / 0.2) |
+  |---|---|---|---|---|---|
+  | RAD5_11 | 52 | 5.8 kb | 10 / 11 | 73 / 73 / 73 | 48 / 48 / 48 |
+  | RAD5_01 | 76 | 3.1 kb | 12 / 16 | 72 / 72 / 72 | 50 / 50 / 50 |
+  | RAD5_03 | 103 | 2.5 kb | 16 / 21 | 30 / 29 / 29 | 24 / 23 / 23 |
+  | RAD5_08 | 179 | 6.1 kb | 27 / 36 | 39 / 39 / 39 | 26 / 26 / 26 |
+  | RAD5_10 | 190 | 1.1 kb | 29 / 38 | 26 / 20 / 17 | 22 / 19 / 19 |
+
+  RAD5_08 and RAD5_10 have similar depth, but their median peak heights are 68
+  and 31 reads. RAD5_10's depth comes from about 1.1M short reads. At 0.15 it
+  loses the high-confidence `CO_TERM` S288C_chrXVI 20,096-65,154 outright,
+  because its binary junction peak at 65,154 has 22 reads against a cutoff
+  of 29. Do not use a nonzero `--min-peak-frac` across samples with different
+  read lengths. The planned fix is to normalize by junction-spanning depth
+  (reads with >= `min_run` SNPs on both sides of the SNP) instead of total
+  depth.
 
 ## [0.8.22] - 2026-09-26
 
