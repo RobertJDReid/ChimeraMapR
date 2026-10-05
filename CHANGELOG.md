@@ -4,6 +4,31 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Depth-relative minimum peak height (`--min-peak-frac`)
+
+- `min_peak_height` is a raw count of chimeric reads, so the same cutoff of 10
+  means very different things at 30x and 150x, and samples sequenced to
+  different depths could not be compared at one setting.
+- New `min_peak_frac` (CLI `--min-peak-frac`, app "Min Peak Height (fraction
+  of median depth)"). `run_chimera_analysis()` now computes the median per-SNP
+  depth over the MAPQ + base-quality filtered read set that the transition
+  counts come from. The effective cutoff is
+  `max(min_peak_height, ceiling(min_peak_frac × median_depth))`.
+  `min_peak_height` stays as a floor, so a low-depth sample cannot form peaks
+  from 2-3 reads.
+- `params` gains `min_peak_frac`, `median_depth` and `min_peak_height_eff`,
+  and the CLI run summary and app parameter summary print the median depth and
+  the cutoff actually used. `params$min_peak_height` stays the value the user
+  passed. `chromosome_fits$min_peak_height` records the effective cutoff.
+- The default is 0 (off). SYNv3 `sm50` peak list and events table are
+  byte-identical to 0.8.22 at the defaults. With `--min-peak-frac 0.3` (median
+  depth 56, so a cutoff of 17), the 15-read `gene_conversion` peak at chrXI
+  31,549 drops out. Its tract is still called `NCO_GC` at high confidence, by
+  R11c from the read evidence (`loh_only` instead of `peak+loh`), and the call
+  count stays at 14.
+
 ## [0.8.22] - 2026-09-26
 
 ### R06 calls a gene conversion nested in a long LOH run from the LOH structure

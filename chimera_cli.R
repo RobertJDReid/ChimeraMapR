@@ -36,6 +36,7 @@
 #      --baseq-cutoff 15 \
 #      --min-run 3 \
 #      --min-peak-height 10 \
+#      --min-peak-frac 0.1 \
 #      --lambda 1 \
 #      --output results/ \
 #      reads.csv.gz snps.vcf.gz genome.fa.fai
@@ -162,6 +163,15 @@ option_list <- list(
               default = 10L,
               metavar = "INT",
               help    = "Minimum transition count at a SNP to qualify as a peak [default: %default]"),
+
+  make_option("--min-peak-frac",
+              type    = "double",
+              default = 0,
+              metavar = "FLOAT",
+              help    = paste("Depth-relative peak cutoff: the effective minimum peak height is",
+                              "max(--min-peak-height, ceiling(FLOAT x median SNP depth)), giving",
+                              "a consistent threshold across samples of different depth.",
+                              "0 disables it [default: %default]")),
 
   make_option(c("-l", "--lambda"),
               type    = "double",
@@ -372,6 +382,7 @@ cat("  Del block gates :", opts[["del-block-min-snps"]], "SNPs,",
                            opts[["del-block-read-coherence"]], "\n")
 cat("  Min run         :", opts[["min-run"]],         "\n")
 cat("  Min peak height :", opts[["min-peak-height"]], "\n")
+cat("  Min peak frac   :", opts[["min-peak-frac"]],   "\n")
 cat("  Lambda (λ)      :", opts[["lambda"]],          "\n")
 OUTPUT_LABEL <- c(plot   = "Overview plot (PNG)",
                   peaks  = "Peak list (CSV)",
@@ -403,6 +414,7 @@ results <- run_chimera_analysis(
   del_block_read_coherence = opts[["del-block-read-coherence"]],
   min_run         = opts[["min-run"]],
   min_peak_height = opts[["min-peak-height"]],
+  min_peak_frac   = opts[["min-peak-frac"]],
   lambda          = opts[["lambda"]]
 )
 
@@ -425,7 +437,8 @@ results$snp_peaks <- label_snp_peaks_haplotypes(
 # ── Print run summary ─────────────────────────────────────────────────────────
 n_chimeric  <- length(results$chimeric_read_ids)
 n_peaks     <- nrow(results$peaks_genomic)
-# Peaks that mapped to a qualifying SNP (raw count >= --min-peak-height); the
+# Peaks that mapped to a qualifying SNP (raw count >= the effective min peak
+# height, i.e. --min-peak-height raised by --min-peak-frac if set); the
 # rest carry snp_pos = NA and are excluded from the reported peak list, exactly
 # as in the app's "Peak Summary" table.
 n_peaks_qual <- if (!is.null(results$snp_peaks))
@@ -445,6 +458,8 @@ if (nrow(aneuploid) > 0) {
 } else {
   cat("  Ploidy               : all chromosomes 2N\n")
 }
+cat(sprintf("  Median SNP depth     : %.1f\n", results$params$median_depth))
+cat("  Min peak height used :", results$params$min_peak_height_eff, "\n")
 cat("  Chimeric reads       :", n_chimeric, "\n")
 cat("  Peaks detected       :", n_peaks, "\n")
 cat("  Peaks above min height:", n_peaks_qual, "\n")

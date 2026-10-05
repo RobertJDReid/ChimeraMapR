@@ -125,6 +125,7 @@ Layer extra outputs on top of the flags above.
 | `--del-block-read-coherence FLOAT` | `0.50` | Minimum fraction of a block's deletion calls that must come from reads deleted across the block, rather than scattered single-position misalignments |
 | `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run |
 | `--min-peak-height INT` | `10` | Minimum transition count at a SNP to qualify as a peak |
+| `--min-peak-frac FLOAT` | `0` | Depth-relative cutoff: the effective minimum peak height is `max(--min-peak-height, ceiling(FLOAT × median SNP depth))`, so one setting applies consistently across samples of different depth. `0` disables it |
 | `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
 
 #### Chain-analysis tuning parameters
