@@ -316,6 +316,50 @@ find_hemizygous_del_blocks <- function(read_data, high_del, mapq_cutoff,
   blocks[]
 }
 
+# -----------------------------------------------------------------------------
+#  check_peak_cutoffs()
+#    Validates min_peak_height and min_peak_frac before a run. Shared by
+#    run_chimera_analysis(), chimera_cli.R and app.R so all three reject the
+#    same values.
+#
+#    min_peak_height must be a whole number >= 1. At 0 the per-SNP cutoff
+#    max(min_peak_height, ceiling(min_peak_frac * span)) is 0 wherever no read
+#    spans a junction (e.g. a chromosome's first and last SNPs), so a count of
+#    0 qualifies and phantom zero-read peaks appear. On RAD5_10 at 0.25 that
+#    made 32 of them, one at the telomeric end of the S288C_chrXVI
+#    20,096-65,154 CO_TERM tract, and the event was lost.
+#
+#    min_peak_frac must lie in [0, 1]. Above 0.5 is allowed with a warning:
+#    real junction peaks run at a median 0.43-0.54 of spanning depth on RAD5,
+#    so such a cutoff removes real events.
+#
+#    Returns list(errors = character(), warnings = character()).
+# -----------------------------------------------------------------------------
+check_peak_cutoffs <- function(min_peak_height, min_peak_frac) {
+  errors   <- character(0)
+  warnings <- character(0)
+  ok_num <- function(x) length(x) == 1L && is.numeric(x) && is.finite(x)
+
+  if (!ok_num(min_peak_height) || min_peak_height < 1 ||
+      min_peak_height != round(min_peak_height))
+    errors <- c(errors, paste0(
+      "Minimum peak height must be a whole number of at least 1 (got ",
+      format(min_peak_height), "). At 0, SNPs with no junction-spanning ",
+      "reads qualify as zero-read peaks."))
+
+  if (!ok_num(min_peak_frac) || min_peak_frac < 0 || min_peak_frac > 1)
+    errors <- c(errors, paste0(
+      "Minimum peak fraction must be between 0 and 1 (got ",
+      format(min_peak_frac), "). 0 disables it; 0.25 is recommended."))
+  else if (min_peak_frac > 0.5)
+    warnings <- c(warnings, paste0(
+      "Minimum peak fraction ", min_peak_frac, " is above 0.5. Real junction ",
+      "peaks typically reach 0.4-0.55 of spanning depth, so real events will ",
+      "be dropped; 0.25 is recommended."))
+
+  list(errors = errors, warnings = warnings)
+}
+
 
 # -----------------------------------------------------------------------------
 #  Core analysis pipeline
@@ -359,6 +403,11 @@ run_chimera_analysis <- function(
     del_block_read_coherence = 0.50,
     warn_fn         = function(msg) message("WARNING: ", msg)
 ) {
+
+  # Backstop for callers other than the CLI and app, which check up front.
+  chk <- check_peak_cutoffs(min_peak_height, min_peak_frac)
+  if (length(chk$errors)) stop(paste(chk$errors, collapse = "\n"), call. = FALSE)
+  for (w in chk$warnings) warn_fn(w)
 
   # ── 1. Load data ─────────────────────────────────────────────────────────────
   message("  Loading read data ...")

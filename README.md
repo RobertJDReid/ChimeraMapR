@@ -124,8 +124,8 @@ Layer extra outputs on top of the flags above.
 | `--del-block-min-bp BP` | `500` | Minimum bp span for such a hemizygous-deletion block |
 | `--del-block-read-coherence FLOAT` | `0.50` | Minimum fraction of a block's deletion calls that must come from reads deleted across the block, rather than scattered single-position misalignments |
 | `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run |
-| `--min-peak-height INT` | `10` | Minimum transition count at a SNP to qualify as a peak |
-| `--min-peak-frac FLOAT` | `0` | Relative cutoff: a SNP qualifies as a peak when its transition count reaches `max(--min-peak-height, ceiling(FLOAT × spanning depth))`, where spanning depth is the number of reads at that SNP with `--min-run` SNPs on each side (see the note below). `0.25` is recommended; `0` disables it |
+| `--min-peak-height INT` | `10` | Minimum transition count at a SNP to qualify as a peak. Must be at least 1 |
+| `--min-peak-frac FLOAT` | `0` | Relative cutoff: a SNP qualifies as a peak when its transition count reaches `max(--min-peak-height, ceiling(FLOAT × spanning depth))`, where spanning depth is the number of reads at that SNP with `--min-run` SNPs on each side (see the note below). Must be between 0 and 1, with a warning above 0.5. `0.25` is recommended; `0` disables it |
 | `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
 
 > **How `--min-peak-frac` is scaled:** a SNP's transition count only includes reads that cross a junction there with `--min-run` SNPs on each side, so the number of reads that *could* contribute depends on read length and local SNP spacing as well as on depth. The cutoff is therefore scaled to each SNP's own junction-spanning depth, not to total depth. In testing on five samples with 1.1–6.1 kb median read spans, real peaks had a median count of 43–54% of spanning depth, and at `0.25` only peaks below about 10% of spanning depth were removed. A terminal crossover junction on a short-read sample (22 reads, 175× total but 64× spanning) is kept, where a cutoff scaled to total depth would drop it.
@@ -228,8 +228,8 @@ All parameters are set in the sidebar panel before running the analysis.
 | **Sample Name** | _(blank)_ | REF strain label used in exported file names and LOH band legends |
 | **ALT Strain Name** | _(blank)_ | Optional ALT strain label for LOH band legends; generic REF/ALT labels are used if blank |
 | **Minimum Run Length** | `2` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
-| **Minimum Peak Height** | `10` | Minimum chimeric read count for a peak to be reported. Acts as a floor when the fractional cutoff below is set |
-| **Min Peak Height (fraction of spanning depth)** | `0` | Relative cutoff: a SNP qualifies as a peak when its count reaches max(Minimum Peak Height, ceiling(fraction × spanning depth)), where spanning depth is the number of reads at that SNP with Minimum Run Length SNPs on each side (see the note under [Analysis parameters](#analysis-parameters)). `0.25` is recommended; `0` disables it |
+| **Minimum Peak Height** | `10` | Minimum chimeric read count for a peak to be reported. Acts as a floor when the fractional cutoff below is set. Must be at least 1 |
+| **Min Peak Height (fraction of spanning depth)** | `0` | Relative cutoff: a SNP qualifies as a peak when its count reaches max(Minimum Peak Height, ceiling(fraction × spanning depth)), where spanning depth is the number of reads at that SNP with Minimum Run Length SNPs on each side (see the note under [Analysis parameters](#analysis-parameters)). Must be between 0 and 1, with a warning above 0.5. `0.25` is recommended; `0` disables it |
 
 ### Advanced settings
 

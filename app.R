@@ -442,6 +442,7 @@ ui <- fluidPage(
                    "Min Peak Height (fraction of spanning depth):",
                    value = 0,
                    min = 0,
+                   max = 1,
                    step = 0.01),
       helpText(paste("A SNP qualifies as a peak when its count reaches max(Minimum Peak",
                      "Height, fraction \u00d7 spanning depth), where spanning depth counts",
@@ -867,6 +868,15 @@ server <- function(input, output, session) {
   observeEvent(input$run_analysis, {
 
     req(input$read_data_file, input$snp_data_file, input$chr_size_file)
+
+    # numericInput min/max only constrain the spinner; typed values (0, blank)
+    # get through, so check before clearing the previous results. Warnings are
+    # shown by run_chimera_analysis() through warn_fn.
+    peak_chk <- check_peak_cutoffs(input$min_peak_height, input$min_peak_frac)
+    if (length(peak_chk$errors)) {
+      for (e in peak_chk$errors) showNotification(e, type = "error", duration = 10)
+      return()
+    }
 
     # Reset outputs on re-run
     results$selected_region        <- NULL

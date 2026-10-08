@@ -298,6 +298,12 @@ for (f in c(read_path, snp_path, fai_path)) {
     stop("Input file not found: ", f)
 }
 
+# Validate peak cutoffs before loading anything (warnings are repeated by
+# run_chimera_analysis(), so only errors are acted on here)
+peak_chk <- check_peak_cutoffs(opts[["min-peak-height"]], opts[["min-peak-frac"]])
+if (length(peak_chk$errors))
+  stop(paste(peak_chk$errors, collapse = "\n"), call. = FALSE)
+
 # ── Select outputs ────────────────────────────────────────────────────────────
 # The four output flags are independent and may be combined in any way. When
 # none is given we fall back to the default set: overview PNG + peak list +

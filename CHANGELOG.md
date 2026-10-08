@@ -45,6 +45,14 @@ read by `app.R` and `chimera_cli.R`.
   S288C_chrVII 745,293 (10 / 205) and S288C_chrXII 21,260 (10 / 239). At 0.3,
   RAD5_11 also loses the `CO_GC` S288C_chrIV 236,785-237,826. 0.25 is the
   recommended setting.
+- New `check_peak_cutoffs()`, used by the CLI, the app and
+  `run_chimera_analysis()`, rejects a `min_peak_height` that is not a whole
+  number >= 1 and a `min_peak_frac` outside [0, 1], and warns above 0.5. A
+  height of 0 made the per-SNP cutoff 0 wherever no read spans a junction, so
+  zero-read SNPs became peaks: 32 on RAD5_10 at 0.25, one at the telomeric end
+  of the S288C_chrXVI 20,096-65,154 `CO_TERM` tract, which was then lost. The
+  app's `numericInput` min/max only bound the spinner, so typed values are now
+  checked before a run.
 
 ### Depth-relative minimum peak height (`--min-peak-frac`)
 
