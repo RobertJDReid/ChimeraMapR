@@ -4,7 +4,7 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.23] - 2026-10-08
 
 ### Peak cutoff defaults: `min_peak_height` 5, `min_peak_frac` 0.25
 
