@@ -8,6 +8,23 @@ source("loh_chain_analysis.R")  # loads chain functions
 
 # APP_VERSION is now defined inside chimera_functions.R
 
+# Git branch the app was launched from, shown under the version number when it
+# is not main so a run from a feature branch is easy to spot. NA when git is
+# unavailable or the app is not running from a checkout. A detached HEAD
+# reports its short commit hash instead.
+APP_GIT_BRANCH <- local({
+  git <- function(...) suppressWarnings(tryCatch(
+    system2("git", c("-C", shQuote(getwd()), ...), stdout = TRUE, stderr = FALSE),
+    error = function(e) character(0)))
+  b <- git("rev-parse", "--abbrev-ref", "HEAD")
+  if (length(b) != 1L || !nzchar(b) || !is.null(attr(b, "status"))) return(NA_character_)
+  if (b == "HEAD") {
+    h <- git("rev-parse", "--short", "HEAD")
+    if (length(h) == 1L && is.null(attr(h, "status"))) b <- paste("detached at", h)
+  }
+  b
+})
+
 # Null-coalescing operator (base R does not provide one)
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
@@ -527,6 +544,13 @@ ui <- fluidPage(
       tags$small(
         style = "color: gray;",
         paste("ChimeraMapR version", APP_VERSION)
+      ),
+      if (!is.na(APP_GIT_BRANCH) && APP_GIT_BRANCH != "main") tagList(
+        br(),
+        tags$small(
+          style = "color: gray;",
+          paste("Branch:", APP_GIT_BRANCH)
+        )
       ),
       width = 3
     ),
