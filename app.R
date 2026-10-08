@@ -421,6 +421,15 @@ ui <- fluidPage(
                    min = 1,
                    step = 1),
 
+      numericInput("min_peak_frac",
+                   "Min Peak Height (fraction of median depth):",
+                   value = 0,
+                   min = 0,
+                   step = 0.01),
+      helpText(paste("Effective cutoff is max(Minimum Peak Height, fraction \u00d7 median",
+                     "SNP depth), so one setting applies consistently across samples of",
+                     "different depth. 0 disables it.")),
+
       tags$details(
         class = "advanced-settings",
         tags$summary("Advanced Settings"),
@@ -748,6 +757,7 @@ server <- function(input, output, session) {
     snp_peaks             = NULL,
     chromosome_fits       = NULL,
     chr_span              = NULL,
+    run_params            = NULL,   # run_chimera_analysis()$params; carries median_depth and min_peak_height_eff
     plot                  = NULL,
     chimeric_read_ids     = NULL,
     peak_plots_by_chr     = NULL,
@@ -881,6 +891,7 @@ server <- function(input, output, session) {
         baseq_cutoff    = input$baseq_cutoff,
         min_run         = input$min_run,
         min_peak_height = input$min_peak_height,
+        min_peak_frac   = input$min_peak_frac,
         lambda          = input$lambda,
         del_rate_cutoff = input$del_rate_cutoff,
         del_block_min_snps       = input$del_block_min_snps,
@@ -898,6 +909,7 @@ server <- function(input, output, session) {
       results$snp_peaks         <- res$snp_peaks
       results$chromosome_fits   <- res$chromosome_fits
       results$chr_span          <- res$chr_span
+      results$run_params        <- res$params
       results$strain_ref        <- trimws(input$strain_ref)
       results$strain_alt        <- trimws(input$strain_alt)
       results$full_read_loh     <- res$full_read_loh
@@ -2174,6 +2186,9 @@ server <- function(input, output, session) {
       "  Min Run Length: ",           input$min_run,         "\n",
       "  Min LOH Segment SNPs: ",     input$min_run_snps,    "\n",
       "  Min Peak Height: ",          input$min_peak_height, "\n",
+      "  Min Peak Frac of Depth: ",   input$min_peak_frac,   "\n",
+      "  Median SNP Depth: ",         round(results$run_params$median_depth %||% NA_real_, 1), "\n",
+      "  Min Peak Height Used: ",     results$run_params$min_peak_height_eff %||% input$min_peak_height, "\n",
       "  Whittaker Lambda (\u03bb): ",input$lambda,          "\n",
       "  Jaccard Threshold: ",        input$jaccard_threshold
     )

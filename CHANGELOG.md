@@ -4,6 +4,52 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Depth-relative minimum peak height (`--min-peak-frac`)
+
+- `min_peak_height` is a raw count of chimeric reads, so the same cutoff of 10
+  means very different things at 30x and 150x, and samples sequenced to
+  different depths could not be compared at one setting.
+- New `min_peak_frac` (CLI `--min-peak-frac`, app "Min Peak Height (fraction
+  of median depth)"). `run_chimera_analysis()` now computes the median per-SNP
+  depth over the MAPQ + base-quality filtered read set that the transition
+  counts come from. The effective cutoff is
+  `max(min_peak_height, ceiling(min_peak_frac × median_depth))`.
+  `min_peak_height` stays as a floor, so a low-depth sample cannot form peaks
+  from 2-3 reads.
+- `params` gains `min_peak_frac`, `median_depth` and `min_peak_height_eff`,
+  and the CLI run summary and app parameter summary print the median depth and
+  the cutoff actually used. `params$min_peak_height` stays the value the user
+  passed. `chromosome_fits$min_peak_height` records the effective cutoff.
+- The default is 0 (off). SYNv3 `sm50` peak list and events table are
+  byte-identical to 0.8.22 at the defaults. With `--min-peak-frac 0.3` (median
+  depth 56, so a cutoff of 17), the 15-read `gene_conversion` peak at chrXI
+  31,549 drops out. Its tract is still called `NCO_GC` at high confidence, by
+  R11c from the read evidence (`loh_only` instead of `peak+loh`), and the call
+  count stays at 14.
+- **Known limitation: median depth is the wrong denominator when read length
+  differs between samples.** Peak height counts reads that cross a junction
+  with `min_run` SNPs on each side, and how many do depends on read length as
+  much as on depth. Tested on RAD5_11/01/03/08/10 at 0.15 and 0.2:
+
+  | sample | median depth | median read span | cutoff (0.15 / 0.2) | peaks (0 / 0.15 / 0.2) | events (0 / 0.15 / 0.2) |
+  |---|---|---|---|---|---|
+  | RAD5_11 | 52 | 5.8 kb | 10 / 11 | 73 / 73 / 73 | 48 / 48 / 48 |
+  | RAD5_01 | 76 | 3.1 kb | 12 / 16 | 72 / 72 / 72 | 50 / 50 / 50 |
+  | RAD5_03 | 103 | 2.5 kb | 16 / 21 | 30 / 29 / 29 | 24 / 23 / 23 |
+  | RAD5_08 | 179 | 6.1 kb | 27 / 36 | 39 / 39 / 39 | 26 / 26 / 26 |
+  | RAD5_10 | 190 | 1.1 kb | 29 / 38 | 26 / 20 / 17 | 22 / 19 / 19 |
+
+  RAD5_08 and RAD5_10 have similar depth, but their median peak heights are 68
+  and 31 reads. RAD5_10's depth comes from about 1.1M short reads. At 0.15 it
+  loses the high-confidence `CO_TERM` S288C_chrXVI 20,096-65,154 outright,
+  because its binary junction peak at 65,154 has 22 reads against a cutoff
+  of 29. Do not use a nonzero `--min-peak-frac` across samples with different
+  read lengths. The planned fix is to normalize by junction-spanning depth
+  (reads with >= `min_run` SNPs on both sides of the SNP) instead of total
+  depth.
+
 ## [0.8.22] - 2026-09-26
 
 ### R06 calls a gene conversion nested in a long LOH run from the LOH structure

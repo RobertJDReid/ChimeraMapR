@@ -329,7 +329,9 @@ find_hemizygous_del_blocks <- function(read_data, high_del, mapq_cutoff,
 #    $snp_peaks          — peaks mapped to best qualifying SNP
 #    $chromosome_fits    — Whittaker fitted curves (exportable)
 #    $chr_span           — per-chromosome lambda / SNP count table
-#    $params             — the parameter list used for this run
+#    $params             — the parameter list used for this run, including
+#                          median_depth and min_peak_height_eff (the cutoff
+#                          actually applied once min_peak_frac is folded in)
 # -----------------------------------------------------------------------------
 run_chimera_analysis <- function(
     read_data_path,
@@ -340,6 +342,11 @@ run_chimera_analysis <- function(
     baseq_cutoff    = 10L,
     min_run         = 2L,
     min_peak_height = 10L,
+    # Depth-relative peak cutoff: the effective threshold is
+    # max(min_peak_height, ceiling(min_peak_frac * median_depth)), so a fixed
+    # fraction of coverage can be applied across samples sequenced to different
+    # depths. 0 disables it and min_peak_height is used as given.
+    min_peak_frac   = 0,
     lambda          = 1,
     del_rate_cutoff = 0.10,
     # Gates that exempt a contiguous hemizygous deletion from del_rate_cutoff
@@ -502,6 +509,26 @@ run_chimera_analysis <- function(
   # Returned as $full_read so the caller can build a population-level LOH map
   # that covers fixed-haplotype regions even where no chimeric reads exist.
   full_read_all <- copy(full_read)
+
+  # ── Depth-relative peak height cutoff ──────────────────────────────────────
+  # Median per-SNP depth over the same MAPQ + base-quality filtered read set the
+  # transition counts are drawn from, so the cutoff and the peak heights it is
+  # compared against share one denominator. min_peak_height stays as a floor:
+  # at low depth a pure fraction would let 2-3 reads form a peak.
+  median_depth <- if (nrow(full_read) > 0L)
+    as.numeric(median(full_read[, .N, by = .(chrom, pos)]$N)) else NA_real_
+  min_peak_height_floor <- min_peak_height
+  if (isTRUE(min_peak_frac > 0) && !is.na(median_depth))
+    min_peak_height <- max(min_peak_height_floor,
+                           as.integer(ceiling(min_peak_frac * median_depth)))
+  message(sprintf(
+    "  Median SNP depth %.1f; effective min peak height %d%s",
+    median_depth, as.integer(min_peak_height),
+    if (isTRUE(min_peak_frac > 0))
+      sprintf(" (max of floor %d and %.3g x median)",
+              as.integer(min_peak_height_floor), min_peak_frac)
+    else ""
+  ))
 
   # ── LOH-specific read set: MAPQ + is_del only, NO base-quality filter ────────
   # Allele balance for LOH calling benefits from maximum SNP depth; the base
@@ -807,7 +834,10 @@ run_chimera_analysis <- function(
       mapq_cutoff     = mapq_cutoff,
       baseq_cutoff    = baseq_cutoff,
       min_run         = min_run,
-      min_peak_height = min_peak_height,
+      min_peak_height = min_peak_height_floor,
+      min_peak_frac   = min_peak_frac,
+      median_depth    = median_depth,
+      min_peak_height_eff = min_peak_height,
       lambda          = lambda,
       del_rate_cutoff = del_rate_cutoff,
       del_block_min_snps       = del_block_min_snps,
