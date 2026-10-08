@@ -8,6 +8,23 @@ source("loh_chain_analysis.R")  # loads chain functions
 
 # APP_VERSION is now defined inside chimera_functions.R
 
+# Git branch the app was launched from, shown under the version number when it
+# is not main so a run from a feature branch is easy to spot. NA when git is
+# unavailable or the app is not running from a checkout. A detached HEAD
+# reports its short commit hash instead.
+APP_GIT_BRANCH <- local({
+  git <- function(...) suppressWarnings(tryCatch(
+    system2("git", c("-C", shQuote(getwd()), ...), stdout = TRUE, stderr = FALSE),
+    error = function(e) character(0)))
+  b <- git("rev-parse", "--abbrev-ref", "HEAD")
+  if (length(b) != 1L || !nzchar(b) || !is.null(attr(b, "status"))) return(NA_character_)
+  if (b == "HEAD") {
+    h <- git("rev-parse", "--short", "HEAD")
+    if (length(h) == 1L && is.null(attr(h, "status"))) b <- paste("detached at", h)
+  }
+  b
+})
+
 # Null-coalescing operator (base R does not provide one)
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
@@ -417,18 +434,21 @@ ui <- fluidPage(
 
       numericInput("min_peak_height",
                    "Minimum Peak Height:",
-                   value = 10,
+                   value = 5,
                    min = 1,
                    step = 1),
 
       numericInput("min_peak_frac",
-                   "Min Peak Height (fraction of median depth):",
-                   value = 0,
+                   "Min Peak Height (fraction of spanning depth):",
+                   value = 0.25,
                    min = 0,
+                   max = 1,
                    step = 0.01),
-      helpText(paste("Effective cutoff is max(Minimum Peak Height, fraction \u00d7 median",
-                     "SNP depth), so one setting applies consistently across samples of",
-                     "different depth. 0 disables it.")),
+      helpText(paste("A SNP qualifies as a peak when its count reaches max(Minimum Peak",
+                     "Height, fraction \u00d7 spanning depth), where spanning depth counts",
+                     "the reads at that SNP with Minimum Run Length SNPs on each side. One",
+                     "setting then applies consistently across samples of different depth",
+                     "and read length. 0 disables it.")),
 
       tags$details(
         class = "advanced-settings",
@@ -525,6 +545,13 @@ ui <- fluidPage(
       tags$small(
         style = "color: gray;",
         paste("ChimeraMapR version", APP_VERSION)
+      ),
+      if (!is.na(APP_GIT_BRANCH) && APP_GIT_BRANCH != "main") tagList(
+        br(),
+        tags$small(
+          style = "color: gray;",
+          paste("Branch:", APP_GIT_BRANCH)
+        )
       ),
       width = 3
     ),
@@ -757,7 +784,7 @@ server <- function(input, output, session) {
     snp_peaks             = NULL,
     chromosome_fits       = NULL,
     chr_span              = NULL,
-    run_params            = NULL,   # run_chimera_analysis()$params; carries median_depth and min_peak_height_eff
+    run_params            = NULL,   # run_chimera_analysis()$params; carries median_depth and median_span_depth
     plot                  = NULL,
     chimeric_read_ids     = NULL,
     peak_plots_by_chr     = NULL,
@@ -841,6 +868,15 @@ server <- function(input, output, session) {
   observeEvent(input$run_analysis, {
 
     req(input$read_data_file, input$snp_data_file, input$chr_size_file)
+
+    # numericInput min/max only constrain the spinner; typed values (0, blank)
+    # get through, so check before clearing the previous results. Warnings are
+    # shown by run_chimera_analysis() through warn_fn.
+    peak_chk <- check_peak_cutoffs(input$min_peak_height, input$min_peak_frac)
+    if (length(peak_chk$errors)) {
+      for (e in peak_chk$errors) showNotification(e, type = "error", duration = 10)
+      return()
+    }
 
     # Reset outputs on re-run
     results$selected_region        <- NULL
@@ -2186,9 +2222,9 @@ server <- function(input, output, session) {
       "  Min Run Length: ",           input$min_run,         "\n",
       "  Min LOH Segment SNPs: ",     input$min_run_snps,    "\n",
       "  Min Peak Height: ",          input$min_peak_height, "\n",
-      "  Min Peak Frac of Depth: ",   input$min_peak_frac,   "\n",
+      "  Min Peak Frac of Spanning Depth: ", input$min_peak_frac, "\n",
       "  Median SNP Depth: ",         round(results$run_params$median_depth %||% NA_real_, 1), "\n",
-      "  Min Peak Height Used: ",     results$run_params$min_peak_height_eff %||% input$min_peak_height, "\n",
+      "  Median Spanning Depth: ",    round(results$run_params$median_span_depth %||% NA_real_, 1), "\n",
       "  Whittaker Lambda (\u03bb): ",input$lambda,          "\n",
       "  Jaccard Threshold: ",        input$jaccard_threshold
     )

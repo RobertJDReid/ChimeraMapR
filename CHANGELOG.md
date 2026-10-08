@@ -4,7 +4,75 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.23] - 2026-10-08
+
+### Peak cutoff defaults: `min_peak_height` 5, `min_peak_frac` 0.25
+
+- **Output changes for runs that do not set these.** The defaults move from
+  10 / 0 to 5 / 0.25 in `run_chimera_analysis()`, the CLI and the app. The
+  per-SNP cutoff is now `max(5, ceiling(0.25 × span))`, so the fraction sets
+  it wherever span >= 20 and the floor of 5 only stops 2-4-read peaks at SNPs
+  with few spanning reads.
+- Heights 3 and 5 gave identical results on every test set at 0.25. 5 keeps a
+  margin above the 1-3-read noise peaks seen on SYNv3 at `min_run = 1`.
+- No change on SYNv3 `sm50` (14 events), SYNv3 `r15` (13), SYNv1 `co20`
+  2000 bp (20), RAD5_01 or RAD5_08. Against the old defaults:
+
+  | sample | event at 10 / 0 | position | at 5 / 0.25 |
+  |---|---|---|---|
+  | RAD5_03 | `NCO_GC_subres` high, 10 / 103 spanning | S288C_chrXVI 156,908 | lost |
+  | RAD5_10 | `NCO_GC_subres` high, 10 / 205 | S288C_chrVII 745,293 | lost |
+  | RAD5_10 | `NCO_GC_subres` high, 10 / 239 | S288C_chrXII 21,260 | lost |
+  | RAD5_10 | `GC_ONE_SIDED` review | S288C_chrXV 531,590-536,441 | `NCO_GC` review (9-read peak at 536,441 now qualifies) |
+  | RAD5_11 | `TERMINAL_DELETION` review | S288C_chrI 143,873-198,900 | lost (8-read peak at 142,772, beside the deletion edge) |
+
+### `--min-peak-frac` scales to per-SNP junction-spanning depth
+
+- The median-depth cutoff below over-tightened on short-read samples, so
+  `--min-peak-frac` now applies per SNP: a SNP qualifies as a peak when its
+  transition count reaches
+  `max(min_peak_height, ceiling(min_peak_frac × span))`, where `span` is the
+  number of reads at that SNP that could register a transition there. For a
+  SNP of rank r among an alignment block's N calls that means
+  `min_run <= r <= N - min_run + 1`, over the same MAPQ + base-quality
+  filtered read set as the transition counts.
+- A genome-wide median of spanning depth was tried first and does not help:
+  RAD5_10's median falls only from 190 to 159. What matters is local spanning
+  depth. The RAD5_10 `CO_TERM` junction at S288C_chrXVI 65,154 has 22 reads at
+  175× total but 64× spanning (0.13 vs 0.34). Across RAD5_11/01/03/08/10, real
+  peaks have a median count / spanning depth of 0.43-0.54, against 0.31-0.48
+  for count / total depth.
+- `params` drops `min_peak_height_eff` (there is no single cutoff any more) and
+  gains `median_span_depth`. `snp_coverage` gains `span` and `min_n` columns.
+  The CLI summary and app parameter summary print median total and spanning
+  depth, and the CLI prints the per-SNP cutoff formula.
+- At 0 the SYNv3 `sm50` peak list and events table are byte-identical to main.
+  SYNv3 at 0.25 and 0.3 is unchanged (18 peaks, 14 events); the 15-read chrXI
+  31,549 peak that the median-depth version dropped at 0.3 is kept.
+- RAD5 sweep (peaks / events at 0, 0.15, 0.2, 0.25, 0.3):
+
+  | sample | median depth / spanning | peaks | events |
+  |---|---|---|---|
+  | RAD5_11 | 52 / 49 | 73 / 73 / 73 / 73 / 71 | 48 at every setting |
+  | RAD5_01 | 76 / 70 | 72 at every setting | 50 at every setting |
+  | RAD5_03 | 103 / 93 | 30 / 29 / 29 / 29 / 29 | 24 / 23 / 23 / 23 / 23 |
+  | RAD5_08 | 179 / 171 | 39 / 39 / 39 / 39 / 38 | 26 at every setting |
+  | RAD5_10 | 190 / 159 | 26 / 24 / 24 / 24 / 24 | 22 / 20 / 20 / 20 / 20 |
+
+  The RAD5_10 `CO_TERM` is kept at every setting. Events lost from 0.15 up are
+  three 10-read `peak_only` `NCO_GC_subres` calls whose peaks sit at 5-10% of
+  spanning depth: RAD5_03 S288C_chrXVI 156,908 (10 / 103) and RAD5_10
+  S288C_chrVII 745,293 (10 / 205) and S288C_chrXII 21,260 (10 / 239). At 0.3,
+  RAD5_11 also loses the `CO_GC` S288C_chrIV 236,785-237,826. 0.25 is the
+  recommended setting.
+- New `check_peak_cutoffs()`, used by the CLI, the app and
+  `run_chimera_analysis()`, rejects a `min_peak_height` that is not a whole
+  number >= 1 and a `min_peak_frac` outside [0, 1], and warns above 0.5. A
+  height of 0 made the per-SNP cutoff 0 wherever no read spans a junction, so
+  zero-read SNPs became peaks: 32 on RAD5_10 at 0.25, one at the telomeric end
+  of the S288C_chrXVI 20,096-65,154 `CO_TERM` tract, which was then lost. The
+  app's `numericInput` min/max only bound the spinner, so typed values are now
+  checked before a run.
 
 ### Depth-relative minimum peak height (`--min-peak-frac`)
 
@@ -45,10 +113,7 @@ read by `app.R` and `chimera_cli.R`.
   and 31 reads. RAD5_10's depth comes from about 1.1M short reads. At 0.15 it
   loses the high-confidence `CO_TERM` S288C_chrXVI 20,096-65,154 outright,
   because its binary junction peak at 65,154 has 22 reads against a cutoff
-  of 29. Do not use a nonzero `--min-peak-frac` across samples with different
-  read lengths. The planned fix is to normalize by junction-spanning depth
-  (reads with >= `min_run` SNPs on both sides of the SNP) instead of total
-  depth.
+  of 29. Resolved by the per-SNP junction-spanning cutoff above.
 
 ## [0.8.22] - 2026-09-26
 

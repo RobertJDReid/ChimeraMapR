@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.8.22_
+_version 0.8.23_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -95,7 +95,7 @@ These may be combined freely — each flag adds its own file. With none of them 
 | Flag | In default set | Output |
 |---|:---:|---|
 | `--peak-plot` | ✓ | Genome-wide overview plot (PNG) |
-| `--peak-list` | ✓ | Detected peaks, including haplotype classification, as CSV. Restricted to peaks with a qualifying SNP at or above the effective minimum peak height (`--min-peak-height`, raised by `--min-peak-frac` if set), matching the app's "Peak Summary" table |
+| `--peak-list` | ✓ | Detected peaks, including haplotype classification, as CSV. Restricted to peaks with a qualifying SNP at or above the minimum peak height (`--min-peak-height`, raised at each SNP by `--min-peak-frac` if set), matching the app's "Peak Summary" table |
 | `--events-table` | ✓ | Runs the chain-based caller and writes the final events table as CSV (no intermediate step CSVs) |
 | `--overview-rds` | | Overview plot object as RDS (re-plot later with `readRDS()` + `print()`) |
 
@@ -124,11 +124,11 @@ Layer extra outputs on top of the flags above.
 | `--del-block-min-bp BP` | `500` | Minimum bp span for such a hemizygous-deletion block |
 | `--del-block-read-coherence FLOAT` | `0.50` | Minimum fraction of a block's deletion calls that must come from reads deleted across the block, rather than scattered single-position misalignments |
 | `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run |
-| `--min-peak-height INT` | `10` | Minimum transition count at a SNP to qualify as a peak |
-| `--min-peak-frac FLOAT` | `0` | Depth-relative cutoff: the effective minimum peak height is `max(--min-peak-height, ceiling(FLOAT × median SNP depth))`, so one setting applies consistently across samples of different depth. `0.25` (25% of median depth) is recommended; `0` disables it. Not suitable for short-read data or samples with differing read lengths (see the short-read caveat under [Analysis parameters](#analysis-parameters)) |
+| `--min-peak-height INT` | `5` | Minimum transition count at a SNP to qualify as a peak. Must be at least 1 |
+| `--min-peak-frac FLOAT` | `0.25` | Relative cutoff: a SNP qualifies as a peak when its transition count reaches `max(--min-peak-height, ceiling(FLOAT × spanning depth))`, where spanning depth is the number of reads at that SNP with `--min-run` SNPs on each side (see the note below). Must be between 0 and 1, with a warning above 0.5. `0` disables it |
 | `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
 
-> **Short-read caveat for `--min-peak-frac`:** peak height counts reads that span a junction with `--min-run` SNPs on each side, so it depends on read length as well as depth. The cutoff is scaled to median depth, so it is too strict for samples whose depth comes from many short reads. Those samples have fewer junction-spanning reads at the same depth, and real events can fall below the cutoff. In testing, a sample at 190× with a 1.1 kb median read span lost a high-confidence terminal crossover (22-read peak against a cutoff of 29) at a fraction of only 0.15. A sample at similar depth with 6.1 kb reads lost nothing at 0.2. Leave this option at `0` for short-read data, or when comparing samples whose read lengths differ.
+> **How `--min-peak-frac` is scaled:** a SNP's transition count only includes reads that cross a junction there with `--min-run` SNPs on each side, so the number of reads that *could* contribute depends on read length and local SNP spacing as well as on depth. The cutoff is therefore scaled to each SNP's own junction-spanning depth, not to total depth. In testing on five samples with 1.1–6.1 kb median read spans, real peaks had a median count of 43–54% of spanning depth, and at `0.25` only peaks below about 10% of spanning depth were removed. A terminal crossover junction on a short-read sample (22 reads, 175× total but 64× spanning) is kept, where a cutoff scaled to total depth would drop it.
 
 #### Chain-analysis tuning parameters
 
@@ -228,8 +228,8 @@ All parameters are set in the sidebar panel before running the analysis.
 | **Sample Name** | _(blank)_ | REF strain label used in exported file names and LOH band legends |
 | **ALT Strain Name** | _(blank)_ | Optional ALT strain label for LOH band legends; generic REF/ALT labels are used if blank |
 | **Minimum Run Length** | `2` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
-| **Minimum Peak Height** | `10` | Minimum chimeric read count for a peak to be reported. Acts as a floor when the fractional cutoff below is set |
-| **Min Peak Height (fraction of median depth)** | `0` | Depth-relative cutoff: the effective minimum peak height is max(Minimum Peak Height, ceiling(fraction × median SNP depth)), so one setting applies consistently across samples of different depth. `0.25` (25% of median depth) is recommended; `0` disables it. Not suitable for short-read data or samples with differing read lengths (see the short-read caveat under [Analysis parameters](#analysis-parameters)) |
+| **Minimum Peak Height** | `5` | Minimum chimeric read count for a peak to be reported. Acts as a floor when the fractional cutoff below is set. Must be at least 1 |
+| **Min Peak Height (fraction of spanning depth)** | `0.25` | Relative cutoff: a SNP qualifies as a peak when its count reaches max(Minimum Peak Height, ceiling(fraction × spanning depth)), where spanning depth is the number of reads at that SNP with Minimum Run Length SNPs on each side (see the note under [Analysis parameters](#analysis-parameters)). Must be between 0 and 1, with a warning above 0.5. `0` disables it |
 
 ### Advanced settings
 
