@@ -168,9 +168,11 @@ option_list <- list(
               type    = "double",
               default = 0,
               metavar = "FLOAT",
-              help    = paste("Depth-relative peak cutoff: the effective minimum peak height is",
-                              "max(--min-peak-height, ceiling(FLOAT x median SNP depth)), giving",
-                              "a consistent threshold across samples of different depth.",
+              help    = paste("Relative peak cutoff: a SNP qualifies as a peak when its",
+                              "transition count reaches max(--min-peak-height, ceiling(FLOAT x",
+                              "spanning depth)), where spanning depth counts the reads at that",
+                              "SNP with --min-run SNPs on each side. This gives a consistent",
+                              "threshold across samples of different depth and read length.",
                               "0 disables it [default: %default]")),
 
   make_option(c("-l", "--lambda"),
@@ -437,8 +439,8 @@ results$snp_peaks <- label_snp_peaks_haplotypes(
 # ── Print run summary ─────────────────────────────────────────────────────────
 n_chimeric  <- length(results$chimeric_read_ids)
 n_peaks     <- nrow(results$peaks_genomic)
-# Peaks that mapped to a qualifying SNP (raw count >= the effective min peak
-# height, i.e. --min-peak-height raised by --min-peak-frac if set); the
+# Peaks that mapped to a qualifying SNP (raw count >= --min-peak-height, raised
+# at each SNP by --min-peak-frac x its spanning depth if set); the
 # rest carry snp_pos = NA and are excluded from the reported peak list, exactly
 # as in the app's "Peak Summary" table.
 n_peaks_qual <- if (!is.null(results$snp_peaks))
@@ -459,7 +461,13 @@ if (nrow(aneuploid) > 0) {
   cat("  Ploidy               : all chromosomes 2N\n")
 }
 cat(sprintf("  Median SNP depth     : %.1f\n", results$params$median_depth))
-cat("  Min peak height used :", results$params$min_peak_height_eff, "\n")
+cat(sprintf("  Median spanning depth: %.1f\n", results$params$median_span_depth))
+cat("  Min peak height used :",
+    if (isTRUE(results$params$min_peak_frac > 0))
+      sprintf("max(%d, ceiling(%g x spanning depth)) per SNP",
+              as.integer(results$params$min_peak_height),
+              results$params$min_peak_frac)
+    else results$params$min_peak_height, "\n")
 cat("  Chimeric reads       :", n_chimeric, "\n")
 cat("  Peaks detected       :", n_peaks, "\n")
 cat("  Peaks above min height:", n_peaks_qual, "\n")
@@ -495,7 +503,8 @@ render_overview_png <- function(out_path, annotated) {
 
 if ("peaks" %in% wanted) {
   # Peak list — same rows the app's "Peak Summary" table shows: peaks whose
-  # interval contained at least one SNP with raw count >= --min-peak-height.
+  # interval contained at least one SNP with raw count >= --min-peak-height
+  # (raised per SNP by --min-peak-frac if set).
   # Peaks with snp_pos = NA ("None above cutoff") are dropped here, matching
   # app.R's output$peaks_table.
   peak_list <- results$snp_peaks[!is.na(snp_pos)]

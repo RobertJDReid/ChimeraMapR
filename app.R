@@ -422,13 +422,15 @@ ui <- fluidPage(
                    step = 1),
 
       numericInput("min_peak_frac",
-                   "Min Peak Height (fraction of median depth):",
+                   "Min Peak Height (fraction of spanning depth):",
                    value = 0,
                    min = 0,
                    step = 0.01),
-      helpText(paste("Effective cutoff is max(Minimum Peak Height, fraction \u00d7 median",
-                     "SNP depth), so one setting applies consistently across samples of",
-                     "different depth. 0 disables it.")),
+      helpText(paste("A SNP qualifies as a peak when its count reaches max(Minimum Peak",
+                     "Height, fraction \u00d7 spanning depth), where spanning depth counts",
+                     "the reads at that SNP with Minimum Run Length SNPs on each side. One",
+                     "setting then applies consistently across samples of different depth",
+                     "and read length. 0 disables it.")),
 
       tags$details(
         class = "advanced-settings",
@@ -757,7 +759,7 @@ server <- function(input, output, session) {
     snp_peaks             = NULL,
     chromosome_fits       = NULL,
     chr_span              = NULL,
-    run_params            = NULL,   # run_chimera_analysis()$params; carries median_depth and min_peak_height_eff
+    run_params            = NULL,   # run_chimera_analysis()$params; carries median_depth and median_span_depth
     plot                  = NULL,
     chimeric_read_ids     = NULL,
     peak_plots_by_chr     = NULL,
@@ -2186,9 +2188,9 @@ server <- function(input, output, session) {
       "  Min Run Length: ",           input$min_run,         "\n",
       "  Min LOH Segment SNPs: ",     input$min_run_snps,    "\n",
       "  Min Peak Height: ",          input$min_peak_height, "\n",
-      "  Min Peak Frac of Depth: ",   input$min_peak_frac,   "\n",
+      "  Min Peak Frac of Spanning Depth: ", input$min_peak_frac, "\n",
       "  Median SNP Depth: ",         round(results$run_params$median_depth %||% NA_real_, 1), "\n",
-      "  Min Peak Height Used: ",     results$run_params$min_peak_height_eff %||% input$min_peak_height, "\n",
+      "  Median Spanning Depth: ",    round(results$run_params$median_span_depth %||% NA_real_, 1), "\n",
       "  Whittaker Lambda (\u03bb): ",input$lambda,          "\n",
       "  Jaccard Threshold: ",        input$jaccard_threshold
     )

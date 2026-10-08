@@ -330,8 +330,8 @@ find_hemizygous_del_blocks <- function(read_data, high_del, mapq_cutoff,
 #    $chromosome_fits    — Whittaker fitted curves (exportable)
 #    $chr_span           — per-chromosome lambda / SNP count table
 #    $params             — the parameter list used for this run, including
-#                          median_depth and min_peak_height_eff (the cutoff
-#                          actually applied once min_peak_frac is folded in)
+#                          median_depth and median_span_depth (median per-SNP
+#                          total and junction-spanning depth, for reporting)
 # -----------------------------------------------------------------------------
 run_chimera_analysis <- function(
     read_data_path,
@@ -342,10 +342,12 @@ run_chimera_analysis <- function(
     baseq_cutoff    = 10L,
     min_run         = 2L,
     min_peak_height = 10L,
-    # Depth-relative peak cutoff: the effective threshold is
-    # max(min_peak_height, ceiling(min_peak_frac * median_depth)), so a fixed
-    # fraction of coverage can be applied across samples sequenced to different
-    # depths. 0 disables it and min_peak_height is used as given.
+    # Relative peak cutoff: a SNP qualifies as a peak when its transition
+    # count reaches max(min_peak_height, ceiling(min_peak_frac * span_depth)),
+    # where span_depth is the number of reads at that SNP that could register
+    # a transition there (see step 2). One fraction then applies across samples
+    # of different depth and read length. 0 disables it and min_peak_height is
+    # used as given.
     min_peak_frac   = 0,
     lambda          = 1,
     del_rate_cutoff = 0.10,
@@ -510,24 +512,38 @@ run_chimera_analysis <- function(
   # that covers fixed-haplotype regions even where no chimeric reads exist.
   full_read_all <- copy(full_read)
 
-  # ── Depth-relative peak height cutoff ──────────────────────────────────────
-  # Median per-SNP depth over the same MAPQ + base-quality filtered read set the
-  # transition counts are drawn from, so the cutoff and the peak heights it is
-  # compared against share one denominator. min_peak_height stays as a floor:
-  # at low depth a pure fraction would let 2-3 reads form a peak.
+  # ── Junction-spanning depth (relative peak cutoff) ─────────────────────────
+  # A SNP's transition count is a count of reads that cross a junction there
+  # with min_run SNPs on each side, so how many reads CAN contribute depends on
+  # read length and local SNP spacing as much as on depth. Total depth is the
+  # wrong denominator: on RAD5_10 (190x, 1.1 kb reads) the 22-read junction
+  # peak of a high-confidence CO_TERM at S288C_chrXVI 65,154 sits at 175x total
+  # but only 64x spanning, a fraction of 0.13 vs 0.34. Real peaks on RAD5_01,
+  # 03, 08, 10 and 11 have median count / spanning depth of 0.43-0.54, against
+  # 0.31-0.48 for count / total depth. The cutoff is therefore per SNP, scaled
+  # to that SNP's own spanning depth rather than to a genome-wide median.
+  #
+  # A block's SNP of rank r (of N calls) is counted at r as the last SNP of a
+  # run when r >= min_run and N - r >= min_run, and as the first SNP of the
+  # next run when r - 1 >= min_run and N - r + 1 >= min_run. The union is
+  # min_run <= r <= N - min_run + 1. Ranks are taken over this MAPQ +
+  # base-quality filtered read set, the one the transition counts are drawn
+  # from, grouped by (read_id, chrom) like the RLE in step 3.
+  span_depth <- full_read[, {
+    r <- seq_len(.N)
+    .(pos = pos[r >= min_run & r <= .N - min_run + 1L])
+  }, by = .(read_id, chrom)][, .(span = .N), by = .(chrom, pos)]
   median_depth <- if (nrow(full_read) > 0L)
     as.numeric(median(full_read[, .N, by = .(chrom, pos)]$N)) else NA_real_
-  min_peak_height_floor <- min_peak_height
-  if (isTRUE(min_peak_frac > 0) && !is.na(median_depth))
-    min_peak_height <- max(min_peak_height_floor,
-                           as.integer(ceiling(min_peak_frac * median_depth)))
+  median_span_depth <- if (nrow(span_depth) > 0L)
+    as.numeric(median(span_depth$span)) else NA_real_
   message(sprintf(
-    "  Median SNP depth %.1f; effective min peak height %d%s",
-    median_depth, as.integer(min_peak_height),
+    "  Median SNP depth %.1f, junction-spanning %.1f; min peak height %s",
+    median_depth, median_span_depth,
     if (isTRUE(min_peak_frac > 0))
-      sprintf(" (max of floor %d and %.3g x median)",
-              as.integer(min_peak_height_floor), min_peak_frac)
-    else ""
+      sprintf("max(%d, ceiling(%.3g x spanning depth)) per SNP",
+              as.integer(min_peak_height), min_peak_frac)
+    else as.character(min_peak_height)
   ))
 
   # ── LOH-specific read set: MAPQ + is_del only, NO base-quality filter ────────
@@ -588,6 +604,15 @@ run_chimera_analysis <- function(
   snp_coverage <- merge(snp_coverage, pos_count,
                         by = c("chrom", "pos"), all.x = TRUE)
   snp_coverage[is.na(n), n := 0L]
+  # Per-SNP qualifying threshold. min_peak_height stays as a floor: at low
+  # spanning depth a pure fraction would let 2-3 reads form a peak.
+  snp_coverage <- merge(snp_coverage, span_depth,
+                        by = c("chrom", "pos"), all.x = TRUE)
+  snp_coverage[is.na(span), span := 0L]
+  snp_coverage[, min_n := if (isTRUE(min_peak_frac > 0))
+    pmax(as.integer(min_peak_height),
+         as.integer(ceiling(min_peak_frac * span)))
+    else as.integer(min_peak_height)]
   snp_coverage[, chrom  := factor(chrom, levels = fasta_chr_order)]
   snp_coverage[, pos_kb := pos / 1000]
 
@@ -638,7 +663,7 @@ run_chimera_analysis <- function(
 
     # (B) Raw-signal fallback: cluster high-count SNP positions
     cluster_gap_bp <- 10000L
-    raw_hi         <- snps_dt[n >= min_peak_height]
+    raw_hi         <- snps_dt[n >= min_n]
 
     if (nrow(raw_hi) > 0) {
       raw_hi  <- raw_hi[order(raw_hi$pos), ]
@@ -728,7 +753,7 @@ run_chimera_analysis <- function(
       in_interval <- chr_cov[
         pos >= row$peak_start &
         pos <= row$peak_end   &
-        n   >= min_peak_height
+        n   >= min_n
       ]
 
       if (nrow(in_interval) > 0) {
@@ -834,10 +859,10 @@ run_chimera_analysis <- function(
       mapq_cutoff     = mapq_cutoff,
       baseq_cutoff    = baseq_cutoff,
       min_run         = min_run,
-      min_peak_height = min_peak_height_floor,
+      min_peak_height = min_peak_height,
       min_peak_frac   = min_peak_frac,
       median_depth    = median_depth,
-      min_peak_height_eff = min_peak_height,
+      median_span_depth = median_span_depth,
       lambda          = lambda,
       del_rate_cutoff = del_rate_cutoff,
       del_block_min_snps       = del_block_min_snps,
