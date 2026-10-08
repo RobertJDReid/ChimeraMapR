@@ -6,6 +6,26 @@ read by `app.R` and `chimera_cli.R`.
 
 ## [Unreleased]
 
+### Peak cutoff defaults: `min_peak_height` 5, `min_peak_frac` 0.25
+
+- **Output changes for runs that do not set these.** The defaults move from
+  10 / 0 to 5 / 0.25 in `run_chimera_analysis()`, the CLI and the app. The
+  per-SNP cutoff is now `max(5, ceiling(0.25 × span))`, so the fraction sets
+  it wherever span >= 20 and the floor of 5 only stops 2-4-read peaks at SNPs
+  with few spanning reads.
+- Heights 3 and 5 gave identical results on every test set at 0.25. 5 keeps a
+  margin above the 1-3-read noise peaks seen on SYNv3 at `min_run = 1`.
+- No change on SYNv3 `sm50` (14 events), SYNv3 `r15` (13), SYNv1 `co20`
+  2000 bp (20), RAD5_01 or RAD5_08. Against the old defaults:
+
+  | sample | event at 10 / 0 | position | at 5 / 0.25 |
+  |---|---|---|---|
+  | RAD5_03 | `NCO_GC_subres` high, 10 / 103 spanning | S288C_chrXVI 156,908 | lost |
+  | RAD5_10 | `NCO_GC_subres` high, 10 / 205 | S288C_chrVII 745,293 | lost |
+  | RAD5_10 | `NCO_GC_subres` high, 10 / 239 | S288C_chrXII 21,260 | lost |
+  | RAD5_10 | `GC_ONE_SIDED` review | S288C_chrXV 531,590-536,441 | `NCO_GC` review (9-read peak at 536,441 now qualifies) |
+  | RAD5_11 | `TERMINAL_DELETION` review | S288C_chrI 143,873-198,900 | lost (8-read peak at 142,772, beside the deletion edge) |
+
 ### `--min-peak-frac` scales to per-SNP junction-spanning depth
 
 - The median-depth cutoff below over-tightened on short-read samples, so

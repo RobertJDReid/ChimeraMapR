@@ -350,12 +350,12 @@ check_peak_cutoffs <- function(min_peak_height, min_peak_frac) {
   if (!ok_num(min_peak_frac) || min_peak_frac < 0 || min_peak_frac > 1)
     errors <- c(errors, paste0(
       "Minimum peak fraction must be between 0 and 1 (got ",
-      format(min_peak_frac), "). 0 disables it; 0.25 is recommended."))
+      format(min_peak_frac), "). 0 disables it; the default is 0.25."))
   else if (min_peak_frac > 0.5)
     warnings <- c(warnings, paste0(
       "Minimum peak fraction ", min_peak_frac, " is above 0.5. Real junction ",
       "peaks typically reach 0.4-0.55 of spanning depth, so real events will ",
-      "be dropped; 0.25 is recommended."))
+      "be dropped; the default is 0.25."))
 
   list(errors = errors, warnings = warnings)
 }
@@ -385,14 +385,14 @@ run_chimera_analysis <- function(
     mapq_cutoff     = 20L,
     baseq_cutoff    = 10L,
     min_run         = 2L,
-    min_peak_height = 10L,
+    min_peak_height = 5L,
     # Relative peak cutoff: a SNP qualifies as a peak when its transition
     # count reaches max(min_peak_height, ceiling(min_peak_frac * span_depth)),
     # where span_depth is the number of reads at that SNP that could register
     # a transition there (see step 2). One fraction then applies across samples
     # of different depth and read length. 0 disables it and min_peak_height is
     # used as given.
-    min_peak_frac   = 0,
+    min_peak_frac   = 0.25,
     lambda          = 1,
     del_rate_cutoff = 0.10,
     # Gates that exempt a contiguous hemizygous deletion from del_rate_cutoff

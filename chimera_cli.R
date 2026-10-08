@@ -35,8 +35,8 @@
 #      --mapq-cutoff 30 \
 #      --baseq-cutoff 15 \
 #      --min-run 3 \
-#      --min-peak-height 10 \
-#      --min-peak-frac 0.1 \
+#      --min-peak-height 5 \
+#      --min-peak-frac 0.25 \
 #      --lambda 1 \
 #      --output results/ \
 #      reads.csv.gz snps.vcf.gz genome.fa.fai
@@ -160,13 +160,13 @@ option_list <- list(
 
   make_option("--min-peak-height",
               type    = "integer",
-              default = 10L,
+              default = 5L,
               metavar = "INT",
               help    = "Minimum transition count at a SNP to qualify as a peak [default: %default]"),
 
   make_option("--min-peak-frac",
               type    = "double",
-              default = 0,
+              default = 0.25,
               metavar = "FLOAT",
               help    = paste("Relative peak cutoff: a SNP qualifies as a peak when its",
                               "transition count reaches max(--min-peak-height, ceiling(FLOAT x",

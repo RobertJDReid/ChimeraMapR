@@ -434,13 +434,13 @@ ui <- fluidPage(
 
       numericInput("min_peak_height",
                    "Minimum Peak Height:",
-                   value = 10,
+                   value = 5,
                    min = 1,
                    step = 1),
 
       numericInput("min_peak_frac",
                    "Min Peak Height (fraction of spanning depth):",
-                   value = 0,
+                   value = 0.25,
                    min = 0,
                    max = 1,
                    step = 0.01),

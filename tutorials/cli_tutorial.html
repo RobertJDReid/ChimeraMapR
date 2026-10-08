@@ -420,7 +420,9 @@ Options:
 	--min-run=INT
 		Minimum consecutive same-allele calls to count as a run [default: 2]
 	--min-peak-height=INT
-		Minimum transition count at a SNP to qualify as a peak [default: 10]
+		Minimum transition count at a SNP to qualify as a peak [default: 5]
+	--min-peak-frac=FLOAT
+		Relative peak cutoff: a SNP qualifies as a peak when its transition count reaches max(--min-peak-height, ceiling(FLOAT x spanning depth)). 0 disables it [default: 0.25]
 	-l FLOAT, --lambda=FLOAT
 		Whittaker smoothing penalty lambda (lower = tighter fit) [default: 1]
 	--peak-list
@@ -569,7 +571,7 @@ Computing coverage map ...
       <table class="flags">
         <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td>--min-peak-height</td><td>Raise this if the overview plot is cluttered with low-support peaks; lower it for shallow-coverage samples where 10 reads never accumulate at a real breakpoint.</td></tr>
+          <tr><td>--min-peak-height</td><td>Raise this if the overview plot is cluttered with low-support peaks; lower it for shallow-coverage samples where 5 reads never accumulate at a real breakpoint. --min-peak-frac scales the cutoff up at deeper SNPs.</td></tr>
           <tr><td>--min-run</td><td>How many consecutive same-allele calls make a "run." Raise it on noisier base calls to avoid spurious single-SNP switches.</td></tr>
           <tr><td>-l, --lambda</td><td>Whittaker smoothing penalty. Lower values track sharp peaks more tightly; higher values smooth over jitter at the cost of resolution.</td></tr>
           <tr><td>--mapq-cutoff / --baseq-cutoff</td><td>Read and base-quality floors applied before any allele classification happens.</td></tr>
