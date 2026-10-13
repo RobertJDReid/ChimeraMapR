@@ -2233,12 +2233,17 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     , xmax := data.table::shift(xmin, type = "lead", fill = win_end / 1000)
   ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
 
-  # ── Classify by run pattern, collapsing single-SNP noise runs ───────────
-  # A run of exactly one SNP position is likely a spurious near-fixed site
-  # rather than a real recombination signal. Remove such runs and re-derive
-  # the run sequence before pattern matching; seg_data is returned unchanged
-  # so the plot still shows the full observed pattern.
-  noise_runs <- peak_summary[, .N, by = run][N == 1L, run]
+  # ── Classify by run pattern, collapsing sub-min_run noise runs ──────────
+  # A run shorter than zone_min_snps (the CLI's --min-run) is treated as a
+  # spurious near-fixed site rather than a real recombination signal. Remove
+  # such runs and re-derive the run sequence before pattern matching; seg_data
+  # is returned unchanged so the plot still shows the full observed pattern.
+  # A single-SNP HET run is always dropped: it is an allele-balance blip on
+  # noisy reads (e.g. 0.2-0.25), never a tract. At the default min_run of 2
+  # this drops every single-SNP run; at min_run 1 a fully fixed single-SNP run
+  # is kept, so a one-SNP conversion tract (ALT-REF-ALT) is typed.
+  noise_runs <- peak_summary[, .(N = .N, call = SNP_call[1L]), by = run][
+    N < zone_min_snps | (N == 1L & call == "HET"), run]
   if (length(noise_runs) > 0L) {
     clean_ps <- peak_summary[!run %in% noise_runs]
     if (nrow(clean_ps) > 0L) {
@@ -2438,7 +2443,8 @@ classify_fused_peak_haplotype <- function(fg, chr_name, rt_df, touching_ids,
     , xmax := data.table::shift(xmin, type = "lead", fill = win_end / 1000)
   ][, SNP_call := factor(SNP_call, levels = c("ALT", "HET", "REF"))]
 
-  noise_runs <- peak_summary[, .N, by = run][N == 1L, run]
+  noise_runs <- peak_summary[, .(N = .N, call = SNP_call[1L]), by = run][
+    N < zone_min_snps | (N == 1L & call == "HET"), run]
   if (length(noise_runs) > 0L) {
     clean_ps <- peak_summary[!run %in% noise_runs]
     if (nrow(clean_ps) > 0L) {
