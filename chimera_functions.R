@@ -2115,6 +2115,45 @@ resolve_undefined_by_phase <- function(chr_name, full_read_loh, win_start, win_e
   }
 }
 
+# ---------------------------------------------------------------------------
+# count_gc_pattern_reads()
+#   Read support for a "gene_conversion" peak: the number of reads that
+#   themselves carry the conversion, i.e. the tract allele across the tract
+#   and the flank allele on both sides of it (ALT-REF-ALT or REF-ALT-REF).
+#
+#   The tract is the middle collapsed run of the consensus (clean_ps$run2 == 2)
+#   and its bounds are that run's first/last SNP, so the count is anchored on
+#   the fixed SNP(s) rather than on the peak SNP, which often sits one SNP
+#   beside the tract. Each flank is called from the read's own SNPs between
+#   the window edge and the tract and needs >= zone_min_snps of them (the
+#   CLI's --min-run), not ZONE_CALL_HEURISTICS$min_evidence_snps: a read with
+#   one flank SNP either side still shows a one-SNP tract at --min-run 1.
+#   The tract itself needs one read SNP. Majority votes use the usual
+#   ZONE_CALL_HEURISTICS$min_margin, so a single discordant flank SNP is
+#   tolerated on a long flank.
+# ---------------------------------------------------------------------------
+count_gc_pattern_reads <- function(read_win_df, clean_ps, win_start, win_end,
+                                   zone_min_snps) {
+  run_calls <- clean_ps[, .(SNP_call = as.character(SNP_call[1L]),
+                            pmin = min(pos), pmax = max(pos)), by = run2][order(run2)]
+  if (nrow(run_calls) != 3L) return(NA_integer_)
+  flank_allele <- run_calls$SNP_call[1L]
+  tract_allele <- run_calls$SNP_call[2L]
+  t_start      <- run_calls$pmin[2L]
+  t_end        <- run_calls$pmax[2L]
+
+  pattern <- read_win_df[, {
+    sT <- classify_zone_state(pos, IS_REF, t_start, t_end, 1L, min_evidence = 1L)
+    sL <- classify_zone_state(pos, IS_REF, win_start, t_start - 1L,
+                              zone_min_snps, min_evidence = zone_min_snps)
+    sR <- classify_zone_state(pos, IS_REF, t_end + 1L, win_end,
+                              zone_min_snps, min_evidence = zone_min_snps)
+    .(ok = isTRUE(sT == tract_allele) && isTRUE(sL == flank_allele) &&
+           isTRUE(sR == flank_allele))
+  }, by = read_id]
+  sum(pattern$ok)
+}
+
 classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
                                     zone_min_snps   = 2L,
                                     full_read_loh   = NULL,
@@ -2244,17 +2283,12 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   # is kept, so a one-SNP conversion tract (ALT-REF-ALT) is typed.
   noise_runs <- peak_summary[, .(N = .N, call = SNP_call[1L]), by = run][
     N < zone_min_snps | (N == 1L & call == "HET"), run]
-  if (length(noise_runs) > 0L) {
-    clean_ps <- peak_summary[!run %in% noise_runs]
-    if (nrow(clean_ps) > 0L) {
-      clean_ps[, run2 := data.table::rleid(SNP_call)]
-      runs <- as.character(clean_ps[, .(SNP_call = SNP_call[1L]), by = run2][order(run2), SNP_call])
-    } else {
-      runs <- as.character(seg_data$SNP_call)
-    }
-  } else {
-    runs <- as.character(seg_data$SNP_call)
-  }
+  # clean_ps: the per-position consensus the run pattern is read from, with
+  # run2 indexing its collapsed runs (used below to locate a GC tract).
+  clean_ps <- peak_summary[!run %in% noise_runs]
+  if (nrow(clean_ps) == 0L) clean_ps <- copy(peak_summary)
+  clean_ps[, run2 := data.table::rleid(SNP_call)]
+  runs <- as.character(clean_ps[, .(SNP_call = SNP_call[1L]), by = run2][order(run2), SNP_call])
   n_runs <- length(runs)
   label  <- classify_run_pattern(runs)
 
@@ -2272,10 +2306,12 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   # "gene_conversion" (REF-ALT-REF / ALT-REF-ALT, three runs) can't use the
   # same differ-test: its flanks share the same allele by construction, so
   # state_L == state_R for a genuine GC read and the switch count would
-  # always be zero. Support for a GC call instead comes from how many reads
-  # actually traverse both flanking zones — i.e. fully span the LOH region
-  # the peak sits in — which is the read-level evidence that this is a real
-  # chimeric junction rather than population-level noise.
+  # always be zero. It also can't split at snp_p: the peak is often anchored
+  # one SNP beside the tract, not on it. Support for a GC call is instead the
+  # number of reads that themselves show the conversion: the tract allele
+  # across the consensus middle run, and the flank allele on BOTH sides of it,
+  # each flank called from >= zone_min_snps of the read's own SNPs (see
+  # count_gc_pattern_reads).
   # "undefined" (n_runs not in 1..4, or a run pattern that doesn't match any
   # recognised switch type -- e.g. a second nearby island widening the window
   # into a compound multi-run signal) keeps the snp_n fallback set above; it's
@@ -2288,7 +2324,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
       .(state_L = sL, state_R = sR)
     }, by = read_id]
     n_support <- if (label == "gene_conversion") {
-      sum(!is.na(read_states$state_L) & !is.na(read_states$state_R))
+      count_gc_pattern_reads(read_win_df, clean_ps, win_start, win_end,
+                             zone_min_snps)
     } else {
       sum(!is.na(read_states$state_L) & !is.na(read_states$state_R) &
           read_states$state_L != read_states$state_R)
