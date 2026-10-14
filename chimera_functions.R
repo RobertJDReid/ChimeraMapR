@@ -1654,8 +1654,8 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
 # -----------------------------------------------------------------------------
 #  Read (facet row) ordering for the read-level plots
 #
-#  The read-level plots (peak and fused-peak views in app.R) facet one row per
-#  read_id. Ordering those rows alphabetically scatters REF->ALT and ALT->REF
+#  The read-level plots (peak and fused-peak views in app.R, and the evidence
+#  and chimeric groups of the Selected Region view) draw one row per read_id. Ordering those rows alphabetically scatters REF->ALT and ALT->REF
 #  reads up and down the panel.
 #
 #  order_reads_by_haplotype() groups reads by their haplotype pattern read
@@ -1722,16 +1722,18 @@ order_reads_by_haplotype <- function(dt) {
 # -----------------------------------------------------------------------------
 #  order_reads_by_composition()
 #
-#  Row ordering for the whole-pile region view, where order_reads_by_haplotype()
-#  is the wrong metric. That function anchors on how a read SWITCHES allele,
-#  which is the right thing when every plotted read is chimeric by construction
-#  (the peak views) but says nothing about the great majority of reads in a
-#  window, which never switch: they all collapse into the junction-less bucket
-#  and stack in arbitrary order, so the pile reads as noise.
+#  Row ordering for the background group ("Other reads in window") of the
+#  Selected Region view, where order_reads_by_haplotype() is the wrong metric.
+#  That function anchors on how a read SWITCHES allele, which is the right
+#  thing for reads that are chimeric (the peak views, and the evidence and
+#  chimeric groups of the region view) but says nothing about the great
+#  majority of reads in a window, which never switch: they all collapse into
+#  the junction-less bucket and stack by length alone, so the pile reads as
+#  noise.
 #
 #  Sorting on composition instead -- ALT fraction over the plotted window, then
 #  start position, then extent (longest first) -- groups the two homologs into
-#  contiguous bands with the chimeric reads between them. A flank zone in which
+#  contiguous bands. A flank zone in which
 #  every read carries the same allele then shows up as a solid block rather
 #  than as speckle distributed down the panel, which is the thing the view
 #  exists to make visible.

@@ -4,6 +4,20 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Read plots: larger points; region view sorts chimeric reads by haplotype
+
+- Peak and fused-peak read plots draw points at size 1.5 (ggplot default)
+  again, up from 0.8 (since ef9bef6), which left most of each read row empty
+  at typical ~60x depth.
+- The Selected Region view sorted every group by ALT fraction, which
+  interleaved REF->ALT and ALT->REF reads of similar composition in the
+  evidence and chimeric groups. Those groups now use
+  `order_reads_by_haplotype()`, as the peak plots do; the "Other reads in
+  window" background keeps `order_reads_by_composition()`.
+- Display only; no change to peaks or called events.
+
 ## [0.8.26] - 2026-10-14
 
 ### Peak plots: reads grouped by haplotype, then length

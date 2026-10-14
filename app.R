@@ -2355,14 +2355,25 @@ server <- function(input, output, session) {
       }
     }
 
-    # Composition order first, so any subsampling below preserves the banding.
-    lev <- order_reads_by_composition(plot_df)
+    # Row order is set here, before any subsampling, so the cap below preserves
+    # it. The evidence and chimeric groups switch allele, so they take the same
+    # haplotype-then-length order as the peak plots: by ALT fraction, REF->ALT
+    # and ALT->REF reads of similar composition would interleave. The backdrop
+    # mostly never switches, so composition order is what bands it into the
+    # two homologs. The class grouping applied below keeps each group's
+    # relative order from this vector.
+    # Either side can be empty (no backdrop in "chimeric" mode, no chimeric
+    # read in an LOH-only window); the guards keep min()/max() on a zero-row
+    # table from warning.
+    is_bg <- plot_df$read_class == CLASS_LEVELS[5]
+    lev <- c(if (any(!is_bg)) order_reads_by_haplotype(plot_df[!is_bg]),
+             if (any(is_bg))  order_reads_by_composition(plot_df[is_bg]))
 
     # ── Background cap ────────────────────────────────────────────────────────
     # Evidence and chimeric reads are never dropped; only the "other reads"
-    # backdrop is thinned, evenly along junction order so the staircase keeps
-    # its shape. The cap exists for deep samples, not the ~100-read windows
-    # measured above, and the caption says when it fired.
+    # backdrop is thinned, evenly along composition order so the homolog
+    # banding keeps its shape. The cap exists for deep samples, not the
+    # ~100-read windows measured above, and the caption says when it fired.
     max_bg <- 250L
     bg_ids <- lev[lev %in% plot_df[read_class == CLASS_LEVELS[5],
                                    unique(read_id)]]
