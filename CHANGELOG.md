@@ -4,6 +4,34 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.8.24] - 2026-10-14
+
+### One-SNP gene-conversion tracts typed at `--min-run 1`
+
+- `classify_peak_haplotype()` and `classify_fused_peak_haplotype()` dropped
+  every single-SNP consensus run before pattern matching, whatever
+  `min_run` was. At `--min-run 1` a one-SNP tract (ALT-REF-ALT) became a lone
+  ALT run, labelled `undefined`, and no event was called.
+- Runs shorter than `min_run` are now dropped instead. Single-SNP HET runs are
+  always dropped, because they are allele-balance blips on noisy reads. The
+  default `min_run` of 2 behaves as before.
+- RAD5_01 at `--min-run 1` gains `NCO_GC_subres` calls at S288C_chrXV
+  558,338 and 1,033,508 and at S288C_chrXII 506,155. SYNv3 events keep the
+  same classes at `min_run` 1 and 2.
+
+### Gene-conversion peak support counts reads showing the conversion
+
+- **Output change:** `n_support` for `gene_conversion` peaks changes.
+  Previously it counted every chimeric read touching the peak whose left and
+  right zones (split at the peak SNP, at least 3 SNPs each) could be called.
+  That included reads REF on both flanks and dropped reads crossing a one-SNP
+  tract with short flanks.
+- New `count_gc_pattern_reads()` counts reads carrying the tract allele
+  across the consensus middle run and the flank allele on both sides, each
+  flank called from at least `min_run` of the read's own SNPs.
+- On RAD5_01 this gives 30 at S288C_chrI 195,193 and 41 at S288C_chrXI
+  402,281, matching the reads the app's peak plot shows crossing each tract.
+
 ## [0.8.23] - 2026-10-08
 
 ### Peak cutoff defaults: `min_peak_height` 5, `min_peak_frac` 0.25
