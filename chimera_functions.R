@@ -1654,52 +1654,65 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
 # -----------------------------------------------------------------------------
 #  Read (facet row) ordering for the read-level plots
 #
-#  The read-level plots (peak, fused-peak and selected-region views in app.R)
-#  facet one row per read_id. Ordering those rows alphabetically scatters the
-#  REF/ALT junctions up and down the panel; ordering them by WHERE each read
-#  switches allele lines the junctions up into a staircase, which is what makes
-#  a crossover readable at a glance.
+#  The read-level plots (peak and fused-peak views in app.R) facet one row per
+#  read_id. Ordering those rows alphabetically scatters REF->ALT and ALT->REF
+#  reads up and down the panel.
 #
-#  order_reads_by_junction() anchors on each read's LEADING allele and returns
-#  the midpoint between the last SNP of that leading run and the first SNP of
-#  the opposite call. Anchoring on the leading allele (rather than, say, "first
-#  ALT position") keeps the metric orientation-agnostic: REF->ALT and ALT->REF
-#  reads both sort by where they actually switch, instead of segregating into
-#  two blocks.
+#  order_reads_by_haplotype() groups reads by their haplotype pattern read
+#  left to right -- the run-length sequence of calls, e.g. REF->ALT, ALT->REF,
+#  REF->ALT->REF -- and then sorts each group by read length (span of its
+#  called SNPs in the plotted window):
 #
-#  Reads with a single call throughout have no junction, so they carry no
-#  position in the staircase at all: they are parked below every junction-
-#  bearing read and sort among themselves by max(pos). Reads that are entirely
-#  NA never enter the aggregation and are parked last, in their existing order.
+#    * REF-leading reads sit above ALT-leading reads, so the two reciprocal
+#      products of a crossover form two solid colour blocks.
+#    * REF-leading reads sort by length ASCENDING and ALT-leading reads
+#      DESCENDING, so the longest reads of both orientations meet at the
+#      boundary between the blocks, where the switch is easiest to compare.
+#    * Within each block the single-switch pattern sits next to that boundary
+#      and multi-switch patterns (gene-conversion shaped reads) sit further out
+#      (top for REF-leading, bottom for ALT-leading).
+#    * Junction position breaks length ties, so reads switching at different
+#      SNPs still step in order.
+#
+#  An earlier version sorted on the junction midpoint alone. That gave a clean
+#  staircase on simulated data, but in real peaks most reads switch between
+#  the same two SNPs, so the key was nearly all ties and the two orientations
+#  and all read lengths came out interleaved (e.g. RAD5_05 chrII 783 kb).
+#
+#  Reads with a single call throughout have no junction: they are parked below
+#  every junction-bearing read, longest first. Reads that are entirely NA never
+#  enter the aggregation and are parked last, in their existing order.
 #
 #  Returns a character vector of read_ids in plot order, suitable for
-#  factor(read_id, levels = .). Shared with replot_selection_view.R so the
-#  standalone publication script and the app agree on row order.
+#  factor(read_id, levels = .).
 # -----------------------------------------------------------------------------
-order_reads_by_junction <- function(dt) {
+order_reads_by_haplotype <- function(dt) {
   # Sort within the group: rt_df arrives in whatever order the filter left it,
   # so "leading allele" has to mean the call at the lowest position, not the
-  # call in the first row. as.numeric() on both branches keeps the column type
-  # identical across groups -- data.table rejects an integer group result once
-  # an earlier group returned the double from the /2 midpoint.
+  # call in the first row. as.numeric() keeps the column type identical across
+  # groups -- data.table rejects an integer group result once an earlier group
+  # returned the double from the /2 midpoint.
   o <- dt[!is.na(IS_REF), {
     ord  <- order(pos)
     p    <- pos[ord]
     ir   <- IS_REF[ord]
-    lead <- ir[1L]
-    sw   <- p[ir != lead]
-    has_j <- length(sw) > 0L
-    .(no_j = !has_j,
-      t    = if (has_j) {
-               first_sw <- sw[1L]
-               as.numeric(max(p[ir == lead & p < first_sw]) + first_sw) / 2
-             } else {
-               as.numeric(max(p))
-             })
+    n_sw <- sum(ir[-1L] != ir[-length(ir)])
+    t    <- if (n_sw > 0L) {
+              k <- which(ir[-1L] != ir[-length(ir)])[1L]
+              as.numeric(p[k] + p[k + 1L]) / 2
+            } else NA_real_
+    .(no_j = n_sw == 0L,
+      lead_alt = !ir[1L],
+      n_sw = n_sw,
+      span = as.numeric(p[length(p)] - p[1L]),
+      t    = t)
   }, by = read_id]
-  # no_j first so junction-less reads sink below the staircase regardless of
-  # where their (meaningless here) max(pos) would otherwise place them.
-  setorder(o, no_j, t)
+  # dir flips the length and pattern keys for the ALT-leading block so both
+  # blocks put their longest single-switch reads against the shared boundary.
+  # Junction-less reads all take dir -1: longest first.
+  o[, dir := ifelse(no_j | lead_alt, -1, 1)]
+  o[, `:=`(k_sw = -dir * n_sw, k_span = dir * span)]
+  setorder(o, no_j, lead_alt, k_sw, k_span, t, na.last = TRUE)
   # as.character() keeps the return type stable whether or not read_id already
   # arrived as a factor, so callers can re-level an already-ordered table.
   c(as.character(o$read_id),
@@ -1709,8 +1722,8 @@ order_reads_by_junction <- function(dt) {
 # -----------------------------------------------------------------------------
 #  order_reads_by_composition()
 #
-#  Row ordering for the whole-pile region view, where order_reads_by_junction()
-#  is the wrong metric. That function anchors on where a read SWITCHES allele,
+#  Row ordering for the whole-pile region view, where order_reads_by_haplotype()
+#  is the wrong metric. That function anchors on how a read SWITCHES allele,
 #  which is the right thing when every plotted read is chimeric by construction
 #  (the peak views) but says nothing about the great majority of reads in a
 #  window, which never switch: they all collapse into the junction-less bucket
