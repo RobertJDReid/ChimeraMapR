@@ -11,12 +11,12 @@ Event symbols are drawn in bold just below the LOH band, centred on the bp midpo
 | ✖ | `CO_GC` | Crossover with an associated gene conversion tract |
 | ✖ | `CO_GC_subres` | Crossover with a conversion tract too short for the LOH map (some flanking SNPs show a fixed call) |
 | ✖ | `CROSSOVER_NO_TRACT` | Crossover with no detectable tract (all flanking SNPs HET); called from peak evidence alone |
-| 𝝤 | `NCO_GC` | Non-crossover gene conversion |
-| 𝝤 | `NCO_GC_subres` | Non-crossover gene conversion with no flanking LOH tract (below LOH resolution) |
-| 𝝤 | `NCO_GC_in_terminal` | Non-crossover gene conversion sitting inside a terminal LOH tract |
-| 𝝤° | `GC_UNRESOLVED` | Confirmed gene-conversion tract (LOH flanked by two binary peaks), but NCO vs CO can't be determined |
-| 𝝤¹ | `GC_ONE_SIDED` | One confirmed binary junction peak; the other boundary has no peak at all |
-| 𝝤𝝤 | `DOUBLE_GC` | Two NCO gene conversions resolved within one token |
+| Ο | `NCO_GC` | Non-crossover gene conversion |
+| Ο | `NCO_GC_subres` | Non-crossover gene conversion with no flanking LOH tract (below LOH resolution) |
+| Ο | `NCO_GC_in_terminal` | Non-crossover gene conversion sitting inside a terminal LOH tract |
+| Ο° | `GC_UNRESOLVED` | Confirmed gene-conversion tract (LOH flanked by two binary peaks), but NCO vs CO can't be determined |
+| Ο¹ | `GC_ONE_SIDED` | One confirmed binary junction peak; the other boundary has no peak at all |
+| ΟΟ | `DOUBLE_GC` | Two NCO gene conversions resolved within one token |
 | TCO | `CO_TERM` | Terminal crossover (LOH running to the telomere) |
 | TCO* | `CO_TERM_PROBABLE` | Provisional terminal crossover; its only junction is gap-masked (no peak) |
 | N X TCO* | `CO_TERM_GAPPED` | N terminal crossovers fused across a SNP gap; the * marks the junction(s) inferred from the gap (falls back to plain "TCO*" if no count is available) |

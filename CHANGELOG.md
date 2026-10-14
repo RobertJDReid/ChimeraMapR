@@ -4,6 +4,19 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Gene-conversion event symbols drawn at full size
+
+- The NCO / gene-conversion symbols (`NCO_GC`, `NCO_GC_subres`,
+  `NCO_GC_in_terminal`, `GC_UNRESOLVED`, `GC_ONE_SIDED`, `DOUBLE_GC`) used
+  U+1D764 MATHEMATICAL SANS-SERIF BOLD CAPITAL OMICRON. Helvetica / Arial
+  lack it, so it was taken from a math font (STIX Two Math) and drawn far
+  smaller than the TCO and Δ labels, or as an empty box on devices without
+  font fallback. They now use U+039F GREEK CAPITAL LETTER OMICRON (Ο), which
+  the plot font has, so they match the other labels.
+- README and OVERVIEW_PLOT_KEY.md symbol tables updated to match.
+
 ## [0.8.30] - 2026-10-14
 
 ### Overview .rds holds everything needed to redraw the plot
