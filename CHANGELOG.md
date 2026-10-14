@@ -4,6 +4,21 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Peak plots: reads grouped by haplotype, then length
+
+- Individual and fused peak plots ordered reads by junction midpoint alone.
+  In real peaks most reads switch between the same two SNPs, so that key was
+  nearly all ties and REF->ALT / ALT->REF reads of every length came out
+  interleaved (RAD5_05 chrII 783 kb). New `order_reads_by_haplotype()`
+  (replacing `order_reads_by_junction()`) puts REF-leading reads above
+  ALT-leading reads, sorts the REF-leading block by span ascending and the
+  ALT-leading block descending so the longest reads of both orientations
+  meet at the boundary, keeps multi-switch reads at the outer edges, and
+  breaks ties on junction position. Junction-less and all-NA reads stay last.
+- Display only; no change to peaks or called events.
+
 ## [0.8.25] - 2026-10-14
 
 ### Overview plot: chromosome labels wrap, chromosomes sort by number

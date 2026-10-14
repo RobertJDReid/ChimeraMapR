@@ -128,9 +128,9 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
           pos <= plot_end
       ]
       if (nrow(plot_df) == 0) return(NULL)
-      # Facet rows in junction order so the crossovers line up as a staircase
-      # rather than scattering alphabetically. See order_reads_by_junction().
-      lev <- order_reads_by_junction(plot_df)
+      # Facet rows grouped by haplotype pattern, then read length, so the two
+      # crossover orientations form solid blocks. See order_reads_by_haplotype().
+      lev <- order_reads_by_haplotype(plot_df)
       plot_df[, read_id := factor(read_id, levels = lev)]
       setorder(plot_df, read_id, pos)
 
@@ -1052,9 +1052,9 @@ server <- function(input, output, session) {
               pos <= plot_end
           ]
           if (nrow(plot_df) == 0) return(NULL)
-          # Facet rows in junction order so the crossovers line up as a
-          # staircase rather than scattering alphabetically.
-          lev <- order_reads_by_junction(plot_df)
+          # Facet rows grouped by haplotype pattern, then read length.
+          # See order_reads_by_haplotype().
+          lev <- order_reads_by_haplotype(plot_df)
           plot_df[, read_id := factor(read_id, levels = lev)]
           setorder(plot_df, read_id, pos)
 
