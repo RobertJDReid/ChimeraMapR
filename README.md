@@ -97,7 +97,7 @@ These may be combined freely — each flag adds its own file. With none of them 
 | `--peak-plot` | ✓ | Genome-wide overview plot (PNG) |
 | `--peak-list` | ✓ | Detected peaks, including haplotype classification, as CSV. Restricted to peaks with a qualifying SNP at or above the minimum peak height (`--min-peak-height`, raised at each SNP by `--min-peak-frac` if set), matching the app's "Peak Summary" table |
 | `--events-table` | ✓ | Runs the chain-based caller and writes the final events table as CSV (no intermediate step CSVs) |
-| `--overview-rds` | | Overview plot object as RDS (re-plot later with `readRDS()` + `print()`) |
+| `--overview-rds` | | Overview plot data as RDS, including LOH and events when the chain analysis runs (redraw with `build_overview_plot(readRDS(f))`) |
 
 For example, `--peak-list --peak-plot` writes just the peak CSV and the PNG.
 
@@ -324,7 +324,7 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 
 | File | Format | Description |
 |---|---|---|
-| Overview plot | PNG / RDS | Per-chromosome read counts with fitted curve, peak markers, and aneuploidy shading |
+| Overview plot | PNG / RDS | Per-chromosome read counts with fitted curve, peak markers, LOH band, event symbols and aneuploidy shading; the RDS holds the data to redraw it with `build_overview_plot()` |
 | Peak table / fused-peak table | CSV | Peak positions, boundaries, heights, and haplotype classification for all chromosomes |
 | Peak-pair analysis / post-fusion summary | CSV | Jaccard scores and fusion decisions; blended pre/post-fusion peak classification |
 | LOH regions | CSV | REF-fixed / ALT-fixed / heterozygous tract boundaries per chromosome |
