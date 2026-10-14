@@ -162,8 +162,11 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
         peak_end    = fused_end   / 1000
       )
 
+      # Size 1.5 (ggplot default): round points stay distinguishable even when
+      # they touch at ~100 reads, and the haplotype ordering makes runs easy
+      # to follow without a read backbone.
       p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-        geom_point(size = 0.8) +
+        geom_point(size = 1.5) +
         # Fused centre position (blue solid)
         geom_vline(
           data        = peak_point_df,
@@ -1078,8 +1081,9 @@ server <- function(input, output, session) {
             "\n\u25b6 Haplotype classification: ", hap_label_str, expanded_note
           )
 
+          # Size 1.5: see the fused-peak plot above.
           p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-            geom_point(size = 0.8) +
+            geom_point(size = 1.5) +
             geom_vline(
               data        = peak_point_df,
               aes(xintercept = pos_kb),
