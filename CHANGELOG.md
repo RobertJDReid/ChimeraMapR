@@ -18,6 +18,16 @@ read by `app.R` and `chimera_cli.R`.
   window" background keeps `order_reads_by_composition()`.
 - Display only; no change to peaks or called events.
 
+### Read plots: point size and opacity controls
+
+- New collapsed "Read Plot Display" section in the sidebar, below Advanced
+  Settings, sets point size and opacity separately for the peak / fused-peak
+  plots (default 1.5) and the Selected Region view (default 0.7, unchanged).
+- Applied when a plot is drawn, not when it is built, so a change redraws
+  without re-running the analysis; PNG downloads use the same settings.
+  Inputs are debounced (500 ms), and blank or out-of-range values fall back
+  to the default or are clamped (size 0.1-5, opacity 0.05-1).
+
 ## [0.8.26] - 2026-10-14
 
 ### Peak plots: reads grouped by haplotype, then length

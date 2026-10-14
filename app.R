@@ -29,6 +29,53 @@ APP_GIT_BRANCH <- local({
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
 # ---------------------------------------------------------------------------
+# Read-plot point styling
+#   Default point size per view, also the default of the matching control in
+#   the sidebar's "Read Plot Display" section. The peak plots show only the
+#   reads at one peak (~60 at typical depth); the Selected Region view can
+#   show the whole pile, hence the smaller default.
+#
+#   The plots are built once per analysis / fusion run, so the controls are
+#   applied when a plot is drawn rather than when it is built:
+#   style_read_points() returns a copy whose read points take the given size
+#   and alpha, and a change redraws without re-running anything. The point
+#   layer is rebuilt rather than edited because ggplot layers are reference
+#   objects -- editing one in place would change the stored plot too.
+#   For a patchwork (reads over a haplotype / LOH strip) only the first, read,
+#   panel is restyled; it holds the only point layer.
+# ---------------------------------------------------------------------------
+PEAK_POINT_SIZE   <- 1.5
+REGION_POINT_SIZE <- 0.7
+
+style_read_points <- function(p, style) {
+  if (inherits(p, "patchwork")) {
+    p[[1]] <- style_read_points(p[[1]], style)
+    return(p)
+  }
+  for (i in seq_along(p$layers)) {
+    L <- p$layers[[i]]
+    if (!inherits(L$geom, "GeomPoint")) next
+    p$layers[[i]] <- geom_point(
+      mapping     = L$mapping,
+      # An inherited data slot is a waiver, which geom_point() rejects.
+      data        = if (is.data.frame(L$data)) L$data else NULL,
+      inherit.aes = L$inherit.aes,
+      show.legend = L$show.legend,
+      size        = style$size,
+      alpha       = style$alpha
+    )
+  }
+  p
+}
+
+# A blank or out-of-range numericInput falls back to / is clamped into range,
+# so a half-typed value never breaks the plots.
+clamp_input <- function(x, default, lo, hi) {
+  if (is.null(x) || length(x) != 1L || !is.numeric(x) || is.na(x)) return(default)
+  min(max(x, lo), hi)
+}
+
+# ---------------------------------------------------------------------------
 # build_fused_peak_plots()
 #   Builds the per-chromosome list of fused peak group plots, mirroring the
 #   structure of peak_plots_by_chr.  Called from both run_fusion and
@@ -162,11 +209,12 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
         peak_end    = fused_end   / 1000
       )
 
-      # Size 1.5 (ggplot default): round points stay distinguishable even when
-      # they touch at ~100 reads, and the haplotype ordering makes runs easy
-      # to follow without a read backbone.
+      # Default size 1.5 (ggplot default): round points stay distinguishable
+      # even when they touch at ~100 reads, and the haplotype ordering makes
+      # runs easy to follow without a read backbone. Adjustable at draw time;
+      # see style_read_points().
       p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-        geom_point(size = 1.5) +
+        geom_point(size = PEAK_POINT_SIZE) +
         # Fused centre position (blue solid)
         geom_vline(
           data        = peak_point_df,
@@ -533,6 +581,28 @@ ui <- fluidPage(
         helpText("Fraction of spanning reads that must share the return pattern (AAABBBAAA) to call NCO-GC.")
       ),
 
+      tags$details(
+        class = "advanced-settings",
+        tags$summary("Read Plot Display"),
+        helpText("Display only: changes redraw the read plots without re-running the analysis. PNG downloads use the same settings."),
+
+        numericInput("peak_point_size",
+                     "Peak Plots: Point Size:",
+                     value = PEAK_POINT_SIZE, min = 0.1, max = 5, step = 0.1),
+
+        numericInput("peak_point_alpha",
+                     "Peak Plots: Point Opacity:",
+                     value = 1, min = 0.05, max = 1, step = 0.05),
+
+        numericInput("region_point_size",
+                     "Selected Region: Point Size:",
+                     value = REGION_POINT_SIZE, min = 0.1, max = 5, step = 0.1),
+
+        numericInput("region_point_alpha",
+                     "Selected Region: Point Opacity:",
+                     value = 1, min = 0.05, max = 1, step = 0.05)
+      ),
+
       hr(),
 
       actionButton("run_analysis",
@@ -777,6 +847,17 @@ server <- function(input, output, session) {
 
   # Shared trigger for region plot building
   rv_trigger_region <- reactiveVal(0L)
+
+  # Read-plot point styling from the "Read Plot Display" controls. Debounced
+  # because each change redraws every peak plot on the page.
+  peak_point_style <- debounce(reactive(list(
+    size  = clamp_input(input$peak_point_size,  PEAK_POINT_SIZE, 0.1, 5),
+    alpha = clamp_input(input$peak_point_alpha, 1, 0.05, 1)
+  )), 500)
+  region_point_style <- debounce(reactive(list(
+    size  = clamp_input(input$region_point_size,  REGION_POINT_SIZE, 0.1, 5),
+    alpha = clamp_input(input$region_point_alpha, 1, 0.05, 1)
+  )), 500)
 
   # Reactive values to store analysis results
   results <- reactiveValues(
@@ -1081,9 +1162,9 @@ server <- function(input, output, session) {
             "\n\u25b6 Haplotype classification: ", hap_label_str, expanded_note
           )
 
-          # Size 1.5: see the fused-peak plot above.
+          # Point size: see the fused-peak plot above.
           p_reads <- ggplot(plot_df, aes(x = pos / 1000, y = 1, colour = IS_REF)) +
-            geom_point(size = 1.5) +
+            geom_point(size = PEAK_POINT_SIZE) +
             geom_vline(
               data        = peak_point_df,
               aes(xintercept = pos_kb),
@@ -1617,7 +1698,9 @@ server <- function(input, output, session) {
           .chr <- chr_name
           .i   <- i
 
-          output[[output_name]] <- renderPlot({ p })
+          output[[output_name]] <- renderPlot({
+            style_read_points(p, peak_point_style())
+          })
 
           output[[png_dl_id]] <- downloadHandler(
             filename = function() {
@@ -1630,7 +1713,8 @@ server <- function(input, output, session) {
               has_seg    <- inherits(p, "patchwork")
               seg_extra  <- if (has_seg) 1.5 else 0
               plot_h     <- max(4, min(22, n_reads * 0.4 + 2)) + seg_extra
-              ggsave(file, plot = p, width = 10, height = plot_h, dpi = 300)
+              ggsave(file, plot = style_read_points(p, peak_point_style()),
+                     width = 10, height = plot_h, dpi = 300)
             }
           )
 
@@ -1731,7 +1815,9 @@ server <- function(input, output, session) {
           .chr <- chr_name
           .i   <- i
 
-          output[[output_name]] <- renderPlot({ p })
+          output[[output_name]] <- renderPlot({
+            style_read_points(p, peak_point_style())
+          })
 
           output[[png_dl_id]] <- downloadHandler(
             filename = function() {
@@ -1744,7 +1830,8 @@ server <- function(input, output, session) {
               has_seg    <- inherits(p, "patchwork")
               seg_extra  <- if (has_seg) 1.5 else 0
               plot_h     <- max(4, min(22, n_reads * 0.4 + 2)) + seg_extra
-              ggsave(file, plot = p, width = 10, height = plot_h, dpi = 300)
+              ggsave(file, plot = style_read_points(p, peak_point_style()),
+                     width = 10, height = plot_h, dpi = 300)
             }
           )
 
@@ -2511,7 +2598,7 @@ server <- function(input, output, session) {
       geom_segment(data = backbone,
                    aes(x = x, xend = xend, y = read_row, yend = read_row),
                    inherit.aes = FALSE, colour = "grey85", linewidth = 0.25) +
-      geom_point(aes(colour = IS_REF), size = 0.7) +
+      geom_point(aes(colour = IS_REF), size = REGION_POINT_SIZE) +
       facet_grid(read_class ~ ., scales = "free_y", space = "free_y",
                  switch = "y",
                  labeller = labeller(read_class = CLASS_LABELS)) +
@@ -2673,7 +2760,7 @@ server <- function(input, output, session) {
 
   output$selected_region_plot <- renderPlot({
     req(results$selected_region_plot)
-    results$selected_region_plot
+    style_read_points(results$selected_region_plot, region_point_style())
   })
 
   observeEvent(input$close_selected_region_tab, {
@@ -3084,7 +3171,9 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(results$selected_region_plot)
-      ggsave(file, plot = results$selected_region_plot, width = 10, height = 12, dpi = 300)
+      ggsave(file, plot = style_read_points(results$selected_region_plot,
+                                            region_point_style()),
+             width = 10, height = 12, dpi = 300)
     }
   )
 
