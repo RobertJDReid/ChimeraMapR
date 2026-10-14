@@ -219,6 +219,127 @@ load_chr_size <- function(path) {
   dt[, .(CHROM, length)]
 }
 
+# -----------------------------------------------------------------------------
+#  Chromosome order and labels
+#
+#  References name chromosomes many ways -- S288C_chrXVI, chrXVI, XVI, Chr16,
+#  chr16, NC_001148.4, chrA -- and the FASTA itself may be sorted by name or
+#  by length. order_chromosomes() puts them in chromosome-number order:
+#
+#  1. Each name is cut to an id: the text after its last "chr" / "chrom" /
+#     "chromosome" word, up to the next "_" "." "|" or ":"; for a name with no
+#     such word, the name minus the prefix and suffix that all such names
+#     share (NC_001133.9 -> 001133.9). A shared prefix or suffix is backed off
+#     so it never ends inside a numeral (chrXI + chrXII share "chrXI", not
+#     the prefix to cut).
+#  2. Ids are read as Roman numerals (I-XCIX), Arabic numbers (16, 016,
+#     001148.4) or single capital letters (A-Z). One scheme is chosen for the
+#     whole set -- the one that reads the most ids, ties going Roman > Arabic
+#     > letter -- so I, V and X are never letters in a Roman genome, nor C or M
+#     numerals in a lettered one. A trailing lowercase letter (XIIa, XIIb)
+#     orders after the bare number.
+#  3. Read names come first in number order, grouped by the text before the
+#     chr word (S288C_chr* then SK1_chr* in a two-genome reference, groups in
+#     FASTA order). Names the scheme cannot read follow in FASTA order, and
+#     organelle / plasmid sequences (mt, chrM, mitochondrion, 2-micron) last.
+#
+#  When fewer than two names read under any scheme the FASTA order is kept.
+# -----------------------------------------------------------------------------
+CHROM_ORGANELLE_RE <- "(?i)^(m|mt|mtdna|mito.*|chrm|2[-_]?micron|2u|2mu|plasmid.*)$"
+
+# Longest prefix shared by every string in x, backed off past any trailing
+# capitals / digits so it cannot end inside a Roman or Arabic numeral.
+shared_chrom_prefix <- function(x) {
+  if (length(x) < 2) return("")
+  n <- min(nchar(x))
+  k <- 0L
+  while (k < n && length(unique(substr(x, k + 1L, k + 1L))) == 1L) k <- k + 1L
+  sub("[A-Z0-9]+$", "", substr(x[1], 1L, k))
+}
+
+order_chromosomes <- function(chroms) {
+  chroms <- unique(as.character(chroms))
+  n <- length(chroms)
+  if (n < 2) return(chroms)
+
+  # 1. ids, plus the text before the chr word as a group label
+  m <- regmatches(chroms, regexec("(?i)^(.*)(?:chromosome|chrom|chr)[_. -]?(.+)$",
+                                  chroms, perl = TRUE))
+  has_word <- lengths(m) == 3L
+  group    <- ifelse(has_word, vapply(m, `[`, "", 2L), "")
+  rest     <- ifelse(has_word, vapply(m, `[`, "", 3L), chroms)
+  if (sum(!has_word) >= 2) {
+    bare   <- rest[!has_word]
+    pre    <- shared_chrom_prefix(bare)
+    rev_s  <- function(s) vapply(strsplit(s, ""), function(ch) paste(rev(ch), collapse = ""), "")
+    # Shared suffix: the prefix of the reversed names, reversed back (its
+    # back-off then trims the suffix's leading capitals / digits).
+    suf    <- rev_s(shared_chrom_prefix(rev_s(bare)))
+    bare   <-substr(bare, nchar(pre) + 1L, nchar(bare) - nchar(suf))
+    rest[!has_word] <- bare
+  }
+  organelle <- grepl(CHROM_ORGANELLE_RE, rest, perl = TRUE)
+  id <- ifelse(has_word, sub("[_.|:].*$", "", rest), rest)
+
+  # 2. read ids under each scheme
+  roman_m  <- regmatches(id, regexec("^((?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))([a-z]?)$",
+                                     id, perl = TRUE))
+  roman_v  <- vapply(roman_m, function(g) if (length(g) == 3L && nzchar(g[2]))
+    as.integer(utils::as.roman(g[2])) else NA_integer_, 0L)
+  arabic_m <- regmatches(id, regexec("^0*([0-9]+)(?:\\.[0-9]+)?([a-z]?)$", id))
+  arabic_v <- vapply(arabic_m, function(g) if (length(g) == 3L)
+    as.numeric(g[2]) else NA_real_, 0)
+  letter_v <- ifelse(grepl("^[A-Z]$", id), match(id, LETTERS), NA_integer_)
+  suffix   <- function(mm) vapply(mm, function(g) if (length(g) == 3L) g[3] else "", "")
+
+  ok <- !organelle
+  counts <- c(roman  = sum(!is.na(roman_v)  & ok),
+              arabic = sum(!is.na(arabic_v) & ok),
+              letter = sum(!is.na(letter_v)))
+  if (max(counts) < 2) return(chroms)
+  scheme <- names(counts)[which.max(counts)]
+  value  <- switch(scheme, roman = roman_v, arabic = arabic_v, letter = letter_v)
+  sfx    <- switch(scheme, roman = suffix(roman_m), arabic = suffix(arabic_m),
+                   letter = rep("", n))
+  # A lone "M" is mitochondrial except in a lettered genome (C. glabrata chrM).
+  if (scheme == "letter") organelle <- organelle & id != "M"
+  value[organelle] <- NA
+
+  # 3. read names by group then number; unread names; organelles last
+  tier <- ifelse(organelle, 2L, ifelse(is.na(value), 1L, 0L))
+  grp  <- match(group, unique(group))
+  chroms[order(tier, ifelse(tier == 0L, grp, 0L), value, sfx, seq_len(n))]
+}
+
+# Wraps chromosome names for facet strips: lines of at most `width`
+# characters, broken after "_" "-" "." "|" ":" or before a chr word
+# (S288C_chrXVI -> "S288C_" / "chrXVI"). A trailing break character and a
+# 1-2 character piece may overrun `width` rather than sit on a line alone
+# (NC_001133.9 stays whole). A piece longer than `width` with no break point
+# is split hard.
+wrap_chrom_label <- function(x, width = 10L) {
+  fit_len <- function(s) nchar(sub("[_.|:-]$", "", s))
+  vapply(as.character(x), function(s) {
+    if (is.na(s) || fit_len(s) <= width) return(s)
+    marked <- gsub("([_.|:-])", "\\1\001", s)
+    marked <- gsub("(?<=[^\001])(?=(?i:chr))", "\001", marked, perl = TRUE)
+    pieces <- strsplit(marked, "\001", fixed = TRUE)[[1]]
+    pieces <- unlist(lapply(pieces[nzchar(pieces)], function(p) {
+      if (fit_len(p) <= width) return(p)
+      starts <- seq(1L, nchar(p), width)
+      substring(p, starts, pmin(starts + width - 1L, nchar(p)))
+    }))
+    lines <- pieces[1]
+    for (p in pieces[-1]) {
+      last <- length(lines)
+      if (fit_len(paste0(lines[last], p)) <= width || fit_len(p) <= 2L)
+        lines[last] <- paste0(lines[last], p)
+      else lines <- c(lines, p)
+    }
+    paste(lines, collapse = "\n")
+  }, "", USE.NAMES = FALSE)
+}
+
 
 # -----------------------------------------------------------------------------
 #  find_hemizygous_del_blocks()
@@ -423,8 +544,9 @@ run_chimera_analysis <- function(
   message("  Loading chromosome sizes ...")
   chr_size    <- load_chr_size(chr_size_path)
 
-  # Preserve FASTA chromosome order; restrict to chromosomes in read data
-  fasta_chr_order  <- chr_size$CHROM
+  # Chromosome-number order where the names allow it, else FASTA order (see
+  # order_chromosomes()); restrict to chromosomes in read data
+  fasta_chr_order  <- order_chromosomes(chr_size$CHROM)
   allele_data_used <- allele_data[CHROM %in% chromosomes]
   chr_size_used    <- chr_size[CHROM %in% chromosomes]
 
@@ -1684,8 +1806,9 @@ event_evidence_reads <- function(event) {
 #
 #  results : the list returned by run_chimera_analysis()
 #
-#  Strip labels use facet_grid(chrom ~ ., switch = "y") with angle = 0 so
-#  that chromosome names read horizontally on the left side of each panel.
+#  Strip labels sit on the left of each panel (switch = "y") and read
+#  horizontally, wrapped by wrap_chrom_label() so long names are not clipped.
+#  Panels run in order_chromosomes() order.
 #
 #  The X axis upper limit is data-driven: the maximum chromosome length from
 #  results$chr_span (in bp, converted to Kb) so the scale is always sized to
@@ -1727,10 +1850,17 @@ build_overview_plot <- function(results) {
   # Round up to the nearest 100 Kb for clean minor-break grid lines
   x_max_kb <- ceiling(x_max_kb / 25) * 25
 
-  # Convert chrom to character so factors don't cause facet alignment issues
+  # Convert chrom to character so factors don't cause facet alignment issues.
+  # Facet order is set once from chrom_levels in facet_grid() below, which
+  # applies it to every layer's data alike.
+  chrom_levels <- order_chromosomes(
+    if (is.factor(snp_cov$chrom)) levels(droplevels(snp_cov$chrom))
+    else unique(as.character(snp_cov$chrom)))
   snp_cov[, chrom := as.character(chrom)]
   fits[,    chrom := as.character(chrom)]
-  
+  # Strip labels wrap to about three lines for the longest name, 10 chars min
+  label_width <- max(10L, ceiling(max(nchar(chrom_levels)) / 3))
+
   # ── Per-chromosome ploidy panel backgrounds ───────────────────────────────
   # 1N → #FAFBAC, 3N → #FEDBFF, 2N → white (no layer added).
   # fill is mapped through aes() (keyed on the display label) so these
@@ -1813,7 +1943,9 @@ build_overview_plot <- function(results) {
     xlab("Position (Kbp)") +
     ylab("Number of Reads") +
     ylim(y_floor, y_ceiling) +
-    facet_grid(chrom ~ ., switch = "y") +
+    facet_grid(rows = vars(chrom = factor(chrom, levels = chrom_levels)),
+               switch = "y",
+               labeller = as_labeller(function(x) wrap_chrom_label(x, label_width))) +
     theme_bw() +
     theme(
       panel.grid.minor.x = element_line(linewidth = 0.05,
@@ -1824,7 +1956,11 @@ build_overview_plot <- function(results) {
       strip.placement    = "outside",
       axis.text          = element_text(size = rel(1.2)),
       axis.title         = element_text(size = rel(1.5)),
-      strip.text.y       = element_text(size = rel(1.1), angle = 0, hjust = 0, face = "bold")
+      # Left-hand strips (switch = "y") take strip.text.y.left, which
+      # theme_bw() sets to 90 degrees; setting strip.text.y alone left names
+      # vertical and clipped to the panel height.
+      strip.text.y.left  = element_text(size = rel(1.1), angle = 0, hjust = 1,
+                                        lineheight = 0.9, face = "bold")
     )
 
   # Highlight peak SNP points in blue

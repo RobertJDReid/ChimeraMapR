@@ -4,6 +4,32 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Overview plot: chromosome labels wrap, chromosomes sort by number
+
+- Chromosome names on the overview PNG were drawn vertically and clipped to
+  the panel height (S288C_chrXI printed as "S288C_chrX"). The theme set
+  `strip.text.y`, but the left-hand strips take `strip.text.y.left`, which
+  `theme_bw()` sets to 90 degrees. Names now read horizontally, wrapped by
+  new `wrap_chrom_label()` at `_ - . | :` or before a `chr` word, in lines of
+  about a third of the longest name (10 characters minimum).
+- The plot also turned `chrom` into plain text, so panels ran alphabetically
+  (I, II, III, IV, IX, V, ...). New `order_chromosomes()` sets the order used
+  for the analysis factor levels, the overview panels and the app's
+  chromosome tabs:
+  - reads the id after the last `chr` / `chrom` / `chromosome` word, or what
+    is left once a shared prefix / suffix is removed (`NC_001133.9`);
+  - picks one numbering scheme for the whole set -- Roman, Arabic (including
+    zero-padded and accession numbers) or single capital letter -- so I, V
+    and X are never read as letters in a Roman genome, nor C or M as numerals
+    in a lettered one; `XIIa` / `XIIb` follow `XII`;
+  - groups by the text before the `chr` word in multi-genome references, puts
+    names it cannot read after the numbered ones in FASTA order, and puts
+    organelles and plasmids (`mt`, `chrM`, `2-micron`) last;
+  - keeps FASTA order when fewer than two names can be read.
+- No change to called events: RAD5_01 gives the same 50 events.
+
 ## [0.8.24] - 2026-10-14
 
 ### One-SNP gene-conversion tracts typed at `--min-run 1`
