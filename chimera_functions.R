@@ -1562,13 +1562,13 @@ CHIMERA_COLOURS <- c(
 EVENT_SYMBOL_MAP <- c(
   CO_GC                    = "✖", # HEAVY MULTIPLICATION X
   CO_GC_subres             = "✖", # HEAVY MULTIPLICATION X
-  NCO_GC                   = "𝝤", # CAPTIAL OMICRON
-  NCO_GC_subres            = "𝝤", # CAPTIAL OMICRON (no flanking LOH tract)
-  NCO_GC_in_terminal       = "𝝤", # CAPTIAL OMICRON
-  GC_UNRESOLVED            = "𝝤°", # confirmed GC-type tract (LOH flanked by two binary peaks); NCO/CO undetermined
-  GC_ONE_SIDED             = "𝝤¹", # one confirmed binary junction peak; other boundary has no peak at all
+  NCO_GC                   = "Ο", # GREEK CAPITAL LETTER OMICRON
+  NCO_GC_subres            = "Ο", # GREEK CAPITAL LETTER OMICRON (no flanking LOH tract)
+  NCO_GC_in_terminal       = "Ο", # GREEK CAPITAL LETTER OMICRON
+  GC_UNRESOLVED            = "Ο°", # confirmed GC-type tract (LOH flanked by two binary peaks); NCO/CO undetermined
+  GC_ONE_SIDED             = "Ο¹", # one confirmed binary junction peak; other boundary has no peak at all
   CROSSOVER_NO_TRACT       = "✖", # HEAVY MULTIPLICATION X (crossover, tract below LOH resolution)
-  DOUBLE_GC                = "𝝤𝝤", # two NCO gene conversions in one token
+  DOUBLE_GC                = "ΟΟ", # two NCO gene conversions in one token
   CO_TERM                  = "TCO",
   CO_TERM_PROBABLE         = "TCO*",   # provisional terminal CO; sole junction gap-masked (no peak)
   CO_TERM_GAPPED           = "TCO*",   # fused terminal COs across a SNP-gap; enumerated ("N X TCO*") at plot time
