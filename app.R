@@ -1751,7 +1751,10 @@ server <- function(input, output, session) {
             },
             content = function(file) {
               reads_plot <- if (inherits(p, "patchwork")) p[[1]] else p
-              n_reads    <- length(unique(ggplot_build(reads_plot)$data[[1]]$group))
+              # One facet row per read. ggplot's `group` is not a read count:
+              # with colour = IS_REF it is the REF/ALT colour groups, which
+              # left every PNG at the 4 in floor.
+              n_reads    <- uniqueN(reads_plot$data$read_id)
               has_seg    <- inherits(p, "patchwork")
               seg_extra  <- if (has_seg) 1.5 else 0
               plot_h     <- max(4, min(22, n_reads * 0.4 + 2)) + seg_extra
@@ -1869,7 +1872,10 @@ server <- function(input, output, session) {
             },
             content = function(file) {
               reads_plot <- if (inherits(p, "patchwork")) p[[1]] else p
-              n_reads    <- length(unique(ggplot_build(reads_plot)$data[[1]]$group))
+              # One facet row per read. ggplot's `group` is not a read count:
+              # with colour = IS_REF it is the REF/ALT colour groups, which
+              # left every PNG at the 4 in floor.
+              n_reads    <- uniqueN(reads_plot$data$read_id)
               has_seg    <- inherits(p, "patchwork")
               seg_extra  <- if (has_seg) 1.5 else 0
               plot_h     <- max(4, min(22, n_reads * 0.4 + 2)) + seg_extra

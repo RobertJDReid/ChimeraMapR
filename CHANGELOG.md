@@ -4,6 +4,18 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Peak plot PNG downloads scale with the number of reads
+
+- "Download Plot Image (.png)" on the Peak Plots and Fused Peak Plots tabs
+  sized the image from `ggplot_build()`'s `group` count, which with
+  `colour = IS_REF` counts the REF/ALT colour groups rather than reads. Every
+  PNG came out at the 4 in floor (5.5 in with the haplotype bar), squeezing
+  the read rows. Height now uses the number of reads, as intended: 0.4 in per
+  read + 2 in, between 4 and 22 in, + 1.5 in for the bar.
+- Width (10 in), dpi and the on-screen plots are unchanged.
+
 ## [0.8.28] - 2026-10-14
 
 ### Peak plot .rds downloads carry everything the plot draws
