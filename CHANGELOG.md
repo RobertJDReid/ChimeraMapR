@@ -4,6 +4,21 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Peak plot .rds downloads carry everything the plot draws
+
+- "Download Plot Data (.rds)" on the Peak Plots and Fused Peak Plots tabs
+  now also saves `peak_points` (centre / bounds), `haplotype_label`,
+  `hap_win_start` / `hap_win_end` / `hap_win_expanded`, `display_start` /
+  `display_end`, `plot_title`, `subpeak_kb`, `n_sub_peaks` and `edge_type`
+  (positions in Kb), so a plot can be redrawn outside the app. Previously
+  the peak file lacked the label and window, and the fused file lacked the
+  centre, bounds and sub-peak positions. See `peak_plot_meta()` in `app.R`.
+- The peak file's `peak_points` is now saved from the plot's own data rather
+  than read back out of its second ggplot layer.
+- Existing fields are unchanged.
+
 ## [0.8.27] - 2026-10-14
 
 ### Read plots: larger points; region view sorts chimeric reads by haplotype

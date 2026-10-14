@@ -76,6 +76,39 @@ clamp_input <- function(x, default, lo, hi) {
 }
 
 # ---------------------------------------------------------------------------
+# peak_plot_meta()
+#   Everything a peak / fused-peak plot draws beyond the read calls and the
+#   segment bar, stored on the plot as attr(p, "peak_meta") and written into
+#   its "Download Plot Data (.rds)" so the plot can be redrawn outside the
+#   app without re-running the classifier. Positions are in Kb, matching
+#   peak_points and seg_data.
+#
+#     peak_points      pos_kb (centre line), peak_start / peak_end (bounds)
+#     haplotype_label  classifier label, after any read-phasing rescue
+#     hap_win_*        window the classifier used; the orange lines are drawn
+#                      only when hap_win_expanded is TRUE
+#     display_*        x range the plot was built for (peak bounds +/- 5 kb)
+#     subpeak_kb       constituent sub-peak SNPs (fused groups of 2+ only)
+# ---------------------------------------------------------------------------
+peak_plot_meta <- function(peak_points, hap, plot_start, plot_end, plot_title,
+                           subpeak_pos = numeric(0), n_sub_peaks = 1L,
+                           edge_type = NA_character_) {
+  list(
+    peak_points      = as.data.table(peak_points),
+    haplotype_label  = hap$label,
+    hap_win_start    = hap$win_start / 1000,
+    hap_win_end      = hap$win_end   / 1000,
+    hap_win_expanded = isTRUE(hap$expanded),
+    display_start    = plot_start / 1000,
+    display_end      = plot_end   / 1000,
+    plot_title       = plot_title,
+    subpeak_kb       = subpeak_pos / 1000,
+    n_sub_peaks      = n_sub_peaks,
+    edge_type        = edge_type
+  )
+}
+
+# ---------------------------------------------------------------------------
 # build_fused_peak_plots()
 #   Builds the per-chromosome list of fused peak group plots, mirroring the
 #   structure of peak_plots_by_chr.  Called from both run_fusion and
@@ -323,6 +356,11 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
 
       attr(p, "seg_data")        <- seg_data
       attr(p, "haplotype_label") <- hap$label
+      attr(p, "peak_meta")       <- peak_plot_meta(
+        peak_points = peak_point_df, hap = hap,
+        plot_start = plot_start, plot_end = plot_end,
+        plot_title = plot_title, subpeak_pos = sub_snp_pos,
+        n_sub_peaks = n_sub, edge_type = edge_lbl)
       p
     })
 
@@ -1260,6 +1298,10 @@ server <- function(input, output, session) {
 
           attr(p, "seg_data")       <- seg_data
           attr(p, "haplotype_label") <- hap$label
+          attr(p, "peak_meta")      <- peak_plot_meta(
+            peak_points = peak_point_df, hap = hap,
+            plot_start = plot_start, plot_end = plot_end,
+            plot_title = plot_title)
           p
         })
 
@@ -1727,17 +1769,18 @@ server <- function(input, output, session) {
               reads_plot      <- if (inherits(p, "patchwork")) p[[1]] else p
               plot_data       <- as.data.table(reads_plot$data)
               plot_data       <- plot_data[, .(chrom, pos, read_id, IS_REF)]
-              peak_points_dt  <- as.data.table(reads_plot$layers[[2]]$data)
               seg_dt          <- attr(p, "seg_data")
               saveRDS(
-                list(
-                  plot_data   = plot_data,
-                  peak_points = peak_points_dt,
-                  seg_data    = seg_dt,
-                  chromosome  = .chr,
-                  peak_number = .i,
-                  sample_name = input$sample_name,
-                  app_version = APP_VERSION
+                c(
+                  list(
+                    plot_data   = plot_data,
+                    seg_data    = seg_dt,
+                    chromosome  = .chr,
+                    peak_number = .i,
+                    sample_name = input$sample_name,
+                    app_version = APP_VERSION
+                  ),
+                  attr(p, "peak_meta")   # see peak_plot_meta()
                 ),
                 file
               )
@@ -1846,14 +1889,16 @@ server <- function(input, output, session) {
               plot_data  <- plot_data[, .(chrom, pos, read_id, IS_REF)]
               seg_dt     <- attr(p, "seg_data")
               saveRDS(
-                list(
-                  plot_data        = plot_data,
-                  seg_data         = seg_dt,
-                  haplotype_label  = attr(p, "haplotype_label"),
-                  chromosome       = .chr,
-                  fused_group      = .i,
-                  sample_name      = input$sample_name,
-                  app_version      = APP_VERSION
+                c(
+                  list(
+                    plot_data        = plot_data,
+                    seg_data         = seg_dt,
+                    chromosome       = .chr,
+                    fused_group      = .i,
+                    sample_name      = input$sample_name,
+                    app_version      = APP_VERSION
+                  ),
+                  attr(p, "peak_meta")   # see peak_plot_meta()
                 ),
                 file
               )
