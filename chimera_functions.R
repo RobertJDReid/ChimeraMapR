@@ -1815,6 +1815,45 @@ event_evidence_reads <- function(event) {
 }
 
 # -----------------------------------------------------------------------------
+#  overview_rds_payload()
+#
+#  The overview plot's "R Object (.rds)" download (app) and --overview-rds
+#  output (CLI). Holds every field build_overview_plot() reads, under the same
+#  names, so build_overview_plot(readRDS(f)) redraws the plot as exported:
+#  chr_span sets the x-axis length, ploidy_map the aneuploid panel washes,
+#  loh_segments the LOH band and event_table the event symbols. ploidy_map is
+#  stored resolved (one row per chromosome) rather than as full_read_loh,
+#  which it is computed from and which is far larger. Fields not computed yet
+#  (LOH / events before the chain analysis has run) are saved as NULL, and the
+#  plot omits those layers, as it does in the app.
+#
+#  results     : results list / reactiveValues from run_chimera_analysis()
+#  sample_name : sample label recorded in the file
+# -----------------------------------------------------------------------------
+overview_rds_payload <- function(results, sample_name) {
+  ploidy_map <- if (!is.null(results$ploidy_map)) {
+    results$ploidy_map
+  } else if (!is.null(results$full_read_loh) && nrow(results$full_read_loh) > 0) {
+    get_chromosome_ploidy(results$full_read_loh)
+  } else NULL
+
+  list(
+    snp_coverage    = copy(results$snp_coverage),
+    chromosome_fits = copy(results$chromosome_fits),
+    peaks_genomic   = results$peaks_genomic,
+    snp_peaks       = results$snp_peaks,
+    chr_span        = results$chr_span,
+    ploidy_map      = ploidy_map,
+    loh_segments    = results$loh_segments,
+    event_table     = results$event_table,
+    strain_ref      = results$strain_ref,
+    strain_alt      = results$strain_alt,
+    sample_name     = sample_name,
+    app_version     = APP_VERSION
+  )
+}
+
+# -----------------------------------------------------------------------------
 #  Overview plot builder
 #
 #  Expressed as a plain function that returns a single ggplot object.

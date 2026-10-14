@@ -520,25 +520,23 @@ if ("peaks" %in% wanted) {
       sprintf("(%d peaks above min height)\n", nrow(peak_list)))
 }
 
-if ("rds" %in% wanted) {
-  # Overview plot RDS — same payload as the Shiny download_plot_rds handler
-  message("Saving overview RDS → ", out_paths[["rds"]])
-  saveRDS(
-    list(
-      snp_coverage    = data.table::copy(results$snp_coverage),
-      chromosome_fits = data.table::copy(results$chromosome_fits),
-      peaks_genomic   = results$peaks_genomic,
-      snp_peaks       = results$snp_peaks,
-      sample_name     = opts[["sample-name"]],
-      app_version     = APP_VERSION
-    ),
-    out_paths[["rds"]]
-  )
-  cat("Overview RDS saved to:", out_paths[["rds"]], "\n")
+# Overview RDS: overview_rds_payload() holds everything build_overview_plot()
+# reads. Like the PNG, it is deferred to the chain block when the chain
+# pipeline runs, so it carries the LOH segments and event table.
+write_overview_rds <- function(out_path) {
+  message("Saving overview RDS → ", out_path)
+  saveRDS(overview_rds_payload(results, opts[["sample-name"]]), out_path)
+  cat("Overview RDS saved to:", out_path, "\n")
   cat("Re-plot with:\n")
-  cat('  library(ggplot2); source("R/chimera_functions.R")\n')
-  cat('  d <- readRDS("', out_paths[["rds"]], '")\n', sep = "")
+  cat('  library(ggplot2); source("chimera_functions.R")\n')
+  cat('  d <- readRDS("', out_path, '")\n', sep = "")
   cat('  print(build_overview_plot(d))\n')
+}
+
+if ("rds" %in% wanted && !run_chain) {
+  write_overview_rds(out_paths[["rds"]])
+} else if ("rds" %in% wanted) {
+  message("Overview RDS will be saved after chain analysis (with LOH + events) ...")
 }
 
 if ("plot" %in% wanted && !run_chain) {
@@ -872,16 +870,17 @@ if (run_chain) {
     cat(sprintf("  Other events (peaks) → %s (%d peaks)\n", step4_up, nrow(uncl_pk)))
   }
 
-  # ── Annotated overview PNG ────────────────────────────────────────────────────
-  # A requested PNG was deferred above so it could be annotated. Feed the chain
+  # ── Annotated overview PNG / RDS ──────────────────────────────────────────────
+  # A requested PNG / RDS was deferred above so it could be annotated. Feed the chain
   # results back into `results` — the LOH segment table and the final event
   # table — so build_overview_plot() draws the LOH band and event symbols,
   # matching the app's annotated overview.
-  if ("plot" %in% wanted) {
-    results$loh_segments <- loh_segs
-    results$event_table  <- final_events
+  results$loh_segments <- loh_segs
+  results$event_table  <- final_events
+  if ("plot" %in% wanted)
     render_overview_png(out_paths[["plot"]], annotated = TRUE)
-  }
+  if ("rds" %in% wanted)
+    write_overview_rds(out_paths[["rds"]])
 
   cat("\n── Chain analysis complete ───────────────────────────────────────────────────\n")
 }

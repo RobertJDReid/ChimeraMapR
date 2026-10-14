@@ -4,6 +4,22 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Overview .rds holds everything needed to redraw the plot
+
+- The Overview tab's "Download R Object (.rds)" and the CLI's
+  `--overview-rds` now save `chr_span`, `ploidy_map`, `loh_segments`,
+  `event_table`, `strain_ref` and `strain_alt` alongside the coverage, fits
+  and peaks, under the names `build_overview_plot()` reads, so
+  `build_overview_plot(readRDS(f))` redraws the plot as exported. Previously
+  the file lacked the LOH band, event symbols and aneuploid shading, and the
+  x-axis ended at the last SNP rather than the chromosome end. Both now use
+  `overview_rds_payload()` in `chimera_functions.R`.
+- CLI: when the chain analysis runs, `--overview-rds` is written after it, as
+  the annotated PNG already was, so the file carries LOH and events.
+- Existing fields are unchanged.
+
 ## [0.8.29] - 2026-10-14
 
 ### Peak plot PNG downloads scale with the number of reads
