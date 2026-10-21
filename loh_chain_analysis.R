@@ -1385,10 +1385,26 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 }
 
 # Spanning-read record kept on a tract (or a run of tracts) for .outcome_gate.
-.outcome_record <- function(cnt, diploid) {
+.outcome_record <- function(cnt, diploid, interior = FALSE) {
   list(n_spanning = cnt$n_spanning, n_return = cnt$n_return,
        n_switch   = cnt$n_switch,   n_parental = cnt$n_parental %||% 0L,
-       n_opposite = cnt$n_opposite %||% 0L, diploid = diploid)
+       n_opposite = cnt$n_opposite %||% 0L, diploid = diploid,
+       interior = interior)
+}
+
+# TRUE when tokens[[flank_i]], the flank on `dir` of the tract or block ending
+# at tokens[[edge_i]], is a noise island -- one R11e would bridge
+# (.edge_pair_bridgeable) -- with another fixed tract of the same state beyond
+# it. A tract with such an island on BOTH sides is an interior piece of a
+# longer run, and neither of its junctions is real: Spo11-163 chrXV
+# 51,697-52,333 read its flanks off islands of 3 and 4 SNPs (REF fraction
+# 0.37, 0.38) inside an ALT run from 12 to 76 kb, and 5 of 9 spanning reads
+# looked switched where reads spanning +/-15 kb show none.
+.noise_island_flank <- function(tokens, edge_i, flank_i, dir, params) {
+  if (is.null(flank_i)) return(FALSE)
+  state <- tokens[[edge_i]]$state
+  if (!.edge_pair_bridgeable(tokens[[flank_i]], state, params)) return(FALSE)
+  !is.null(.edge_pair_step(tokens, edge_i, dir, state, params)$f)
 }
 
 # Whether parental reads can speak for the event: the tract at diploid depth
@@ -1423,11 +1439,24 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   sep   <- if (nzchar(notes %||% "")) "; " else ""
 
   if (identical(call, "CO_GC")) {
+    # Noise islands on both sides (.noise_island_flank): the reads were judged
+    # in zones that carry no phase, so they cannot back a crossover. One noise
+    # side is not enough -- the other junction may be the run's real
+    # crossover (Spo11-23 chrIX 285,060-312,859, whose right edge is the
+    # QI-082 T-LOH junction, has a noise island only on its left).
+    if (isTRUE(oc$interior)) {
+      out$call         <- "GC_UNRESOLVED"
+      out$n_support    <- n_swi
+      out$support_kind <- NA_character_
+      out$notes <- paste0(notes, sep, "reclassified from CO_GC: interior piece of ",
+                          "a same-state fixed run (noise islands on both flanks)")
+      return(out)
+    }
     if (n_swi + n_par < as.integer(params$outcome_min_reads %||% 4L)) return(out)
     rf <- n_swi / (n_swi + n_par)
     if (rf < as.numeric(params$co_min_recomb_frac %||% 0.5)) {
       out$call         <- "GC_UNRESOLVED"
-      out$n_support    <- as.integer(oc$n_spanning)
+      out$n_support    <- n_swi
       out$support_kind <- NA_character_
       out$notes <- paste0(notes, sep, "reclassified from CO_GC: ", n_swi,
                           " switched vs ", n_par, " parental of ", oc$n_spanning,
@@ -2822,11 +2851,20 @@ rule_subres_tract <- list(
 # overlapping peak, which can be one far inside the flank. Spo11-88 chrX: the
 # right flank 276,453-727,023 kept 322,636 in peak_over, hiding the binary
 # peak at 277,400 that marks the tract's right edge.
+# Only a HET or gap token is searched this way. A fixed token's overlapping
+# peaks mark its OWN junctions, and one of them can sit on the boundary it
+# shares with the tract being asked about: on R187E_14 S288C_chrXII (ALT
+# 14,847-184,321 | REF 184,531-1,005,903 | ALT to the telomere) the left ALT
+# tract's junction peak at 184,321, found through the REF tract's neighbour,
+# let R03 claim it for an 873 kb TCO_CAPTURED_TCO and lose the left-arm
+# CO_TERM. A fixed token keeps only its peak_over slot, as before.
 .over_junction_peak <- function(tok, boundary, side, tol) {
   if (is.null(tok) || is.na(boundary)) return(NULL)
+  cands <- if (tok$type %in% c("H", "G"))
+    .union_peaks(tok$peaks_over, list(tok$peak_over)) else list(tok$peak_over)
   best <- NULL
   best_d <- Inf
-  for (pk in .union_peaks(tok$peaks_over, list(tok$peak_over))) {
+  for (pk in Filter(Negate(is.null), cands)) {
     pos <- .peak_junction_pos(pk, boundary)
     if (is.na(pos)) next
     # >= 0, not > 0: a junction peak commonly lands exactly at the boundary
@@ -2911,7 +2949,10 @@ annotate_tract_read_support <- function(chain, full_read_loh, params) {
     toks[[i]]$n_tract_spanning <- cnt$n_spanning
     toks[[i]]$n_tract_return   <- cnt$n_return
     toks[[i]]$n_tract_switch   <- cnt$n_switch
-    toks[[i]]$tract_outcome    <- .outcome_record(cnt, .is_diploid_tract(list(tok), L, R, params))
+    toks[[i]]$tract_outcome    <- .outcome_record(
+      cnt, .is_diploid_tract(list(tok), L, R, params),
+      interior = .noise_island_flank(toks, i, li, -1L, params) &&
+                 .noise_island_flank(toks, i, ri,  1L, params))
 
     # Which reads produced those counts, and the flanking zones they were
     # judged in. A tract shorter than min_run raises no chimera peak, so an
@@ -2993,7 +3034,10 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
                             t$meta$del_read_ids %||% character(0))))
     )
 
-    oc <- .outcome_record(cnt, .is_diploid_tract(f_toks, L, R, params))
+    oc <- .outcome_record(
+      cnt, .is_diploid_tract(f_toks, L, R, params),
+      interior = .noise_island_flank(toks, blk$f_idx[1], blk$li, -1L, params) &&
+                 .noise_island_flank(toks, blk$f_idx[length(blk$f_idx)], blk$ri, 1L, params))
     for (k in seq_along(blk$f_idx)) {
       ti <- blk$f_idx[k]
       toks[[ti]]$block_outcome    <- oc
@@ -4208,9 +4252,42 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
 #  After scanning all chains, collect unclaimed LOH tokens and peaks.
 # =============================================================================
 
+# A crossover with no tract switches every molecule that spans it, both
+# homologs alike, so in a diploid HET region reads that keep one homolog
+# across the peak count against it (cf. .outcome_gate for CO_GC). Both zones
+# lie inside the HET token holding the peak, which keeps neighbouring events
+# out of them. With outcome_min_reads switched + same-homolog reads and a
+# switched share below co_min_recomb_frac, the call is capped at "review".
+# Spo11-88 chrII 128,479: 25 of 25 reads spanning +/-15 kb kept their homolog.
+.crossover_read_check <- function(ev, chain, full_read_loh, params) {
+  if (is.null(full_read_loh) || is.null(chain)) return(ev)
+  pos <- ev$start
+  hit <- Filter(function(t) identical(t$type, "H") && !is.na(t$start) &&
+                  t$start < pos && pos < t$end, chain$tokens)
+  if (!length(hit)) return(ev)
+  h  <- hit[[1]]
+  fb <- as.integer(params$tract_flank_bp %||% 10000L)
+  cnt <- count_tract_junction_reads(
+    full_read_loh, chain$chrom, tract_start = pos, tract_end = pos,
+    left_start  = max(h$start, pos - fb), left_end  = pos - 1L,
+    right_start = pos + 1L,               right_end = min(h$end, pos + fb),
+    min_snps = as.integer(params$min_snps_for_peak %||% 2L))
+  n_swi <- cnt$n_switch
+  n_par <- cnt$n_spanning - cnt$n_switch
+  if (n_swi + n_par < as.integer(params$outcome_min_reads %||% 4L)) return(ev)
+  rf <- n_swi / (n_swi + n_par)
+  ev$notes <- paste0(ev$notes, "; ", n_swi, " switched vs ", n_par,
+                     " same-homolog spanning reads")
+  if (rf < as.numeric(params$co_min_recomb_frac %||% 0.5)) {
+    ev$confidence_cap <- "review"
+    ev$notes <- paste0(ev$notes, " (switched share ", sprintf("%.2f", rf), ")")
+  }
+  ev
+}
+
 reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
                       snp_peaks = NULL, params = default_chain_params(),
-                      loh_snps = NULL) {
+                      loh_snps = NULL, full_read_loh = NULL) {
 
   all_events <- unlist(lapply(scan_results, `[[`, "events"), recursive = FALSE)
 
@@ -4430,6 +4507,11 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         evidence = "peak_only",
         phase_switch_frac = u$phase_switch_frac %||% NA_real_,
         notes = ev_notes, tokens = list())))
+      if (identical(ev_class, "CROSSOVER_NO_TRACT")) {
+        k <- length(uncat_peak_events)
+        uncat_peak_events[[k]] <- .crossover_read_check(uncat_peak_events[[k]],
+                                    chains[[u$chrom]], full_read_loh, params)
+      }
     } else {
       u$reason <- tract$reason
       still_unclaimed_pks <- c(still_unclaimed_pks, list(u))
@@ -4516,7 +4598,9 @@ build_event_table <- function(events, params = default_chain_params()) {
     # .outcome_gate) is gated on its switched reads, whatever rule made it:
     # a peak-backed CO_GC was otherwise "high" with a single supporting read.
     co_swi <- as.integer(ev$co_switch_reads %||% NA_integer_)
-    confidence <- if (identical(ev$event_class, "CO_GC") && !is.na(co_swi)) {
+    confidence <- if (identical(ev$confidence_cap %||% NA_character_, "review")) {
+      "review"
+    } else if (identical(ev$event_class, "CO_GC") && !is.na(co_swi)) {
       if (co_swi >= tract_read_high_min) "high" else "review"
     } else if ((ev$support_kind %||% NA_character_) %in% c("tract_reads", "parental_reads") &&
                ev$event_class %in% HIGH_CONF_CLASSES) {
@@ -4659,7 +4743,8 @@ run_chain_analysis <- function(loh_segments,
 
   message("  [chain] Reconciling unclaimed tokens ...")
   rec <- reconcile(scan_results, chains, fused_peaks, peak_pairs, snp_peaks,
-                   params = params, loh_snps = loh_snps)
+                   params = params, loh_snps = loh_snps,
+                   full_read_loh = full_read_loh)
 
   event_table <- build_event_table(rec$events, params = params)
 

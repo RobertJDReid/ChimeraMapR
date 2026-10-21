@@ -826,7 +826,8 @@ if (run_chain) {
     peak_pairs   = fusion_res$peak_pairs,
     snp_peaks    = results$snp_peaks,
     params       = cp,
-    loh_snps     = loh_result$snp_table
+    loh_snps     = loh_result$snp_table,
+    full_read_loh = results$full_read_loh
   )
 
   final_events <- build_event_table(rec$events, params = cp)

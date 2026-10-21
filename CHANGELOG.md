@@ -4,6 +4,35 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### CO_GC on an interior piece of a noise-split run; read check for CROSSOVER_NO_TRACT
+
+- A tract with a noise island on both flanks -- an island R11e would bridge
+  (at most `edge_pair_max_island_snps` SNPs, REF fraction leaning toward the
+  tract) with another fixed tract of the same state beyond it -- is an
+  interior piece of a longer run, and its junction reads were judged in zones
+  that carry no phase. Its CO_GC becomes GC_UNRESOLVED. Spo11-163 chrXV
+  51,697-52,333 (flanks of 3 and 4 SNPs inside an ALT run from 12 to 76 kb,
+  5/9 reads "switched", 0 recombinant at +/-15 kb) and Spo11-23 chrIX
+  218,801-219,851. A noise island on one side only is not enough: the other
+  junction may be the run's real crossover (Spo11-23 chrIX 285,060-312,859,
+  the QI-082 T-LOH junction, is kept). Read counts themselves are unchanged;
+  extending the flank zones past the islands instead attributed one run's
+  counts to every piece of it and duplicated crossovers.
+- A peak-only CROSSOVER_NO_TRACT is checked against the reads spanning its
+  peak inside the HET token that holds it: with at least
+  `outcome_min_reads` reads and a switched share below `co_min_recomb_frac`
+  it is capped at "review", with the counts in the note.
+- A CO_GC reclassified GC_UNRESOLVED keeps its switched-read count as
+  n_support instead of the total spanning count, which made weak calls look
+  well supported.
+- The 0.8.33 junction-peak lookup searches every overlapping peak only on a
+  HET or gap token. On a fixed token it reached a neighbouring tract's own
+  junction peak: on R187E_14 S288C_chrXII that let R03 claim the left-arm
+  CO_TERM's peak for an 873 kb TCO_CAPTURED_TCO (also R187E_03 chrXIV).
+  Both are back to their 0.8.32 calls; the Spo11-88 chrX call is unchanged.
+
 ## [0.8.34] - 2026-10-21
 
 ### Parental spanning reads weigh against CO_GC and can establish NCO_GC
