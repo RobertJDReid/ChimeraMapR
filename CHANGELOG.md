@@ -4,7 +4,7 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.35] - 2026-10-21
 
 ### CO_GC on an interior piece of a noise-split run; read check for CROSSOVER_NO_TRACT
 
