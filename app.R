@@ -1000,6 +1000,15 @@ server <- function(input, output, session) {
       return()
     }
 
+    # Check the .fai before the (slow) read load; a FASTA picked by mistake
+    # otherwise fails deep in run_chimera_analysis().
+    chr_err <- tryCatch({ load_chr_size(input$chr_size_file$datapath); NULL },
+                        error = conditionMessage)
+    if (!is.null(chr_err)) {
+      showNotification(chr_err, type = "error", duration = 10)
+      return()
+    }
+
     # Reset outputs on re-run
     results$selected_region        <- NULL
     results$selected_region_plot   <- NULL

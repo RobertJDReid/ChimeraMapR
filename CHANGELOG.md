@@ -4,6 +4,19 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Clear error when the FASTA is loaded instead of its .fai
+
+- `load_chr_size()` now stops with a readable message when the chromosome
+  size file is a FASTA (first line starts with `>`) or otherwise lacks a
+  name + numeric length in its first two columns. Previously a FASTA picked
+  by mistake (it sits beside its `.fai` with nearly the same name) failed
+  with `setnames: NA (or out of bounds) in 'old' at positions [2]`.
+- The app checks the chromosome size file when Run Analysis is pressed,
+  before clearing earlier results or loading reads, and shows the message
+  as an error notification.
+
 ## [0.8.31] - 2026-10-14
 
 ### Gene-conversion event symbols drawn at full size

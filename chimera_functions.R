@@ -213,8 +213,18 @@ load_snp_data <- function(path) {
 
 #' Load chromosome size from a FASTA index (.fai).
 #' Returns a data.table with columns: CHROM, length
+#' Stops with a readable message when given the FASTA itself (it sits beside
+#' its .fai with nearly the same name) or any file without name + length.
 load_chr_size <- function(path) {
+  first <- readLines(path, n = 1L, warn = FALSE)
+  if (length(first) && startsWith(first, ">"))
+    stop("Chromosome size file looks like a FASTA (first line starts with '>'). ",
+         "Select its .fai index instead (made by: samtools faidx <fasta>).",
+         call. = FALSE)
   dt <- fread(path, header = FALSE)
+  if (ncol(dt) < 2L || !is.numeric(dt[[2]]))
+    stop("Chromosome size file is not a .fai index: expected tab-separated ",
+         "sequence name and length in the first two columns.", call. = FALSE)
   setnames(dt, 1:2, c("CHROM", "length"))
   dt[, .(CHROM, length)]
 }
