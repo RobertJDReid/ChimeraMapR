@@ -778,6 +778,10 @@ if (run_chain) {
   # between them (see annotate_block_read_support / R11d).
   canonical_chains <- lapply(canonical_chains, annotate_block_read_support,
                              full_read_loh = results$full_read_loh, params = cp)
+  # Edge-paired runs: tracts split by non-HET islands (see
+  # annotate_edge_pair_runs / R11e).
+  canonical_chains <- lapply(canonical_chains, annotate_edge_pair_runs,
+                             full_read_loh = results$full_read_loh, params = cp)
 
   if (full_chain) {
     step2_out <- paste0(stem, "_step2_canonical_tokens.csv")

@@ -10,12 +10,12 @@
 #                       chr_span, params)
 #      -> list(chains, events, unclaimed_peaks, unclaimed_loh, event_table)
 #
-#  Schema version: "1.0"
+#  Schema version: "1.1"
 #  To add new per-token information (e.g. ploidy, CN state), add it to the
 #  $meta list inside make_token() and bump CHAIN_SCHEMA_VERSION.
 # =============================================================================
 
-CHAIN_SCHEMA_VERSION <- "1.0"
+CHAIN_SCHEMA_VERSION <- "1.1"   # 1.1: meta$balance_mean on segment tokens
 
 # %||% may already be defined by app.R; define it here only if absent so the
 # module works standalone (e.g. in tests or sourced independently).
@@ -65,6 +65,18 @@ default_chain_params <- function() {
     # is only an upper bound: it keeps the zone local to the junction on a wide
     # HET flank without truncating a narrow one.
     tract_flank_bp  = 10000L,
+
+    # R11e (edge-paired LOH run). A conversion tract tens of kb long can be
+    # cut into several fixed pieces by short "HET" islands that are only noise
+    # in a low-quality isolate, so no single token spans the event and no rule
+    # sees both of its binary edge peaks. R11e alone bridges an island of at
+    # most edge_pair_max_island_snps SNPs whose REF fraction leans toward the
+    # tract's state by at least edge_pair_island_margin from 0.5, and only while
+    # bridged islands hold at most edge_pair_max_island_frac of the run's SNPs.
+    # Tokenisation and every other rule still treat these islands as HET.
+    edge_pair_max_island_snps = 10L,
+    edge_pair_island_margin   = 0.05,
+    edge_pair_max_island_frac = 0.10,
 
     # A peak is "roughly centered" if |peak_mid - token_mid| <=
     # center_tol * token_length
@@ -357,7 +369,11 @@ build_raw_chains <- function(loh_segments, chr_span, params,
         start       = as.integer(seg$start),
         end         = as.integer(seg$end),
         n_snps      = as.integer(seg$n_snps),
-        depth_ratio = tok_depth_ratio
+        depth_ratio = tok_depth_ratio,
+        # Mean REF fraction across the segment's SNPs; R11e reads it to tell
+        # a noise island inside a tract from a real heterozygous zone.
+        meta        = list(balance_mean = if ("balance_mean" %in% names(seg))
+                             as.numeric(seg$balance_mean) else NA_real_)
       )
 
       # Attach any peaks associated with this token
@@ -1243,7 +1259,8 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 
 .make_event <- function(call, chrom, tokens_involved, evidence_peaks = NULL,
                         n_support = NA_integer_, notes = "",
-                        support_kind = NA_character_) {
+                        support_kind = NA_character_,
+                        keep_tract_span = FALSE) {
   # Compute genomic span from the tokens involved (excluding TEL sentinels)
   real_toks <- Filter(function(t) t$type != "TEL", tokens_involved)
   ev_start  <- if (length(real_toks) > 0) min(sapply(real_toks, `[[`, "start"), na.rm = TRUE) else NA_integer_
@@ -1276,11 +1293,15 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   # (e.g. the REF_fixed tract flanking a het-bounded ALT island), giving a span
   # that doesn't even overlap the real event. When any involved peak supplies
   # island bounds, report the event over that tract instead.
+  # keep_tract_span opts out: a rule that has established the tract itself
+  # (R11e) reports the tract, and an interior peak's island is only a feature
+  # inside it -- Spo11-88 chrX's 217-274 kb conversion tract was otherwise
+  # reported as the 233,923-234,309 island of an interior gene_conversion peak.
   isl_starts <- suppressWarnings(as.integer(unlist(lapply(all_peaks, function(p)
     if (is.null(p)) NA_integer_ else p$phase_island_start %||% NA_integer_))))
   isl_ends   <- suppressWarnings(as.integer(unlist(lapply(all_peaks, function(p)
     if (is.null(p)) NA_integer_ else p$phase_island_end   %||% NA_integer_))))
-  if (any(!is.na(isl_starts)) && any(!is.na(isl_ends))) {
+  if (!keep_tract_span && any(!is.na(isl_starts)) && any(!is.na(isl_ends))) {
     ev_start <- min(isl_starts, na.rm = TRUE)
     ev_end   <- max(isl_ends,   na.rm = TRUE)
   }
@@ -2686,19 +2707,32 @@ rule_subres_tract <- list(
   tol <- params$merge_gap_bp %||% 5000L
   if (!is.null(f_tok$peak_left)) return(f_tok$peak_left)
   if (!is.null(left_ctx$peak_right)) return(left_ctx$peak_right)
-  pk <- left_ctx$peak_over
-  if (!is.null(pk)) {
-    pos <- .peak_junction_pos(pk, f_tok$start)
-    # <=, not <: a junction peak commonly lands exactly at the boundary
+  .over_junction_peak(left_ctx, f_tok$start, "left", tol) %||%
+    .over_junction_peak(f_tok, f_tok$start, "left", tol)
+}
+
+# The overlapping peak of `tok` nearest `boundary` on `side` of it, within tol.
+# Searches every peak whose window overlaps the token (peaks_over), not just
+# the single peak_over slot: on a wide flank that slot holds the LAST
+# overlapping peak, which can be one far inside the flank. Spo11-88 chrX: the
+# right flank 276,453-727,023 kept 322,636 in peak_over, hiding the binary
+# peak at 277,400 that marks the tract's right edge.
+.over_junction_peak <- function(tok, boundary, side, tol) {
+  if (is.null(tok) || is.na(boundary)) return(NULL)
+  best <- NULL
+  best_d <- Inf
+  for (pk in .union_peaks(tok$peaks_over, list(tok$peak_over))) {
+    pos <- .peak_junction_pos(pk, boundary)
+    if (is.na(pos)) next
+    # >= 0, not > 0: a junction peak commonly lands exactly at the boundary
     # (that's where the allele switch is), not strictly inside the gap.
-    if (!is.na(pos) && pos <= f_tok$start && f_tok$start - pos <= tol) return(pk)
+    d <- if (side == "left") boundary - pos else pos - boundary
+    if (d >= 0 && d <= tol && d < best_d) {
+      best   <- pk
+      best_d <- d
+    }
   }
-  pk <- f_tok$peak_over
-  if (!is.null(pk)) {
-    pos <- .peak_junction_pos(pk, f_tok$start)
-    if (!is.na(pos) && pos <= f_tok$start && f_tok$start - pos <= tol) return(pk)
-  }
-  NULL
+  best
 }
 
 # Right junction peak for an F token: the peak that marks the F→H transition.
@@ -2708,19 +2742,10 @@ rule_subres_tract <- list(
 .right_junction_peak <- function(f_tok, right_ctx, params) {
   tol <- params$merge_gap_bp %||% 5000L
   if (!is.null(f_tok$peak_right)) return(f_tok$peak_right)
-  pk <- f_tok$peak_over
-  if (!is.null(pk)) {
-    pos <- .peak_junction_pos(pk, f_tok$end)
-    # >=, not >: see .left_junction_peak — boundary-exact peaks are normal.
-    if (!is.na(pos) && pos >= f_tok$end && pos - f_tok$end <= tol) return(pk)
-  }
+  pk <- .over_junction_peak(f_tok, f_tok$end, "right", tol)
+  if (!is.null(pk)) return(pk)
   if (!is.null(right_ctx$peak_left)) return(right_ctx$peak_left)
-  pk <- right_ctx$peak_over
-  if (!is.null(pk)) {
-    pos <- .peak_junction_pos(pk, f_tok$end)
-    if (!is.na(pos) && pos >= f_tok$end && pos - f_tok$end <= tol) return(pk)
-  }
-  NULL
+  .over_junction_peak(right_ctx, f_tok$end, "right", tol)
 }
 
 # =============================================================================
@@ -2886,6 +2911,232 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
   chain
 }
 
+# =============================================================================
+#  EDGE-PAIRED LOH RUNS  (R11e)
+#
+#  A run of same-state fixed tracts parted only by short islands that the LOH
+#  map called HET but whose allele balance leans toward the tract (see
+#  edge_pair_* in default_chain_params). Spo11-88 chrX: an ALT tract
+#  217,367-274,203 split at 234,635-235,235 (3 SNPs, REF frac 0.42) and
+#  235,604-237,017 (10 SNPs, 0.24); reads there are 79-85% ALT. Unlike
+#  .loh_block, which bridges only islands too thin to call, these islands are
+#  callable, so the run is used by R11e alone, which also demands a binary
+#  peak at each outer edge.
+# =============================================================================
+
+.edge_pair_bridgeable <- function(tok, state, params) {
+  if (!identical(tok$type, "H")) return(FALSE)
+  if (is.na(tok$n_snps) ||
+      tok$n_snps > as.integer(params$edge_pair_max_island_snps %||% 10L)) return(FALSE)
+  bal <- tok$meta$balance_mean %||% NA_real_
+  if (is.na(bal)) return(FALSE)
+  margin <- as.numeric(params$edge_pair_island_margin %||% 0.05)
+  if (identical(state, "ALT_fixed")) return(bal <= 0.5 - margin)
+  if (identical(state, "REF_fixed")) return(bal >= 0.5 + margin)
+  FALSE
+}
+
+# One step from tokens[[j]] in `dir` past G gaps, non-callable H and
+# bridgeable islands. Returns f (index of the next same-state F, with the
+# callable islands bridged to reach it) or, when the run ends, flank: the first
+# callable H passed (the run's real boundary), else the token stopped at.
+.edge_pair_step <- function(tokens, j, dir, state, params) {
+  n <- length(tokens)
+  k <- j + dir
+  first_h <- NULL
+  isl <- integer(0)
+  while (k >= 1L && k <= n) {
+    tk <- tokens[[k]]
+    if (identical(tk$type, "G") ||
+        (identical(tk$type, "H") && !.zone_callable(tk, params))) { k <- k + dir; next }
+    if (.edge_pair_bridgeable(tk, state, params)) {
+      if (is.null(first_h)) first_h <- k
+      isl <- c(isl, k)
+      k <- k + dir
+      next
+    }
+    break
+  }
+  if (k >= 1L && k <= n && identical(tokens[[k]]$type, "F") &&
+      identical(tokens[[k]]$state, state))
+    return(list(f = k, islands = isl))
+  list(f = NULL, flank = first_h %||% (if (k >= 1L && k <= n) k else NULL))
+}
+
+# The edge-paired run starting at tokens[[i]], or NULL when tokens[[i]] is not
+# an F or not the run's first F. Returns f_idx, islands (bridged callable H
+# indices) and li / ri (the bounding tokens).
+.edge_pair_run <- function(tokens, i, params) {
+  tok <- tokens[[i]]
+  if (is.null(tok) || !identical(tok$type, "F")) return(NULL)
+  lft <- .edge_pair_step(tokens, i, -1L, tok$state, params)
+  if (!is.null(lft$f)) return(NULL)
+  f_idx <- i
+  isl   <- integer(0)
+  j     <- i
+  repeat {
+    st <- .edge_pair_step(tokens, j, 1L, tok$state, params)
+    if (is.null(st$f)) break
+    f_idx <- c(f_idx, st$f)
+    isl   <- c(isl, st$islands)
+    j     <- st$f
+  }
+  list(f_idx = f_idx, islands = isl, li = lft$flank, ri = st$flank)
+}
+
+# Flank-to-flank read counts for every edge-paired run that bridges at least
+# one callable island (runs that bridge none are .loh_block's), stored on the
+# run's first F as edge_run. Zones are anchored to the flank tokens' inner
+# edges, as in annotate_block_read_support.
+annotate_edge_pair_runs <- function(chain, full_read_loh, params) {
+  if (is.null(full_read_loh)) return(chain)
+  toks <- chain$tokens
+  if (length(toks) == 0) return(chain)
+
+  flank_bp <- as.integer(params$tract_flank_bp %||% 10000L)
+  min_snps <- as.integer(params$min_snps_for_peak %||% 2L)
+  max_frac <- as.numeric(params$edge_pair_max_island_frac %||% 0.10)
+
+  for (i in seq_along(toks)) {
+    run <- .edge_pair_run(toks, i, params)
+    if (is.null(run) || length(run$islands) == 0L) next
+    if (is.null(run$li) || is.null(run$ri)) next
+    L <- toks[[run$li]]
+    R <- toks[[run$ri]]
+    if (!.zone_callable(L, params) || !.zone_callable(R, params)) next
+
+    f_toks  <- lapply(run$f_idx, function(k) toks[[k]])
+    f_snps  <- sum(vapply(f_toks, function(t) as.numeric(t$n_snps %||% 0L), numeric(1)))
+    i_snps  <- sum(vapply(run$islands, function(k) as.numeric(toks[[k]]$n_snps), numeric(1)))
+    if (i_snps > max_frac * (f_snps + i_snps)) next
+
+    state  <- sub("_fixed$", "", f_toks[[1]]$state)
+    tracts <- lapply(f_toks, function(t) list(start = t$start, end = t$end, state = state))
+    run_start <- min(vapply(f_toks, `[[`, numeric(1), "start"))
+    run_end   <- max(vapply(f_toks, `[[`, numeric(1), "end"))
+    zone_L <- c(as.integer(max(L$start, L$end - flank_bp + 1L)), as.integer(L$end))
+    zone_R <- c(as.integer(R$start), as.integer(min(R$end, R$start + flank_bp - 1L)))
+
+    cnt <- count_block_junction_reads(
+      full_read_loh, chain$chrom, tracts,
+      left_start  = zone_L[1], left_end  = zone_L[2],
+      right_start = zone_R[1], right_end = zone_R[2],
+      min_snps    = min_snps,
+      match_frac  = as.numeric(params$homog_frac %||% 0.80),
+      del_reads   = unique(unlist(lapply(f_toks, function(t)
+                            t$meta$del_read_ids %||% character(0))))
+    )
+
+    toks[[i]]$edge_run <- list(
+      start = as.integer(run_start), end = as.integer(run_end),
+      n_spanning = cnt$n_spanning, n_return = cnt$n_return, n_switch = cnt$n_switch,
+      read_ids = list(switch        = cnt$switch_reads,
+                      return        = cnt$return_reads,
+                      uninformative = cnt$uninformative_reads),
+      zone_L = zone_L, zone_R = zone_R
+    )
+  }
+
+  chain$tokens <- toks
+  chain
+}
+
+# Outcome of a run read flank to flank (shared by R11d and R11e):
+#   switches dominate  → CO_GC          (changed homolog and stayed changed)
+#   returns dominate   → NCO_GC         (left its homolog and came back)
+#   mixed              → AMBIGUOUS(mixed_block_reads)
+#   nothing spans      → GC_UNRESOLVED  (no read reaches both flanks)
+.flank_to_flank_call <- function(n_ret, n_swi, n_span, params, base_note, what) {
+  n_inf <- n_ret + n_swi
+  homog <- as.numeric(params$homog_frac %||% 0.80)
+  if (n_inf == 0L) {
+    list(call = "GC_UNRESOLVED", ns = n_span, support_kind = NA_character_,
+         note = paste0(base_note, "; no read reaches both flanking HET zones (",
+                       n_span, " spanning, 0 informative); NCO/CO undetermined"))
+  } else if (n_ret / n_inf >= homog) {
+    list(call = "NCO_GC", ns = n_ret, support_kind = "tract_reads",
+         note = paste0(base_note, "; ", n_ret, "/", n_span,
+                       " flank-to-flank reads returned across the ", what))
+  } else if (n_swi / n_inf >= homog) {
+    list(call = "CO_GC", ns = n_swi, support_kind = "tract_reads",
+         note = paste0(base_note, "; ", n_swi, "/", n_span,
+                       " flank-to-flank reads switched across the ", what))
+  } else {
+    list(call = "AMBIGUOUS(mixed_block_reads)", ns = n_inf, support_kind = "tract_reads",
+         note = paste0(base_note, "; mixed outcome (", n_ret, " returned, ",
+                       n_swi, " switched of ", n_span, " spanning)"))
+  }
+}
+
+# ── Rule R11e: Edge-paired LOH run ───────────────────────────────────────────
+# Fires on an edge-paired run (see annotate_edge_pair_runs) bounded by callable
+# HET zones with a BINARY peak at each outer junction: one chromatid switching
+# into the tract at the left edge, one switching out at the right. That pair
+# shows a single tract but not its outcome -- a long NCO (W|Y..Y|W on one
+# chromatid) and a CO with conversion (W|Y..Y on one, Y..Y|W on the other)
+# give the same two edge peaks -- so the outcome comes from reads reaching
+# both flanks, as in R11d. With none, the tract stands as GC_UNRESOLVED.
+#
+# The run's coordinates are its fixed tracts' span. Every peak within
+# merge_gap_bp of the run, interior ones included, is claimed: an interior
+# gene_conversion peak from short minority-allele blips would otherwise be
+# promoted into a separate NCO_GC at its own island.
+rule_edge_paired_loh_run <- list(
+  id = "R11e_edge_paired_loh_run",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    er  <- tok$edge_run
+    if (is.null(er)) return(NULL)
+    run <- .edge_pair_run(tokens, i, params)
+    if (is.null(run) || length(run$islands) == 0L ||
+        is.null(run$li) || is.null(run$ri)) return(NULL)
+
+    f_toks    <- lapply(run$f_idx, function(k) tokens[[k]])
+    run_start <- min(vapply(f_toks, `[[`, numeric(1), "start"))
+    run_end   <- max(vapply(f_toks, `[[`, numeric(1), "end"))
+    # Counts are stale if a rewrite reshaped the run since annotation.
+    if (run_start != er$start || run_end != er$end) return(NULL)
+
+    pk_l <- .left_junction_peak(f_toks[[1]], tokens[[run$li]], params)
+    pk_r <- .right_junction_peak(f_toks[[length(f_toks)]], tokens[[run$ri]], params)
+    if (is.null(pk_l) || is.null(pk_r)) return(NULL)
+    if (!isTRUE((pk_l$best_edge_type %||% pk_l$edge_type) == "binary") ||
+        !isTRUE((pk_r$best_edge_type %||% pk_r$edge_type) == "binary")) return(NULL)
+    pos_l <- pk_l$fused_pos_bp %||% pk_l$snp_pos
+    pos_r <- pk_r$fused_pos_bp %||% pk_r$snp_pos
+    if (!is.na(pos_l) && !is.na(pos_r) && pos_l == pos_r) return(NULL)
+
+    tol <- params$merge_gap_bp %||% 5000L
+    pks <- .union_peaks(unlist(lapply(seq.int(run$li, run$ri), function(k)
+      c(list(tokens[[k]]$peak_left, tokens[[k]]$peak_right), tokens[[k]]$peaks_over)),
+      recursive = FALSE))
+    pks <- Filter(function(pk) {
+      pos <- pk$fused_pos_bp %||% pk$snp_pos %||% NA
+      !is.na(pos) && pos >= run_start - tol && pos <= run_end + tol
+    }, pks %||% list())
+
+    list(span = c(run$f_idx[1], run$ri), f_toks = f_toks, peaks = pks,
+         n_islands = length(run$islands), pos_l = pos_l, pos_r = pos_r, er = er)
+  },
+  fire_fn = function(m, chain, params) {
+    tract_desc <- paste(vapply(m$f_toks, function(t)
+      paste0(t$start, "-", t$end), character(1)), collapse = ", ")
+    base_note <- paste0("edge_paired_loh_run; binary edge peaks ", m$pos_l, " / ",
+                        m$pos_r, "; ", length(m$f_toks), " ",
+                        sub("_fixed$", "", m$f_toks[[1]]$state), " tracts (",
+                        tract_desc, ") bridging ", m$n_islands, " non-HET island(s)")
+    out <- .flank_to_flank_call(as.integer(m$er$n_return), as.integer(m$er$n_switch),
+                                as.integer(m$er$n_spanning), params, base_note, "run")
+    ev <- .make_event(out$call, chain$chrom, m$f_toks,
+                      evidence_peaks = m$peaks,
+                      n_support = out$ns, notes = out$note,
+                      support_kind = out$support_kind,
+                      keep_tract_span = TRUE)
+    list(event = ev, rewrite = NULL,
+         claims = list(loh = m$f_toks, peak = m$peaks))
+  }
+)
+
 # ── Rule R11d: Composite LOH block called from its own flank-to-flank reads ───
 # Fires on a run of two or more fixed tracts that no phase-callable HET zone
 # separates (see .loh_block), bounded by a callable HET zone on each side.
@@ -2964,40 +3215,18 @@ rule_composite_loh_block <- list(
     n_ret  <- as.integer(tok$n_block_return   %||% 0L)
     n_swi  <- as.integer(tok$n_block_switch   %||% 0L)
     n_span <- as.integer(tok$n_block_spanning %||% 0L)
-    n_inf  <- n_ret + n_swi
-    homog  <- as.numeric(params$homog_frac %||% 0.80)
 
     tract_desc <- paste(vapply(m$f_toks, function(t)
       paste0(sub("_fixed$", "", t$state), " ", t$start, "-", t$end),
       character(1)), collapse = ", ")
     base_note <- paste0("composite_loh_block; ", length(m$f_toks),
                         " tracts (", tract_desc, ")")
+    out <- .flank_to_flank_call(n_ret, n_swi, n_span, params, base_note, "block")
 
-    if (n_inf == 0L) {
-      call         <- "GC_UNRESOLVED"
-      ns           <- n_span
-      support_kind <- NA_character_
-      note <- paste0(base_note, "; no read reaches both flanking HET zones (",
-                     n_span, " spanning, 0 informative); NCO/CO undetermined")
-    } else if (n_ret / n_inf >= homog) {
-      call <- "NCO_GC"; ns <- n_ret; support_kind <- "tract_reads"
-      note <- paste0(base_note, "; ", n_ret, "/", n_span,
-                     " flank-to-flank reads returned across the block")
-    } else if (n_swi / n_inf >= homog) {
-      call <- "CO_GC";  ns <- n_swi; support_kind <- "tract_reads"
-      note <- paste0(base_note, "; ", n_swi, "/", n_span,
-                     " flank-to-flank reads switched across the block")
-    } else {
-      call <- "AMBIGUOUS(mixed_block_reads)"; ns <- n_inf
-      support_kind <- "tract_reads"
-      note <- paste0(base_note, "; mixed outcome (", n_ret, " returned, ",
-                     n_swi, " switched of ", n_span, " spanning)")
-    }
-
-    ev <- .make_event(call, chain$chrom, m$f_toks,
+    ev <- .make_event(out$call, chain$chrom, m$f_toks,
                       evidence_peaks = if (length(m$peaks)) m$peaks else NULL,
-                      n_support = ns, notes = note,
-                      support_kind = support_kind)
+                      n_support = out$ns, notes = out$note,
+                      support_kind = out$support_kind)
     list(event = ev, rewrite = NULL,
          claims = list(loh = m$f_toks,
                        peak = if (length(m$peaks)) m$peaks else NULL))
@@ -3612,6 +3841,7 @@ MOTIF_RULES <- list(
   # AND no wide proximal gap to explain its absence (R02d handles that case)
   # there is no positive evidence for a crossover mechanism.  Leave unclaimed →
   # UNCATEGORIZED_LOH → no symbol on the overview map.
+  rule_edge_paired_loh_run,      # R11e — binary-edged tract split by non-HET islands
   rule_composite_loh_block,      # R11d — run of fixed tracts with no callable HET between them
   rule_loh_crossover,            # R12 — crossover through large interstitial LOH (before R10)
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
@@ -3792,8 +4022,8 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
                 list(m$pk %||% NULL, m$pk_l %||% NULL, m$pk_r %||% NULL,
                      m$pk1 %||% NULL, m$pk2 %||% NULL,
                      m$peak %||% NULL))
-  # R11d (rule_composite_loh_block) carries every peak its run covers in
-  # m$peaks rather than a fixed left/right pair.
+  # R11d (rule_composite_loh_block) and R11e (rule_edge_paired_loh_run) carry
+  # every peak their run covers in m$peaks rather than a fixed left/right pair.
   if (!is.null(m$peaks)) pks <- c(pks, m$peaks)
   # R06 (rule_opp_sandwich) can carry several fragments' peaks in m$fragments
   # instead of the single pk/pk_l/pk_r fields other rules use.
@@ -4243,6 +4473,8 @@ run_chain_analysis <- function(loh_segments,
   chains <- lapply(chains, annotate_tract_read_support,
                    full_read_loh = full_read_loh, params = params)
   chains <- lapply(chains, annotate_block_read_support,
+                   full_read_loh = full_read_loh, params = params)
+  chains <- lapply(chains, annotate_edge_pair_runs,
                    full_read_loh = full_read_loh, params = params)
 
   message("  [chain] Scanning for motifs ...")

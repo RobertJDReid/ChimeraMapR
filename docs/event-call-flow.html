@@ -702,27 +702,31 @@
           <td>peakless, full depth, reaching exactly one chromosome end, with a SNP desert wide enough to hide the junction</td>
           <td class="c"><span class="rv">CO_TERM_PROBABLE</span></td></tr>
 
-        <tr><td class="k">9</td><td class="k">R11d</td><td class="m">H [F][F]… H</td>
+        <tr><td class="k">9</td><td class="k">R11e</td><td class="m">H &#9679;[F] h [F]&#9679; H</td>
+          <td>binary peak on both outer junctions of a tract split only by short islands (h) whose allele balance leans toward the tract; flank-to-flank read counts present</td>
+          <td class="c"><span class="co">NCO_GC</span> · <span class="co">CO_GC</span> · <span class="rv">GC_UNRESOLVED</span> · <span class="nu">AMBIGUOUS(mixed_block_reads)</span></td></tr>
+
+        <tr><td class="k">10</td><td class="k">R11d</td><td class="m">H [F][F]… H</td>
           <td>two or more fixed tracts with no phase-callable HET between them; flank-to-flank read counts present</td>
           <td class="c"><span class="co">NCO_GC</span> · <span class="co">CO_GC</span> · <span class="rv">GC_UNRESOLVED</span> · <span class="nu">AMBIGUOUS(mixed_block_reads)</span></td></tr>
 
-        <tr><td class="k">10</td><td class="k">R12</td><td class="m">H &#9679;[F]&#9679; H</td>
+        <tr><td class="k">11</td><td class="k">R12</td><td class="m">H &#9679;[F]&#9679; H</td>
           <td>a peak-pair record typed <em>crossover</em> whose two endpoints straddle this tract's junctions</td>
           <td class="c">tract reads decide · else <span class="co">CO_GC</span> at n &#8805; 2 · <span class="nu">AMBIGUOUS(low_coverage)</span></td></tr>
 
-        <tr><td class="k">11</td><td class="k">R10</td><td class="m">[F&#9679;]</td>
+        <tr><td class="k">12</td><td class="k">R10</td><td class="m">[F&#9679;]</td>
           <td>a peak bound to the tract types itself as gene_conversion, crossover or internal_crossover</td>
           <td class="c">GC peak: tract reads decide · CO peak: <span class="co">CO_GC</span></td></tr>
 
-        <tr><td class="k">12</td><td class="k">R11</td><td class="m">H &#9679;[F]&#9679; H</td>
+        <tr><td class="k">13</td><td class="k">R11</td><td class="m">H &#9679;[F]&#9679; H</td>
           <td>both junction peaks are binary; the pair record supplies the complementarity</td>
           <td class="c"><span class="co">CO_GC</span> · <span class="co">NCO_GC</span> · <span class="rv">GC_UNRESOLVED</span> when no pair record exists</td></tr>
 
-        <tr><td class="k">13</td><td class="k">R11b</td><td class="m">H &#9679;[F] H</td>
+        <tr><td class="k">14</td><td class="k">R11b</td><td class="m">H &#9679;[F] H</td>
           <td>a binary peak on exactly one junction and no peak at all opposite — a weak peak opposite does not qualify</td>
           <td class="c"><span class="rv">GC_ONE_SIDED</span></td></tr>
 
-        <tr><td class="k">14</td><td class="k">R11c</td><td class="m">[F]</td>
+        <tr><td class="k">15</td><td class="k">R11c</td><td class="m">[F]</td>
           <td>no peak the rules above could use, but the tract's own reads cross both junctions, and enough of what crossed is informative</td>
           <td class="c"><span class="co">NCO_GC</span> · <span class="co">CO_GC</span> · <span class="nu">AMBIGUOUS(mixed_tract_reads)</span></td></tr>
       </tbody>
@@ -784,6 +788,9 @@
         <tr><td class="k">tract_read_min_frac</td><td class="v">0.10</td><td>share of spanning reads that must be informative before R11c will call at all</td></tr>
         <tr><td class="k">tract_read_high_min</td><td class="v">4</td><td>returning or switching reads needed for high confidence on read-backed calls</td></tr>
         <tr><td class="k">tract_flank_bp</td><td class="v">10,000</td><td>how far either side of a tract the flanking haplotype state is read</td></tr>
+        <tr><td class="k">edge_pair_max_island_snps</td><td class="v">10</td><td rowspan="3">which HET islands R11e may bridge: at most this many SNPs, REF fraction leaning toward the tract by at least the margin from 0.5, and together no more than this share of the run's SNPs</td></tr>
+        <tr><td class="k">edge_pair_island_margin</td><td class="v">0.05</td></tr>
+        <tr><td class="k">edge_pair_max_island_frac</td><td class="v">0.10</td></tr>
         <tr><td class="k">small_frac</td><td class="v">0.10</td><td>fragment size, relative to its combined flanks, that makes R06 fire</td></tr>
         <tr><td class="k">center_tol</td><td class="v">0.25</td><td>how near a token's midpoint a peak must sit to be "roughly centered"</td></tr>
         <tr><td class="k">min_snps_for_peak</td><td class="v">2</td><td>below this a tract is too short to raise a peak — POSSIBLE_GC rather than uncategorised</td></tr>

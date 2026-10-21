@@ -4,6 +4,37 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Long conversion tracts split by noise islands are called from their edge peaks (new rule R11e)
+
+- A crossover with a long conversion tract (Qi et al. MA-Class 5) can be
+  missed in a low-quality isolate: short "HET" islands that are only noise
+  split the tract into several fixed pieces, so no rule sees both of its
+  binary edge peaks. Spo11-88 chrX (ALT tract ~217-274 kb, Q~9.5 reads) was
+  cut at 234,635-235,235 (3 SNPs, REF fraction 0.42) and 235,604-237,017
+  (10 SNPs, 0.24) and came out as an NCO_GC at an interior 0.4 kb island.
+- `rule_edge_paired_loh_run` (R11e, ahead of R11d) bridges such islands
+  (at most `edge_pair_max_island_snps` = 10 SNPs, REF fraction leaning toward
+  the tract by `edge_pair_island_margin` = 0.05 from 0.5, together at most
+  `edge_pair_max_island_frac` = 10% of the run's SNPs). It fires only when the
+  run's two outer junctions both carry a binary peak. The outcome comes from
+  reads reaching both flanking HET zones, as in R11d: two binary edge peaks
+  look the same for a long NCO and a CO with conversion. With no such read
+  the tract is GC_UNRESOLVED. Tokenisation and every other rule still treat
+  the islands as HET.
+- R11e reports the run's tract span and claims every peak inside it, so an
+  interior gene_conversion peak no longer becomes a separate NCO_GC or moves
+  the event onto its own phase island.
+- Junction-peak lookup (`.left_junction_peak` / `.right_junction_peak`) now
+  searches every peak overlapping the neighbouring token, not only the single
+  `peak_over` slot. Spo11-88's right-edge peak at 277,400 was hidden behind
+  a peak at 322,636 on the same wide HET flank.
+- Segment tokens carry `meta$balance_mean` (chain schema 1.1).
+- Spo11-88 chrX is now CO_GC 217,367-274,203 (2 flank-to-flank reads, both
+  switched; review). The other 21 Qi isolates' event tables are unchanged at
+  the paper settings.
+
 ## [0.8.32] - 2026-10-21
 
 ### Clear error when the FASTA is loaded instead of its .fai
