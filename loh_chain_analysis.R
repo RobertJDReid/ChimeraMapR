@@ -142,7 +142,29 @@ default_chain_params <- function() {
     # five spanning, and real), whereas 2 informative of 70 spanning on
     # RAD5_03 chrII 428,804-430,361 is a hemizygous deletion leaking two
     # artifacts. Across the 9-sample set the genuine calls sit at 17-65%.
-    tract_read_min_frac = 0.10
+    tract_read_min_frac = 0.10,
+
+    # Parental reads (see count_tract_junction_reads): molecules that carry
+    # the tract's allele on both flanks and across it. In a diploid they exist
+    # only under NCO, since a crossover leaves every molecule that spans the
+    # tract switched. Measured on the Qi Spo11 isolates, a real CO_GC has
+    # switch / (switch + parental) of 0.54-0.86, and the CO_GC calls on noisy
+    # fixed tracts in low-quality isolates sit at 0.05-0.33 (Spo11-188 chrX
+    # 57,849-58,487: 4 switched, 22 parental), all with no returning read.
+    #   A CO_GC whose spanning reads give at least outcome_min_reads switched or
+    #   parental and a switched share below co_min_recomb_frac is reclassified
+    #   GC_UNRESOLVED; one that passes is "high" only with tract_read_high_min
+    #   switched reads.
+    #   A GC_UNRESOLVED tract with no switched, returning or opposite read and
+    #   at least parental_min_reads parental ones is called NCO_GC, but only in
+    #   a diploid region: tract depth_ratio within diploid_depth_range and each
+    #   flank's HET balance within diploid_balance_tol of 0.5. With an extra
+    #   copy a parental read could come from a homolog the event never touched.
+    co_min_recomb_frac  = 0.5,
+    outcome_min_reads   = 4L,
+    parental_min_reads  = 2L,
+    diploid_depth_range = c(0.75, 1.25),
+    diploid_balance_tol = 0.12
   )
 }
 
@@ -1260,7 +1282,19 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 .make_event <- function(call, chrom, tokens_involved, evidence_peaks = NULL,
                         n_support = NA_integer_, notes = "",
                         support_kind = NA_character_,
-                        keep_tract_span = FALSE) {
+                        keep_tract_span = FALSE,
+                        outcome = NULL) {
+  # Reads spanning the whole tract can overrule the outcome a rule reached
+  # from peaks or from switched/returning reads alone (see .outcome_gate).
+  # `outcome` is the record for a multi-tract run; a single tract carries its
+  # own.
+  f_involved <- Filter(function(t) identical(t$type, "F"), tokens_involved)
+  if (is.null(outcome) && length(f_involved) == 1L)
+    outcome <- f_involved[[1]]$tract_outcome
+  gate <- .outcome_gate(call, n_support, notes, support_kind, outcome, params = NULL)
+  call <- gate$call; n_support <- gate$n_support
+  notes <- gate$notes; support_kind <- gate$support_kind
+
   # Compute genomic span from the tokens involved (excluding TEL sentinels)
   real_toks <- Filter(function(t) t$type != "TEL", tokens_involved)
   ev_start  <- if (length(real_toks) > 0) min(sapply(real_toks, `[[`, "start"), na.rm = TRUE) else NA_integer_
@@ -1342,8 +1376,79 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     # annotate_tract_read_support) rather than traversals of a peak window;
     # build_event_table() gates those on their own threshold.
     support_kind      = support_kind,
+    # Switched reads behind a CO_GC whose spanning reads were weighed against
+    # parental ones (.outcome_gate); NA when they were too few to weigh.
+    # build_event_table() gates such a call on this rather than n_support.
+    co_switch_reads   = gate$co_switch_reads,
     tokens            = tokens_involved   # keep for downstream use / plotting
   )
+}
+
+# Spanning-read record kept on a tract (or a run of tracts) for .outcome_gate.
+.outcome_record <- function(cnt, diploid) {
+  list(n_spanning = cnt$n_spanning, n_return = cnt$n_return,
+       n_switch   = cnt$n_switch,   n_parental = cnt$n_parental %||% 0L,
+       n_opposite = cnt$n_opposite %||% 0L, diploid = diploid)
+}
+
+# Whether parental reads can speak for the event: the tract at diploid depth
+# and both HET flanks balanced near 0.5. A flank balance that is unknown does
+# not count against it; an unknown depth does.
+.is_diploid_tract <- function(f_toks, L, R, params) {
+  rng <- params$diploid_depth_range %||% c(0.75, 1.25)
+  tol <- as.numeric(params$diploid_balance_tol %||% 0.12)
+  dr  <- vapply(f_toks, function(t) as.numeric(t$depth_ratio %||% NA_real_), numeric(1))
+  if (anyNA(dr) || any(dr < rng[1] | dr > rng[2])) return(FALSE)
+  bal <- c(L$meta$balance_mean %||% NA_real_, R$meta$balance_mean %||% NA_real_)
+  all(is.na(bal) | abs(bal - 0.5) <= tol)
+}
+
+# Weighs a call against the reads spanning its whole tract.
+#   CO_GC: a crossover leaves every spanning molecule switched, so parental
+#     reads count against it. With outcome_min_reads switched + parental, a
+#     switched share below co_min_recomb_frac makes the call GC_UNRESOLVED.
+#   GC_UNRESOLVED: in a diploid region, parental reads with no switched,
+#     returning or opposite read make it NCO_GC (support_kind
+#     "parental_reads").
+# Thresholds come from default_chain_params(): .make_event has no params.
+.outcome_gate <- function(call, n_support, notes, support_kind, oc, params = NULL) {
+  out <- list(call = call, n_support = n_support, notes = notes,
+              support_kind = support_kind, co_switch_reads = NA_integer_)
+  if (is.null(oc)) return(out)
+  params <- params %||% default_chain_params()
+  n_swi <- as.integer(oc$n_switch %||% 0L)
+  n_par <- as.integer(oc$n_parental %||% 0L)
+  n_ret <- as.integer(oc$n_return %||% 0L)
+  n_opp <- as.integer(oc$n_opposite %||% 0L)
+  sep   <- if (nzchar(notes %||% "")) "; " else ""
+
+  if (identical(call, "CO_GC")) {
+    if (n_swi + n_par < as.integer(params$outcome_min_reads %||% 4L)) return(out)
+    rf <- n_swi / (n_swi + n_par)
+    if (rf < as.numeric(params$co_min_recomb_frac %||% 0.5)) {
+      out$call         <- "GC_UNRESOLVED"
+      out$n_support    <- as.integer(oc$n_spanning)
+      out$support_kind <- NA_character_
+      out$notes <- paste0(notes, sep, "reclassified from CO_GC: ", n_swi,
+                          " switched vs ", n_par, " parental of ", oc$n_spanning,
+                          " spanning (switched share ", sprintf("%.2f", rf), ")")
+    } else {
+      out$co_switch_reads <- n_swi
+      out$notes <- paste0(notes, sep, n_swi, " switched vs ", n_par,
+                          " parental spanning reads")
+    }
+  } else if (identical(call, "GC_UNRESOLVED")) {
+    if (isTRUE(oc$diploid) && n_swi == 0L && n_ret == 0L && n_opp == 0L &&
+        n_par >= as.integer(params$parental_min_reads %||% 2L)) {
+      out$call         <- "NCO_GC"
+      out$n_support    <- n_par
+      out$support_kind <- "parental_reads"
+      out$notes <- paste0(notes, sep, "parental_span: ", n_par, "/", oc$n_spanning,
+                          " spanning reads carry the tract allele on both flanks",
+                          " and none switched (diploid); NCO")
+    }
+  }
+  out
 }
 
 # =============================================================================
@@ -2806,6 +2911,7 @@ annotate_tract_read_support <- function(chain, full_read_loh, params) {
     toks[[i]]$n_tract_spanning <- cnt$n_spanning
     toks[[i]]$n_tract_return   <- cnt$n_return
     toks[[i]]$n_tract_switch   <- cnt$n_switch
+    toks[[i]]$tract_outcome    <- .outcome_record(cnt, .is_diploid_tract(list(tok), L, R, params))
 
     # Which reads produced those counts, and the flanking zones they were
     # judged in. A tract shorter than min_run raises no chimera peak, so an
@@ -2816,7 +2922,8 @@ annotate_tract_read_support <- function(chain, full_read_loh, params) {
     toks[[i]]$tract_read_ids <- list(
       switch        = cnt$switch_reads,
       return        = cnt$return_reads,
-      uninformative = cnt$uninformative_reads
+      uninformative = cnt$uninformative_reads,
+      parental      = cnt$parental_reads
     )
     toks[[i]]$tract_zone_L <- c(as.integer(max(L$start, tok$start - flank_bp)),
                                 as.integer(min(L$end,   tok$start - 1L)))
@@ -2886,8 +2993,10 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
                             t$meta$del_read_ids %||% character(0))))
     )
 
+    oc <- .outcome_record(cnt, .is_diploid_tract(f_toks, L, R, params))
     for (k in seq_along(blk$f_idx)) {
       ti <- blk$f_idx[k]
+      toks[[ti]]$block_outcome    <- oc
       toks[[ti]]$block_start      <- as.integer(blk_start)
       toks[[ti]]$block_end        <- as.integer(blk_end)
       toks[[ti]]$block_n_tracts   <- length(blk$f_idx)
@@ -2898,7 +3007,8 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
       toks[[ti]]$block_read_ids   <- list(
         switch        = cnt$switch_reads,
         return        = cnt$return_reads,
-        uninformative = cnt$uninformative_reads
+        uninformative = cnt$uninformative_reads,
+        parental      = cnt$parental_reads
       )
       toks[[ti]]$block_zone_L <- c(as.integer(max(L$start, L$end - flank_bp + 1L)),
                                    as.integer(L$end))
@@ -3030,9 +3140,11 @@ annotate_edge_pair_runs <- function(chain, full_read_loh, params) {
     toks[[i]]$edge_run <- list(
       start = as.integer(run_start), end = as.integer(run_end),
       n_spanning = cnt$n_spanning, n_return = cnt$n_return, n_switch = cnt$n_switch,
+      outcome = .outcome_record(cnt, .is_diploid_tract(f_toks, L, R, params)),
       read_ids = list(switch        = cnt$switch_reads,
                       return        = cnt$return_reads,
-                      uninformative = cnt$uninformative_reads),
+                      uninformative = cnt$uninformative_reads,
+                      parental      = cnt$parental_reads),
       zone_L = zone_L, zone_R = zone_R
     )
   }
@@ -3131,7 +3243,8 @@ rule_edge_paired_loh_run <- list(
                       evidence_peaks = m$peaks,
                       n_support = out$ns, notes = out$note,
                       support_kind = out$support_kind,
-                      keep_tract_span = TRUE)
+                      keep_tract_span = TRUE,
+                      outcome = m$er$outcome)
     list(event = ev, rewrite = NULL,
          claims = list(loh = m$f_toks, peak = m$peaks))
   }
@@ -3226,7 +3339,8 @@ rule_composite_loh_block <- list(
     ev <- .make_event(out$call, chain$chrom, m$f_toks,
                       evidence_peaks = if (length(m$peaks)) m$peaks else NULL,
                       n_support = out$ns, notes = out$note,
-                      support_kind = out$support_kind)
+                      support_kind = out$support_kind,
+                      outcome = tok$block_outcome)
     list(event = ev, rewrite = NULL,
          claims = list(loh = m$f_toks,
                        peak = if (length(m$peaks)) m$peaks else NULL))
@@ -3637,6 +3751,53 @@ rule_tract_read_evidence <- list(
   }
 )
 
+# ── Rule R11f: HET-bounded tract whose junction peaks could not be typed ─────
+# A fixed tract between two HET zones with a peak at a junction that
+# classify_peak_haplotype() left "undefined" has no other rule: R10/R11/R11b
+# need a typed peak, and R11c needs switched or returning reads. The tract and
+# its junction are both real, so it is reported as GC_UNRESOLVED (review)
+# rather than left as an unclaimed LOH segment, and .make_event() promotes it
+# to NCO_GC when its spanning reads are parental (see .outcome_gate).
+# Spo11-28 chrXV 324,875-360,260 (95 SNPs, copy-neutral; Qi's Illumina
+# confirms it) had two undefined edge peaks: at 318,136 the two homologs
+# switch in opposite directions, and at 360,406 two flank SNPs at 3/13 REF
+# miss the 0.2 ALT cutoff. Neither flank can type the junction.
+rule_unresolved_het_bounded_tract <- list(
+  id = "R11f_unresolved_het_bounded_tract",
+  match_fn = function(tokens, i, chain, params) {
+    tok <- tokens[[i]]
+    if (tok$type != "F" || is.na(tok$n_snps %||% NA) ||
+        tok$n_snps < ZONE_CALL_HEURISTICS$min_evidence_snps) return(NULL)
+    li <- .nearest_nonfixed_left(tokens, i)
+    ri <- .nearest_nonfixed_right(tokens, i)
+    if (is.null(li) || is.null(ri)) return(NULL)
+    if (!.zone_callable(tokens[[li]], params) ||
+        !.zone_callable(tokens[[ri]], params)) return(NULL)
+    pks <- Filter(function(pk) !is.null(pk) &&
+                    identical(pk$best_edge_type %||% pk$edge_type, "undefined"),
+                  list(.left_junction_peak(tok, tokens[[li]], params),
+                       .right_junction_peak(tok, tokens[[ri]], params)))
+    if (!length(pks)) return(NULL)
+    list(span = c(i, i), f_tok = tok, peaks = pks)
+  },
+  fire_fn = function(m, chain, params) {
+    tok <- m$f_tok
+    pos <- vapply(m$peaks, function(pk)
+      as.character(pk$fused_pos_bp %||% pk$snp_pos), character(1))
+    note <- paste0("unresolved_het_bounded_tract; undefined junction peak(s) at ",
+                   paste(pos, collapse = " / "), "; ",
+                   tok$n_tract_spanning %||% 0L, " spanning reads (",
+                   tok$n_tract_return %||% 0L, " returned, ",
+                   tok$n_tract_switch %||% 0L, " switched)")
+    ev <- .make_event("GC_UNRESOLVED", chain$chrom, list(tok),
+                      evidence_peaks = m$peaks,
+                      n_support = as.integer(tok$n_tract_spanning %||% 0L),
+                      notes = note)
+    list(event = ev, rewrite = NULL,
+         claims = list(loh = tok, peak = m$peaks))
+  }
+)
+
 # Of `peaks`, those carrying a pair_edge_type = "crossover" record that
 # genuinely describes `f_tok`'s two junctions.
 #
@@ -3847,7 +4008,8 @@ MOTIF_RULES <- list(
   rule_peak_direct,              # R10 — gene_conversion / crossover / internal_crossover
   rule_two_binary_flanking,      # R11 — two binary peaks flanking H-[F]-H
   rule_one_sided_binary,         # R11b — one confirmed binary peak, other side genuinely peak-less
-  rule_tract_read_evidence       # R11c — tract's own junction-spanning reads settle the outcome
+  rule_tract_read_evidence,      # R11c — tract's own junction-spanning reads settle the outcome
+  rule_unresolved_het_bounded_tract # R11f — HET-bounded tract, undefined junction peak → GC_UNRESOLVED
   # rule_het_bounded,            # R04 — disabled (replaced by R10/R11)
   # rule_double_gc,              # R07 — disabled
   # rule_crossover_no_tract,     # R08 — disabled
@@ -4023,7 +4185,8 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
                      m$pk1 %||% NULL, m$pk2 %||% NULL,
                      m$peak %||% NULL))
   # R11d (rule_composite_loh_block) and R11e (rule_edge_paired_loh_run) carry
-  # every peak their run covers in m$peaks rather than a fixed left/right pair.
+  # every peak their run covers in m$peaks rather than a fixed left/right pair,
+  # and R11f (rule_unresolved_het_bounded_tract) its undefined junction peaks.
   if (!is.null(m$peaks)) pks <- c(pks, m$peaks)
   # R06 (rule_opp_sandwich) can carry several fragments' peaks in m$fragments
   # instead of the single pk/pk_l/pk_r fields other rules use.
@@ -4349,8 +4512,14 @@ build_event_table <- function(events, params = default_chain_params()) {
     # without settling it, whatever class it landed in.
     # Gated only for classes that could otherwise reach "high" -- an AMBIGUOUS
     # call is never promoted by having plenty of reads behind its ambiguity.
-    confidence <- if (identical(ev$support_kind %||% NA_character_, "tract_reads") &&
-                      ev$event_class %in% HIGH_CONF_CLASSES) {
+    # A CO_GC whose spanning reads were weighed against parental ones (see
+    # .outcome_gate) is gated on its switched reads, whatever rule made it:
+    # a peak-backed CO_GC was otherwise "high" with a single supporting read.
+    co_swi <- as.integer(ev$co_switch_reads %||% NA_integer_)
+    confidence <- if (identical(ev$event_class, "CO_GC") && !is.na(co_swi)) {
+      if (co_swi >= tract_read_high_min) "high" else "review"
+    } else if ((ev$support_kind %||% NA_character_) %in% c("tract_reads", "parental_reads") &&
+               ev$event_class %in% HIGH_CONF_CLASSES) {
       if (!is.na(ns) && ns >= tract_read_high_min) "high" else "review"
     } else if (ev$event_class %in% SUBRES_CLASSES ||
                (identical(ev$event_class, "CROSSOVER_NO_TRACT") &&

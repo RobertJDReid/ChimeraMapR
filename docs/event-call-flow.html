@@ -729,6 +729,10 @@
         <tr><td class="k">15</td><td class="k">R11c</td><td class="m">[F]</td>
           <td>no peak the rules above could use, but the tract's own reads cross both junctions, and enough of what crossed is informative</td>
           <td class="c"><span class="co">NCO_GC</span> · <span class="co">CO_GC</span> · <span class="nu">AMBIGUOUS(mixed_tract_reads)</span></td></tr>
+
+        <tr><td class="k">16</td><td class="k">R11f</td><td class="m">H &#9679;[F]&#9679; H</td>
+          <td>a junction peak sits on a HET-bounded tract but could not be typed (undefined), and nothing above claimed the tract</td>
+          <td class="c"><span class="rv">GC_UNRESOLVED</span> · <span class="co">NCO_GC</span> from parental reads</td></tr>
       </tbody>
     </table>
   </div>
@@ -787,6 +791,11 @@
         <tr><td class="k">homog_frac</td><td class="v">0.80</td><td>share of informative reads that must agree before NCO or CO is called (Fig. 2)</td></tr>
         <tr><td class="k">tract_read_min_frac</td><td class="v">0.10</td><td>share of spanning reads that must be informative before R11c will call at all</td></tr>
         <tr><td class="k">tract_read_high_min</td><td class="v">4</td><td>returning or switching reads needed for high confidence on read-backed calls</td></tr>
+        <tr><td class="k">co_min_recomb_frac</td><td class="v">0.5</td><td rowspan="2">every CO_GC with at least this many switched + parental spanning reads must have this switched share, or becomes GC_UNRESOLVED; one that passes is high only with tract_read_high_min switched reads</td></tr>
+        <tr><td class="k">outcome_min_reads</td><td class="v">4</td></tr>
+        <tr><td class="k">parental_min_reads</td><td class="v">2</td><td rowspan="3">a GC_UNRESOLVED tract becomes NCO_GC from this many parental reads (tract allele on both flanks and across) with none switched, returned or opposite, if the tract is at diploid depth and both flank balances sit within the tolerance of 0.5</td></tr>
+        <tr><td class="k">diploid_depth_range</td><td class="v">0.75–1.25</td></tr>
+        <tr><td class="k">diploid_balance_tol</td><td class="v">0.12</td></tr>
         <tr><td class="k">tract_flank_bp</td><td class="v">10,000</td><td>how far either side of a tract the flanking haplotype state is read</td></tr>
         <tr><td class="k">edge_pair_max_island_snps</td><td class="v">10</td><td rowspan="3">which HET islands R11e may bridge: at most this many SNPs, REF fraction leaning toward the tract by at least the margin from 0.5, and together no more than this share of the run's SNPs</td></tr>
         <tr><td class="k">edge_pair_island_margin</td><td class="v">0.05</td></tr>

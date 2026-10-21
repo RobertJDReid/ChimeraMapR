@@ -2771,6 +2771,17 @@ classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_s
 #               about the event, and inside a fixed tract it is most of the
 #               reads present.
 #
+#   Two subsets of the uninformative reads are counted on their own:
+#
+#     parental — the tract's allele on both flanks AND across the tract (at
+#               match_frac of its in-tract SNPs). In a diploid this homolog
+#               exists only under NCO: a crossover leaves every molecule that
+#               spans the tract switched, so parental reads count against a
+#               CO call the way returns do.
+#     opposite — the other allele on both flanks and across the tract. A real
+#               LOH tract has no such molecule; reads like this mean the fixed
+#               call is not a fixed tract on every homolog.
+#
 #   The flanking zones are supplied by the caller (from the adjacent chain
 #   tokens) rather than taken as a fixed bp window either side. The flank of
 #   one tract can be a restored-het island only a few hundred bp wide with
@@ -2797,7 +2808,8 @@ classify_zone_state <- function(pos_vec, is_ref_vec, zone_start, zone_end, min_s
 #   .tract_deletion_evidence). They are never returns: an absent homolog has
 #   converted nothing.
 #
-#   Returns a list: n_spanning, n_return, n_switch, n_uninformative.
+#   Returns a list: n_spanning, n_return, n_switch, n_uninformative,
+#   n_parental, n_opposite (the last two are subsets of n_uninformative).
 # ---------------------------------------------------------------------------
 count_tract_junction_reads <- function(full_read_loh, chr_name,
                                        tract_start, tract_end,
@@ -2813,10 +2825,11 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
   # recovered downstream from rt_df. Carried through the token onto the event
   # (see annotate_tract_read_support) and consumed by build_region_plot().
   empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
-                n_uninformative = 0L,
+                n_uninformative = 0L, n_parental = 0L, n_opposite = 0L,
                 switch_reads        = character(0),
                 return_reads        = character(0),
-                uninformative_reads = character(0))
+                uninformative_reads = character(0),
+                parental_reads      = character(0))
   if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
   if (anyNA(c(tract_start, tract_end, left_start, left_end,
               right_start, right_end)))                    return(empty)
@@ -2884,14 +2897,25 @@ count_tract_junction_reads <- function(full_read_loh, chr_name,
 
   is_uninf <- !is_switch & !is_return
 
+  # Same positive in-tract test as a return, applied to the reads whose flanks
+  # already carry the tract's allele (parental) or the other one (opposite).
+  in_frac     <- ifelse(span$n_in > 0L, span$n_in_tract / span$n_in, NA_real_)
+  is_parental <- is_uninf & !is.na(tract_state) & span$state_L == tract_state &
+                 !is.na(in_frac) & in_frac >= match_frac
+  is_opposite <- is_uninf & !is.na(tract_state) & span$state_L != tract_state &
+                 !is.na(in_frac) & in_frac <= 1 - match_frac
+
   list(
     n_spanning      = as.integer(nrow(span)),
     n_return        = as.integer(sum(is_return)),
     n_switch        = as.integer(sum(is_switch)),
     n_uninformative = as.integer(sum(is_uninf)),
+    n_parental      = as.integer(sum(is_parental)),
+    n_opposite      = as.integer(sum(is_opposite)),
     switch_reads        = as.character(span$read_id[is_switch]),
     return_reads        = as.character(span$read_id[is_return]),
-    uninformative_reads = as.character(span$read_id[is_uninf])
+    uninformative_reads = as.character(span$read_id[is_uninf]),
+    parental_reads      = as.character(span$read_id[is_parental])
   )
 }
 
@@ -2965,7 +2989,12 @@ pos_in_fixed_loh <- function(loh_segments, chr_name, pos) {
 #   an allele-balance dip the LOH HMM called fixed on thin evidence turns every
 #   opposite-homolog read that merely overlaps the run into a gene conversion.
 #
-#   Returns a list: n_spanning, n_return, n_switch, n_uninformative.
+#   Parental and opposite reads are counted as in count_tract_junction_reads,
+#   and only for a run that is all one state: on an alternating run every
+#   flanking homolog differs from some tract, so neither class exists.
+#
+#   Returns a list: n_spanning, n_return, n_switch, n_uninformative,
+#   n_parental, n_opposite.
 # ---------------------------------------------------------------------------
 count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
                                        left_start,  left_end,
@@ -2974,10 +3003,11 @@ count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
                                        match_frac = 0.80,
                                        del_reads = character(0)) {
   empty <- list(n_spanning = 0L, n_return = 0L, n_switch = 0L,
-                n_uninformative = 0L,
+                n_uninformative = 0L, n_parental = 0L, n_opposite = 0L,
                 switch_reads        = character(0),
                 return_reads        = character(0),
-                uninformative_reads = character(0))
+                uninformative_reads = character(0),
+                parental_reads      = character(0))
   if (is.null(full_read_loh) || nrow(full_read_loh) == 0) return(empty)
   if (length(tracts) == 0)                                 return(empty)
   if (anyNA(c(left_start, left_end, right_start, right_end))) return(empty)
@@ -3021,14 +3051,24 @@ count_block_junction_reads <- function(full_read_loh, chr_name, tracts,
 
   is_uninf <- !is_switch & !is_return
 
+  one_state   <- length(run_states) == 1L
+  in_frac     <- ifelse(span$n_in > 0L, span$n_in_block / span$n_in, NA_real_)
+  is_parental <- is_uninf & one_state & span$state_L == run_states[1] &
+                 !is.na(in_frac) & in_frac >= match_frac
+  is_opposite <- is_uninf & one_state & span$state_L != run_states[1] &
+                 !is.na(in_frac) & in_frac <= 1 - match_frac
+
   list(
     n_spanning      = as.integer(nrow(span)),
     n_return        = as.integer(sum(is_return)),
     n_switch        = as.integer(sum(is_switch)),
     n_uninformative = as.integer(sum(is_uninf)),
+    n_parental      = as.integer(sum(is_parental)),
+    n_opposite      = as.integer(sum(is_opposite)),
     switch_reads        = as.character(span$read_id[is_switch]),
     return_reads        = as.character(span$read_id[is_return]),
-    uninformative_reads = as.character(span$read_id[is_uninf])
+    uninformative_reads = as.character(span$read_id[is_uninf]),
+    parental_reads      = as.character(span$read_id[is_parental])
   )
 }
 

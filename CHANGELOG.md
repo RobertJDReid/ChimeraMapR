@@ -4,6 +4,38 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Parental spanning reads weigh against CO_GC and can establish NCO_GC
+
+- The tract and block read counts now also report *parental* reads (the
+  tract's allele on both flanks and across the tract) and *opposite* reads
+  (the other allele throughout). In a diploid, parental reads exist only
+  under NCO: a crossover leaves every molecule spanning the tract switched.
+- Every CO_GC, whichever rule made it, is weighed against its spanning reads.
+  With at least `outcome_min_reads` (4) switched + parental reads and a
+  switched share below `co_min_recomb_frac` (0.5) it becomes GC_UNRESOLVED,
+  with the counts in the note. One that passes is "high" only with
+  `tract_read_high_min` (4) switched reads; a peak-backed CO_GC was
+  previously "high" with a single read. On the Qi Spo11 isolates the real
+  CO_GC calls sit at 0.54-0.86 and the calls on noisy fixed tracts in
+  low-quality isolates at 0.05-0.33 (Spo11-188 chrX 30-67 kb, Spo11-23
+  chrXII 712-718 kb), none with a returning read.
+- A GC_UNRESOLVED tract with at least `parental_min_reads` (2) parental reads
+  and no switched, returning or opposite read becomes NCO_GC (support kind
+  "parental_reads", gated like tract-read calls) when the region is diploid:
+  tract depth ratio within `diploid_depth_range` (0.75-1.25) and both HET
+  flanks' balance within `diploid_balance_tol` (0.12) of 0.5.
+- New rule R11f (`rule_unresolved_het_bounded_tract`, last in priority)
+  reports a HET-bounded fixed tract with an undefined junction peak as
+  GC_UNRESOLVED instead of leaving it unclaimed. Spo11-28 chrXV
+  324,875-360,260 (95 SNPs, copy-neutral, confirmed by Qi's Illumina run)
+  had no call: at 318,136 the two homologs switch in opposite directions,
+  and at 360,406 two flank SNPs at 3/13 REF miss the ALT cutoff, so neither
+  edge peak could be typed and R04, the old fallback, is disabled.
+- Step-2 token CSVs gain `n_tract_parental`, `n_tract_opposite` and
+  `n_block_parental`.
+
 ## [0.8.33] - 2026-10-21
 
 ### Long conversion tracts split by noise islands are called from their edge peaks (new rule R11e)
