@@ -35,8 +35,33 @@ APP_VERSION <- "0.8.35"
   }
   getwd()
 })
-sourceCpp(file.path(.chimera_script_dir, "src", "loh_hmm.cpp"),
-          cacheDir = file.path(.chimera_script_dir, "src", ".rcpp_cache"))
+#  Parallel runs from a fresh checkout race on the shared dylib cache (one
+#  process loads a token/.so another is still writing), so compiling is
+#  serialised with an atomic mkdir lock: the first process builds, the rest
+#  wait and then load the warm cache. A lock older than 10 min is treated as
+#  left behind by a killed process. A cache already corrupted by an earlier
+#  race is wiped and rebuilt once.
+local({
+  cpp_file  <- file.path(.chimera_script_dir, "src", "loh_hmm.cpp")
+  cache_dir <- file.path(.chimera_script_dir, "src", ".rcpp_cache")
+  dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
+  lock_dir  <- file.path(cache_dir, ".compile.lock")
+  repeat {
+    if (dir.create(lock_dir, showWarnings = FALSE)) break
+    age <- as.numeric(difftime(Sys.time(), file.mtime(lock_dir), units = "secs"))
+    if (!is.na(age) && age > 600) unlink(lock_dir, recursive = TRUE)
+    else Sys.sleep(0.5)
+  }
+  on.exit(unlink(lock_dir, recursive = TRUE), add = TRUE)
+  ok <- tryCatch({ sourceCpp(cpp_file, cacheDir = cache_dir, env = globalenv()); TRUE },
+                 error = function(e) e)
+  if (!isTRUE(ok)) {
+    message("Rebuilding Rcpp cache after load failure: ", conditionMessage(ok))
+    unlink(setdiff(list.files(cache_dir, full.names = TRUE, all.files = TRUE,
+                              no.. = TRUE), lock_dir), recursive = TRUE)
+    sourceCpp(cpp_file, cacheDir = cache_dir, env = globalenv())
+  }
+})
 
 # -----------------------------------------------------------------------------
 #  Whittaker smoother

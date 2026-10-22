@@ -4,6 +4,19 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Parallel runs no longer race on the Rcpp cache
+
+- Compiling `src/loh_hmm.cpp` is serialised with a lock directory in
+  `src/.rcpp_cache`: the first process builds, the others wait and load the
+  warm cache. Before this, concurrent runs from a fresh checkout could load a
+  `token.rds` or `.so` that another process was still writing ("empty
+  (zero-byte) input file", "no input is available", dlopen errors); 3 of 8
+  cold-cache jobs failed in a test, now 0 of 8. A lock older than 10 minutes
+  is taken to be left by a killed process and removed. If loading still
+  fails, the cache is wiped and rebuilt once. No calls change.
+
 ## [0.8.35] - 2026-10-21
 
 ### CO_GC on an interior piece of a noise-split run; read check for CROSSOVER_NO_TRACT
