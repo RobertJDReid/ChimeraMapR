@@ -4,6 +4,22 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### R06 no longer takes the host tract's peak from a fragment inside it
+
+- A small opposite-state fragment claimed any self-classifying peak whose
+  position fell outside it, however deep inside a flank. When that peak was
+  the pair fused from the flanks' own tract junctions, the merged flank was
+  left with no peak and the tract dropped out as an unclaimed LOH segment.
+  R06 now claims such a peak only when it lies between the flanks' inner
+  SNPs (plus `peak_pad_bp`), and the merged flank keeps the unclaimed
+  peaks lying inside it (more than `peak_pad_bp` from either end; junction
+  peaks are still recovered by `.edge_peak()` as before). RAD5_05_pass16 chrXVI
+  at min_run 1: NCO_GC 499,673-509,682 is called again (as at min_run 2 and
+  3), and the 1-SNP ALT fragment at 499,915 inside it, which had no peak of
+  its own, is POSSIBLE_GC rather than an NCO_GC typed from the tract's peak.
+
 ## [0.8.36] - 2026-10-21
 
 ### Parallel runs no longer race on the Rcpp cache

@@ -2478,11 +2478,22 @@ rule_opp_sandwich <- list(
       # R10, producing a spuriously large NCO_GC that spans the entire merged
       # region. Claim them here so R06 fires the correct NCO_GC_in_terminal
       # instead.
+      # "Just past" means between the flanks' inner SNPs (plus peak_pad_bp).
+      # A self-classifying peak deeper inside a flank marks that flank's own
+      # tract, not this fragment: claiming it strips the merged flank of the
+      # only peak it has, and the tract drops out as an unclaimed LOH
+      # segment. RAD5_05_pass16 chrXVI at min_run 1: the 1-SNP ALT fragment
+      # at 499,915 took the gene_conversion pair peak at 505,162 fused from
+      # the REF tract's two junctions, and NCO_GC 499,673-509,682 (called at
+      # min_run 2 and 3) was lost.
       if (!is.null(pk) && !is.na(pk$fused_pos_bp) &&
           (pk$fused_pos_bp < ftk$start || pk$fused_pos_bp > ftk$end)) {
         et_pk <- pk$best_edge_type %||% pk$edge_type
         sc_pk <- isTRUE(et_pk %in% c("gene_conversion", "crossover", "internal_crossover"))
-        if (!sc_pk) {
+        pad   <- params$peak_pad_bp %||% 0L
+        near  <- pk$fused_pos_bp >= cur_bg$end - pad &&
+                 pk$fused_pos_bp <= r$start + pad
+        if (!sc_pk || !near) {
           pk             <- NULL
           too_small_for_peak <- TRUE
         }
@@ -2558,6 +2569,31 @@ rule_opp_sandwich <- list(
     # than peak_pad_bp) — .edge_peak() recovers it by position so a terminal
     # rule downstream (R02/R02b/R03) doesn't see a peakless token where a
     # real junction peak exists.
+    all_peaks <- unlist(lapply(m$fragments, function(frag)
+      Filter(Negate(is.null), list(frag$pk, frag$pk_l, frag$pk_r))), recursive = FALSE)
+    all_loh   <- lapply(m$fragments, `[[`, "f_tok")
+
+    # The flanks' interior peaks that no fragment claimed stay on the merged
+    # token: an interior pair peak fused from the host tract's two junctions
+    # is what lets a later rule call the tract (see the "just past" check in
+    # match_fn). Peaks at or past either end of the merged span (within
+    # peak_pad_bp) are its junction markers, which .edge_peak() already
+    # recovers; carrying one as peak_over vetoed R01's TERMINAL_DELETION on
+    # RAD5_11 chrI 143,873-198,900 at min_run 1, and turned RAD5_08 chrXII's
+    # CO_TERM into a TCO_CAPTURED_TCO through the 206,651 junction at min_run 3.
+    pad         <- params$peak_pad_bp %||% 0L
+    pk_pos      <- function(p) as.numeric(p$fused_pos_bp %||% p$snp_pos %||% NA_real_)
+    claimed_pos <- vapply(all_peaks, pk_pos, numeric(1))
+    flank_pks <- Filter(function(p) {
+        pos <- pk_pos(p)
+        !is.na(pos) && pos > m$l_tok$start + pad && pos < m$r_tok$end - pad &&
+          !(pos %in% claimed_pos)
+      },
+      .union_peaks(list(m$l_tok$peak_over), m$l_tok$peaks_over,
+                   list(m$r_tok$peak_over), m$r_tok$peaks_over))
+    flank_over <- if (length(flank_pks) > 0)
+      flank_pks[[which.max(vapply(flank_pks, .ns, integer(1)))]] else NULL
+
     merged_flank <- make_token(
       type        = "F",
       state       = m$l_tok$state,
@@ -2565,6 +2601,8 @@ rule_opp_sandwich <- list(
       end         = m$r_tok$end,
       n_snps      = as.integer(sum(c(m$l_tok$n_snps, m$r_tok$n_snps), na.rm = TRUE)),
       depth_ratio = mean(c(m$l_tok$depth_ratio, m$r_tok$depth_ratio), na.rm = TRUE),
+      peak_over   = flank_over,
+      peaks_over  = if (length(flank_pks) > 0) flank_pks else NULL,
       peak_left   = .edge_peak(m$l_tok, "left"),
       # Fall back to l_tok's own peak_right when r_tok has no outer-edge peak.
       # Without this, each R06 cascade step that merges two same-state flanks
@@ -2575,10 +2613,6 @@ rule_opp_sandwich <- list(
       bridged_gap = FALSE,
       meta        = c(m$l_tok$meta, m$r_tok$meta)
     )
-
-    all_peaks <- unlist(lapply(m$fragments, function(frag)
-      Filter(Negate(is.null), list(frag$pk, frag$pk_l, frag$pk_r))), recursive = FALSE)
-    all_loh   <- lapply(m$fragments, `[[`, "f_tok")
 
     list(events  = events,
          rewrite = list(span = m$span, replacement = list(merged_flank)),
