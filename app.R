@@ -459,7 +459,7 @@ ui <- fluidPage(
                   "Read Data File (CSV/GZ):",
                   tags$span(
                     title = paste(
-                      "BAM file subset produced by bamcol.py:",
+                      "BAM file subset produced by bamCore.py:",
                       "contains read information ",
                       "at SNP positions only."
                     ),
