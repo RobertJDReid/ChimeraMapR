@@ -1600,6 +1600,7 @@ EVENT_SYMBOL_MAP <- c(
   NCO_GC                   = "Ο", # GREEK CAPITAL LETTER OMICRON
   NCO_GC_subres            = "Ο", # GREEK CAPITAL LETTER OMICRON (no flanking LOH tract)
   NCO_GC_in_terminal       = "Ο", # GREEK CAPITAL LETTER OMICRON
+  NCO_GC_in_tract          = "Ο", # GREEK CAPITAL LETTER OMICRON (fragment inside an interstitial LOH tract)
   GC_UNRESOLVED            = "Ο°", # confirmed GC-type tract (LOH flanked by two binary peaks); NCO/CO undetermined
   GC_ONE_SIDED             = "Ο¹", # one confirmed binary junction peak; other boundary has no peak at all
   CROSSOVER_NO_TRACT       = "✖", # HEAVY MULTIPLICATION X (crossover, tract below LOH resolution)

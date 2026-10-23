@@ -307,7 +307,7 @@
         <text class="s" x="66" y="172">carries its own peak, or has fewer than 2 SNPs</text>
         <line class="edge" x1="468" y1="137" x2="552" y2="137" marker-end="url(#a1)"></line>
         <rect class="callb" x="560" y="96" width="500" height="82"></rect>
-        <text class="cc" x="578" y="122">NCO_GC_in_terminal &#183; CO_GC &#183; POSSIBLE_GC</text>
+        <text class="cc" x="578" y="122">NCO_GC_in_terminal / _in_tract &#183; CO_GC &#183; POSSIBLE_GC</text>
         <text class="s" x="578" y="142">one event per fragment, reported at its own span</text>
         <text class="s" x="578" y="162">the two flanks then merge into one token and the whole</text>
         <text class="s" x="578" y="176">chain is re-proposed, peeling one fragment at a time</text>
@@ -672,7 +672,7 @@
       <tbody>
         <tr><td class="k">1</td><td class="k">R06</td><td class="m">F [F&#772;] F</td>
           <td>fragment shorter than 10% of the combined flanks <em>and</em> shorter than the right flank; carries its own peak, or has too few SNPs to raise one</td>
-          <td class="c"><span class="rv">NCO_GC_in_terminal</span> · <span class="co">CO_GC</span> · <span class="rv">POSSIBLE_GC</span><br>+ merges the flanks, restarts the scan</td></tr>
+          <td class="c"><span class="rv">NCO_GC_in_terminal</span> / <span class="rv">NCO_GC_in_tract</span> · <span class="co">CO_GC</span> · <span class="rv">POSSIBLE_GC</span><br>+ merges the flanks, restarts the scan</td></tr>
 
         <tr><td class="k">2</td><td class="k">R01</td><td class="m">TEL [F]</td>
           <td>terminal depth ratio below depth_drop</td>

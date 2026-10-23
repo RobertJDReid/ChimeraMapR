@@ -4172,6 +4172,52 @@ MOTIF_RULES <- list(
   accepted
 }
 
+# R06 names every fragment it resolves NCO_GC_in_terminal, but it matches on
+# local structure alone (small opposite-state fragment between same-state
+# flanks) and never asks whether those flanks are part of a terminal LOH. Once
+# the scan is done the chain holds the fully merged flank, so the question can
+# be answered from it: the fragment is "in terminal" only when the fixed token
+# containing it reaches a telomere -- directly, across G gaps, or across a
+# subtelomeric misalignment island R02c would see through. Otherwise the
+# fragment sits inside an interstitial tract and is NCO_GC_in_tract.
+# RAD5_05_pass16 chrXVI 499,915 at min_run 1: a 1-SNP ALT fragment between a
+# 1-SNP REF at 499,673 and the REF tract 499,988-509,682, HET on both sides
+# and 74 kb past the end of the chromosome's terminal LOH.
+.fixed_token_reaches_tel <- function(tokens, i, step, params) {
+  n <- length(tokens)
+  j <- i + step
+  while (j >= 1L && j <= n) {
+    tk <- tokens[[j]]
+    if (tk$type == "TEL") return(TRUE)
+    if (tk$type == "G") { j <- j + step; next }
+    if (tk$type == "H" && .is_subtel_misalignment_het(tk, params)) {
+      j <- j + step; next
+    }
+    return(FALSE)
+  }
+  FALSE
+}
+
+.relabel_interstitial_fragments <- function(events, tokens, params) {
+  for (k in seq_along(events)) {
+    ev <- events[[k]]
+    if (!identical(ev$event_class, "NCO_GC_in_terminal")) next
+    mid <- (ev$start + ev$end) / 2
+    if (is.na(mid)) next
+    ti <- Position(function(tk) tk$type == "F" && !is.na(tk$start) &&
+                     tk$start <= mid && tk$end >= mid, tokens)
+    if (is.na(ti)) next
+    if (.fixed_token_reaches_tel(tokens, ti, -1L, params) ||
+        .fixed_token_reaches_tel(tokens, ti,  1L, params)) next
+    host <- tokens[[ti]]
+    ev$event_class <- "NCO_GC_in_tract"
+    ev$notes <- paste0(ev$notes, "; inside interstitial ", host$state, " tract ",
+                       host$start, "-", host$end)
+    events[[k]] <- ev
+  }
+  events
+}
+
 scan_chain <- function(chain, params, rules = MOTIF_RULES) {
   tokens <- chain$tokens
   chain$tokens <- tokens
@@ -4216,6 +4262,8 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
     for (c in chosen) commit(c)
     break
   }
+
+  events <- .relabel_interstitial_fragments(events, chain$tokens, params)
 
   list(chain  = chain,
        events = events,

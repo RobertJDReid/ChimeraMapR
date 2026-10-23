@@ -4,6 +4,20 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### NCO_GC_in_terminal only for fragments that are actually terminal
+
+- R06 called every small opposite-state fragment between same-state flanks
+  `NCO_GC_in_terminal`, without checking whether the flanks were part of a
+  terminal LOH. After the scan, a fragment whose fixed tract (the merged
+  flanks) does not reach a telomere is now `NCO_GC_in_tract`, still at
+  review, with the host tract in the note. RAD5_05_pass16 chrXVI 499,915 at
+  min_run 1 (a 1-SNP ALT fragment in the REF tract 499,673-509,682, HET on
+  both sides, 74 kb past the terminal LOH) is the case. Fragments inside a
+  tract running to the telomere (chrXVI 337,046-337,480 in the same sample)
+  keep `NCO_GC_in_terminal`.
+
 ## [0.8.36] - 2026-10-21
 
 ### Parallel runs no longer race on the Rcpp cache

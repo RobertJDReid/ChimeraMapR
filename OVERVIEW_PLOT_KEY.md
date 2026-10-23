@@ -14,6 +14,7 @@ Event symbols are drawn in bold just below the LOH band, centred on the bp midpo
 | Ο | `NCO_GC` | Non-crossover gene conversion |
 | Ο | `NCO_GC_subres` | Non-crossover gene conversion with no flanking LOH tract (below LOH resolution) |
 | Ο | `NCO_GC_in_terminal` | Non-crossover gene conversion sitting inside a terminal LOH tract |
+| Ο | `NCO_GC_in_tract` | Small opposite-state fragment inside an interstitial LOH tract (patchy conversion, or a small LOH overlaid by a larger one) |
 | Ο° | `GC_UNRESOLVED` | Confirmed gene-conversion tract (LOH flanked by two binary peaks), but NCO vs CO can't be determined |
 | Ο¹ | `GC_ONE_SIDED` | One confirmed binary junction peak; the other boundary has no peak at all |
 | ΟΟ | `DOUBLE_GC` | Two NCO gene conversions resolved within one token |
