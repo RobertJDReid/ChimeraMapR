@@ -6,7 +6,7 @@ An interactive **R Shiny app** for identifying **haplotype switches** in long-re
 
 Chimeric reads contain sequence derived from more than one parental chromosome — for example, reads spanning a recombination breakpoint in a hybrid or cross. The app classifies each base call at known biallelic SNP positions as REF or ALT, then uses run-length encoding to detect reads where the allele identity switches and is sustained across multiple consecutive SNPs, marking a transition between parental haplotypes within a single read. A separate chain-analysis stage calls loss-of-heterozygosity (LOH) tracts along each chromosome and combines them with the detected peaks to label each event as a crossover, terminal crossover, gene conversion, or an ambiguous/review case.
 
-The core input is a CSV of per-read base calls at biallelic SNP positions extracted from a BAM alignment file (read ID, base call, mapping quality, strand, and related fields — see [Features](#features) for the full set of required inputs). These bam file features are extracted using the [bamCol](https://github.com/RobertJDReid/bamCol) python app. _ChimeraMapR_ groups these calls by read, flags all reads containing haplotype switches, and plots per-read base calls at known SNP sites. A batch-mode [command-line interface](#command-line-interface) (`chimera_cli.R`) is also available for running the same analysis outside the Shiny app.
+The core input is a CSV of per-read base calls at biallelic SNP positions extracted from a BAM alignment file (read ID, base call, mapping quality, strand, and related fields — see [Features](#features) for the full set of required inputs). These bam file features are extracted using the [bamCore](https://github.com/RobertJDReid/bamCore) python app. _ChimeraMapR_ groups these calls by read, flags all reads containing haplotype switches, and plots per-read base calls at known SNP sites. A batch-mode [command-line interface](#command-line-interface) (`chimera_cli.R`) is also available for running the same analysis outside the Shiny app.
 
 ---
 
@@ -155,7 +155,7 @@ Run `Rscript chimera_cli.R --help` for the same list from the terminal.
 
 ### 1) Read Data File (CSV / GZ)
 
-Output from `bamCol.py` is used for read data at SNP positions. Gzipped files can be read without unzipping.
+Output from `bamCore.py` is used for read data at SNP positions. Gzipped files can be read without unzipping.
 
 Required columns:
 
