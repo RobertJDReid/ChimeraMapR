@@ -4,6 +4,23 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [Unreleased]
+
+### Shiny: peak fusion runs inside the event caller
+
+- The separate **Run Peak Fusion** button is gone. **Run Event Caller**
+  appears once the analysis finishes and fuses peaks before calling events,
+  as the CLI always has; supervised pairs stay unfused until approved.
+- Fusion review moves after the fact. The Peak Fusion tab still lists every
+  pair, and approving supervised pairs with **Apply and Re-call Events**
+  re-runs fusion and the event caller together, so the events table reflects
+  the approvals (previously only the fusion tabs were rebuilt).
+- Fusion and event calling are now the `run_peak_fusion()` and
+  `run_event_caller()` server helpers. The event caller is the yeast-specific
+  stage; a caller for another organism would replace `run_event_caller()`.
+- Shiny tutorial: event calling is step 07; fusion review is the optional
+  step 08.
+
 ## [0.8.37] - 2026-10-26
 
 ### R06 no longer takes the host tract's peak from a fragment inside it

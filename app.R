@@ -111,8 +111,8 @@ peak_plot_meta <- function(peak_points, hap, plot_start, plot_end, plot_title,
 # ---------------------------------------------------------------------------
 # build_fused_peak_plots()
 #   Builds the per-chromosome list of fused peak group plots, mirroring the
-#   structure of peak_plots_by_chr.  Called from both run_fusion and
-#   apply_supervised observers so the plots stay in sync with fusion results.
+#   structure of peak_plots_by_chr.  Called from run_peak_fusion() (event
+#   caller and apply_supervised observers) so the plots stay in sync with fusion results.
 #
 #   Returns a list of: list(chromosome, plots)  — same shape as
 #   results$peak_plots_by_chr so the renderUI / observe pattern is reusable.
@@ -648,8 +648,6 @@ ui <- fluidPage(
                    class = "btn-primary btn-lg"),
       helpText(""),
       
-      uiOutput("run_fusion_ui"),
-
       uiOutput("run_chain_ui"),
 
       br(),
@@ -710,8 +708,8 @@ ui <- fluidPage(
                  h5("Candidate Peak Pairs"),
                  uiOutput("fusion_review_ui"),
                  br(),
-                 actionButton("apply_supervised", "Apply Checked Fusions", class = "btn-warning"),
-                 helpText("After checking boxes above, click to apply and re-run fusion."),
+                 actionButton("apply_supervised", "Apply and Re-call Events", class = "btn-warning"),
+                 helpText("After checking boxes above, click to re-run fusion and the event caller with the approved pairs."),
                  br(), br(),
                  h5("Fused Peak Table"),
                  tableOutput("fused_peaks_table"),
@@ -734,7 +732,7 @@ ui <- fluidPage(
                    "from all constituent sub-peaks. Haplotype classification is re-run on the fused window. ",
                    "Blue solid line = fused group SNP centre; grey dashed lines = fused boundaries; ",
                    "purple dotted lines = individual sub-peak positions (fused groups only). ",
-                   "Run 'Run Peak Fusion' first to populate this tab."
+                   "Run 'Run Event Caller' first to populate this tab."
                  ),
                  br(),
                  uiOutput("fused_peak_plots_tabs")
@@ -746,7 +744,7 @@ ui <- fluidPage(
                    "This table combines the initial peak positions and metrics with updated haplotype ",
                    "classifications after peak fusion. Singleton peaks retain their original classification. ",
                    "Fused groups show the re-classified haplotype from the merged window. ",
-                   "Run 'Run Peak Fusion' first to populate the fused classifications."
+                   "Run 'Run Event Caller' first to populate the fused classifications."
                  ),
                  br(),
                  uiOutput("post_fusion_summary_legend"),
@@ -769,7 +767,7 @@ ui <- fluidPage(
                  h4("Called Recombination Events"),
                  helpText(
                    "Events called by the chain-based LOH + peak motif scanner. ",
-                   "Run Analysis, then Run Peak Fusion, then Run Event Caller. ",
+                   "Run Analysis, then Run Event Caller (which fuses peaks first). ",
                    "High-confidence events have unambiguous read and LOH support. ",
                    "'Review' events need manual inspection."
                  ),
@@ -937,28 +935,19 @@ server <- function(input, output, session) {
   # Tracks which supervised pair_keys the user has checked
   supervised_approved <- reactiveVal(character(0))
 
-  # Tracks pipeline stage completion, used to progressively reveal the
-  # "Run Peak Fusion" / "Run Event Caller" buttons in the sidebar.
+  # Tracks pipeline stage completion, used to reveal the "Run Event Caller"
+  # button in the sidebar once the analysis has run.
   analysis_done <- reactiveVal(FALSE)
-  fusion_done    <- reactiveVal(FALSE)
-
-  output$run_fusion_ui <- renderUI({
-    req(analysis_done())
-    tagList(
-      actionButton("run_fusion",
-                   "Run Peak Fusion",
-                   class = "btn-warning btn-lg"),
-      helpText("Run after plotting chimeras. Re-run after approving supervised fusions.")
-    )
-  })
 
   output$run_chain_ui <- renderUI({
-    req(fusion_done())
+    req(analysis_done())
     tagList(
       actionButton("run_chain",
                    "Run Event Caller",
                    class = "btn-success btn-lg"),
-      helpText("Run after Peak Fusion. Calls recombination events from LOH + peak chain.")
+      helpText(paste("Fuses adjacent peaks, then calls recombination events from the",
+                     "LOH + peak chain. Supervised fusions can be approved afterwards",
+                     "on the Peak Fusion tab."))
     )
   })
 
@@ -1029,7 +1018,6 @@ server <- function(input, output, session) {
     results$chain_params           <- NULL
     supervised_approved(character(0))
     analysis_done(FALSE)
-    fusion_done(FALSE)
 
     try(removeTab(inputId = "main_tabs", target = "Selected Region"), silent = TRUE)
 
@@ -1339,60 +1327,51 @@ server <- function(input, output, session) {
     })
 
     analysis_done(TRUE)
-    showNotification("Analysis complete. Click 'Run Peak Fusion' to evaluate adjacent peaks.", type = "message", duration = 5)
+    showNotification("Analysis complete. Click 'Run Event Caller' to fuse peaks and call events.", type = "message", duration = 5)
   })
 
 
-  # ── Peak Fusion ───────────────────────────────────────────────────────────────
-  observeEvent(input$run_fusion, {
-    req(results$snp_peaks, results$rt_df, results$transition_pos)
-
+  # ── Peak fusion + event calling ───────────────────────────────────────────────
+  # The event caller always fuses peaks first, as the CLI does. Supervised pairs
+  # stay unfused until approved on the Peak Fusion tab; "Apply Checked Fusions"
+  # then re-runs both steps. The event caller is the yeast-specific stage: an
+  # organism with different biology would swap run_event_caller() for its own.
+  run_peak_fusion <- function() {
     # zone_min_snps mirrors min_run (parameterizable later)
     zone_min_snps <- input$min_run
 
-    withProgress(message = "Running peak fusion analysis...", value = 0.3, {
+    fusion_res <- compute_peak_pairs(
+      snp_peaks           = results$snp_peaks,
+      rt_df               = results$rt_df,
+      transition_pos      = results$transition_pos,
+      loh_segments        = results$loh_segments,
+      jaccard_threshold   = input$jaccard_threshold,
+      zone_min_snps       = zone_min_snps,
+      supervised_override = supervised_approved(),
+      homog_frac          = input$homog_frac,
+      full_read_loh       = results$full_read_loh
+    )
+    results$peak_pairs  <- fusion_res$peak_pairs
+    results$fused_peaks <- fusion_res$fused_peaks
 
-      fusion_res <- compute_peak_pairs(
-        snp_peaks          = results$snp_peaks,
-        rt_df              = results$rt_df,
-        transition_pos     = results$transition_pos,
-        loh_segments       = results$loh_segments,
-        jaccard_threshold  = input$jaccard_threshold,
-        zone_min_snps      = zone_min_snps,
-        supervised_override = supervised_approved(),
-        homog_frac         = input$homog_frac,
-        full_read_loh      = results$full_read_loh
-      )
+    incProgress(0.2, detail = "Building fused peak plots")
 
-      results$peak_pairs  <- fusion_res$peak_pairs
-      results$fused_peaks <- fusion_res$fused_peaks
+    results$fused_peak_plots_by_chr <- build_fused_peak_plots(
+      fused_peaks    = fusion_res$fused_peaks,
+      rt_df          = results$rt_df,
+      transition_pos = results$transition_pos,
+      snp_coverage   = results$snp_coverage,
+      zone_min_snps  = zone_min_snps
+    )
 
-      incProgress(0.7, detail = "Building fused peak plots")
+    # Extract fused haplotype labels from plots and store for the blended summary table
+    results$fused_hap_labels <- extract_fused_haplotype_labels(
+      results$fused_peak_plots_by_chr,
+      results$fused_peaks
+    )
+  }
 
-      results$fused_peak_plots_by_chr <- build_fused_peak_plots(
-        fused_peaks    = fusion_res$fused_peaks,
-        rt_df          = results$rt_df,
-        transition_pos = results$transition_pos,
-        snp_coverage   = results$snp_coverage,
-        zone_min_snps  = zone_min_snps
-      )
-
-      # Extract fused haplotype labels from plots and store for the blended summary table
-      results$fused_hap_labels <- extract_fused_haplotype_labels(
-        results$fused_peak_plots_by_chr,
-        results$fused_peaks
-      )
-    })
-
-    fusion_done(TRUE)
-    showNotification("Peak fusion complete. Review results in the 'Peak Fusion' and 'Fused Peak Plots' tabs.", type = "message", duration = 4)
-  })
-  
-  # LOH chain events
-  
-  observeEvent(input$run_chain, {
-    req(results$loh_segments, results$snp_peaks, results$chr_span)
-    
+  run_event_caller <- function() {
     # Build params from UI inputs
     cp <- default_chain_params()
     cp$tel_tol_bp       <- as.integer(round(input$tel_tol_kb   * 1000))
@@ -1401,44 +1380,59 @@ server <- function(input, output, session) {
     cp$peak_pad_bp      <- as.integer(input$peak_pad_bp)
     cp$homog_frac       <- input$homog_frac
     cp$min_snps_for_peak <- as.integer(input$min_run)
-    
+
     results$chain_params <- cp
-    
-    withProgress(message = "Running chain event caller...", value = 0.2, {
-      
-      chain_res <- run_chain_analysis(
-        loh_segments      = results$loh_segments,
-        fused_peaks       = results$fused_peaks, # NULL if fusion not run
-        peak_pairs        = results$peak_pairs,
-        snp_peaks         = results$snp_peaks,     # fallback when fused_peaks is NULL
-        rt_df             = results$rt_df,
-        full_read_loh     = results$full_read_loh,
-        del_evidence      = results$del_evidence,
-        transition_pos    = results$transition_pos,
-        chr_span          = results$chr_span,
-        coverage_segments = results$coverage_segments,
-        coverage_table    = results$coverage_table,
-        loh_snps          = results$loh_map,       # per-SNP; CROSSOVER_NO_TRACT vs CO_GC_subres
-        params            = cp
-      )
-      
-      incProgress(0.8, detail = "Storing event table")
-      results$chain_result <- chain_res
-      results$event_table  <- chain_res$event_table
+
+    chain_res <- run_chain_analysis(
+      loh_segments      = results$loh_segments,
+      fused_peaks       = results$fused_peaks,
+      peak_pairs        = results$peak_pairs,
+      snp_peaks         = results$snp_peaks,
+      rt_df             = results$rt_df,
+      full_read_loh     = results$full_read_loh,
+      del_evidence      = results$del_evidence,
+      transition_pos    = results$transition_pos,
+      chr_span          = results$chr_span,
+      coverage_segments = results$coverage_segments,
+      coverage_table    = results$coverage_table,
+      loh_snps          = results$loh_map,       # per-SNP; CROSSOVER_NO_TRACT vs CO_GC_subres
+      params            = cp
+    )
+
+    incProgress(0.2, detail = "Storing event table")
+    results$chain_result <- chain_res
+    results$event_table  <- chain_res$event_table
+  }
+
+  fuse_and_call <- function(message) {
+    withProgress(message = message, value = 0.1, {
+      incProgress(0.1, detail = "Fusing peaks")
+      run_peak_fusion()
+      incProgress(0.2, detail = "Calling events")
+      run_event_caller()
     })
-    
+  }
+
+  notify_events <- function(prefix = "") {
     n_high   <- sum(results$event_table$confidence == "high",   na.rm = TRUE)
     n_review <- sum(results$event_table$confidence == "review", na.rm = TRUE)
     showNotification(
-      paste0("Event calling complete. ",
+      paste0(prefix, "Event calling complete. ",
              n_high, " high-confidence events, ",
              n_review, " requiring review."),
       type = "message", duration = 6
     )
-  })
-  
+  }
 
-  # Apply supervised fusions: collect checked boxes, store, re-run fusion
+  observeEvent(input$run_chain, {
+    req(results$loh_segments, results$snp_peaks, results$chr_span,
+        results$rt_df, results$transition_pos)
+    fuse_and_call("Running peak fusion and event caller...")
+    notify_events()
+  })
+
+  # Apply supervised fusions: collect checked boxes, store, re-run fusion and
+  # the event caller so the events reflect the approved fusions.
   observeEvent(input$apply_supervised, {
     req(results$peak_pairs)
 
@@ -1452,51 +1446,14 @@ server <- function(input, output, session) {
 
     supervised_approved(approved)
 
-    # Re-run fusion with updated approvals
-    zone_min_snps <- input$min_run
-
-    withProgress(message = "Re-running fusion with approved pairs...", value = 0.3, {
-      fusion_res <- compute_peak_pairs(
-        snp_peaks           = results$snp_peaks,
-        rt_df               = results$rt_df,
-        transition_pos      = results$transition_pos,
-        loh_segments        = results$loh_segments,
-        jaccard_threshold   = input$jaccard_threshold,
-        zone_min_snps       = zone_min_snps,
-        supervised_override = supervised_approved(),
-        homog_frac          = input$homog_frac,
-        full_read_loh       = results$full_read_loh
-      )
-      results$peak_pairs  <- fusion_res$peak_pairs
-      results$fused_peaks <- fusion_res$fused_peaks
-
-      incProgress(0.7, detail = "Rebuilding fused peak plots")
-
-      results$fused_peak_plots_by_chr <- build_fused_peak_plots(
-        fused_peaks    = fusion_res$fused_peaks,
-        rt_df          = results$rt_df,
-        transition_pos = results$transition_pos,
-        snp_coverage   = results$snp_coverage,
-        zone_min_snps  = zone_min_snps
-      )
-
-      results$fused_hap_labels <- extract_fused_haplotype_labels(
-        results$fused_peak_plots_by_chr,
-        results$fused_peaks
-      )
-    })
-
-    n_approved <- length(approved)
-    showNotification(
-      paste0(n_approved, " supervised fusion(s) applied."),
-      type = "message", duration = 4
-    )
+    fuse_and_call("Re-running fusion and event caller with approved pairs...")
+    notify_events(paste0(length(approved), " supervised fusion(s) applied. "))
   })
 
   # ── Fusion Review UI ─────────────────────────────────────────────────────────
   output$fusion_review_ui <- renderUI({
     if (is.null(results$peak_pairs) || nrow(results$peak_pairs) == 0) {
-      return(p("No candidate pairs found, or fusion has not been run yet. Click 'Run Peak Fusion'."))
+      return(p("No candidate pairs found, or the event caller has not been run yet. Click 'Run Event Caller'."))
     }
 
     pairs <- results$peak_pairs
@@ -1807,7 +1764,7 @@ server <- function(input, output, session) {
   output$fused_peak_plots_tabs <- renderUI({
     if (is.null(results$fused_peak_plots_by_chr) ||
         length(results$fused_peak_plots_by_chr) == 0) {
-      return(p("Run 'Run Peak Fusion' first to generate fused peak plots."))
+      return(p("Run 'Run Event Caller' first to generate fused peak plots."))
     }
 
     chr_tabs <- lapply(results$fused_peak_plots_by_chr, function(chr_data) {
@@ -2350,7 +2307,7 @@ server <- function(input, output, session) {
         "  Not fused (indep/unresolv):", sum(pp$fusion_mode == "none"), "\n"
       )
     } else {
-      "\nPeak Fusion: not yet run (click 'Run Peak Fusion')\n"
+      "\nPeak Fusion: not yet run (click 'Run Event Caller')\n"
     }
 
     paste0(
@@ -2962,7 +2919,7 @@ server <- function(input, output, session) {
   # Legend for Post Fusion Peak Summary
   output$post_fusion_summary_legend <- renderUI({
     if (is.null(results$fused_peaks)) {
-      return(helpText("Run 'Run Peak Fusion' to populate fusion status and post-fusion classifications."))
+      return(helpText("Run 'Run Event Caller' to populate fusion status and post-fusion classifications."))
     }
     tags$div(
       style = "margin-bottom: 8px; font-size: 0.85em; color: #444;",
