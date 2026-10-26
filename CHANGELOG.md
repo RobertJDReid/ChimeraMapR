@@ -4,7 +4,14 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.9.1] - 2026-10-26
+
+### Shiny: Curve Fits tab removed
+
+- The tab showed the per-chromosome Whittaker λ table and offered a CSV of
+  the fitted curves. Both are in the overview plot's RDS download
+  (`chromosome_fits`, and `chr_span` with each chromosome's λ), so the tab and
+  its `Download Curve Fits` button are removed.
 
 ### Shiny: peak fusion runs inside the event caller
 

@@ -798,16 +798,6 @@ ui <- fluidPage(
                  helpText("LOH regions and peaks that could not be resolved into a scored event above. These may need parameter adjustment or manual review."),
                  tableOutput("other_events_table")
         ),
-        
-        tabPanel("Curve Fits",
-                 h4("Whittaker Smoother Parameters"),
-                 tableOutput("span_table"),
-                 helpText("Shows the lambda (\u03bb) value used for each chromosome in the analysis"),
-                 br(),
-                 h5("Export Whittaker fitted curves"),
-                 helpText("Downloads the fitted Whittaker curves for all chromosomes from this run, including run parameters for later comparison across runs."),
-                 downloadButton("download_curve_fits", "Download Curve Fits")
-        ),
 
         tabPanel("Read Statistics",
                  h4("Analysis Summary"),
@@ -2271,21 +2261,6 @@ server <- function(input, output, session) {
     })
   })
 
-  # Whittaker lambda table
-  output$span_table <- renderTable({
-    req(results$chr_span)
-    out <- copy(results$chr_span)
-    out[, length_kb := round(length / 1000, 1)]
-    out <- out[, .(
-      Chromosome    = chrom,
-      `Length (Kb)` = length_kb,
-      `SNP Count`   = snp_count,
-      `Lambda` = lambda
-    )]
-    setorder(out, Chromosome)
-    out
-  })
-
   # Summary statistics
   output$summary_stats <- renderText({
     req(results$rt_df, results$snp_coverage, results$peaks_genomic)
@@ -3219,14 +3194,6 @@ server <- function(input, output, session) {
         ),
         file
       )
-    }
-  )
-
-  output$download_curve_fits <- downloadHandler(
-    filename = function() paste0(input$sample_name, "_curve_fits_", Sys.Date(), ".csv"),
-    content  = function(file) {
-      req(results$chromosome_fits)
-      fwrite(results$chromosome_fits, file)
     }
   )
 }

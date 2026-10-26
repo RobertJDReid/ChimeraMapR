@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.8.37_
+_version 0.9.1_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -28,7 +28,6 @@ The core input is a CSV of per-read base calls at biallelic SNP positions extrac
   - Peaks table, fused-peak table, peak-pair analysis, and post-fusion summary (CSV)
   - LOH regions table (CSV)
   - Recombination event table (CSV) and chain objects (RDS)
-  - Whittaker curve fits (CSV)
   - Chimeric read IDs (TXT)
 
 Exported read IDs can be used to filter the original alignment file, producing a BAM file of just the chimeric reads for use as a genome browser track.
@@ -324,13 +323,12 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 
 | File | Format | Description |
 |---|---|---|
-| Overview plot | PNG / RDS | Per-chromosome read counts with fitted curve, peak markers, LOH band, event symbols and aneuploidy shading; the RDS holds the data to redraw it with `build_overview_plot()` |
+| Overview plot | PNG / RDS | Per-chromosome read counts with fitted curve, peak markers, LOH band, event symbols and aneuploidy shading; the RDS holds the data to redraw it with `build_overview_plot()`, including the Whittaker curve fits and per-chromosome λ |
 | Peak table / fused-peak table | CSV | Peak positions, boundaries, heights, and haplotype classification for all chromosomes |
 | Peak-pair analysis / post-fusion summary | CSV | Jaccard scores and fusion decisions; blended pre/post-fusion peak classification |
 | LOH regions | CSV | REF-fixed / ALT-fixed / heterozygous tract boundaries per chromosome |
 | Recombination event table | CSV | Called events (crossover, terminal crossover, gene conversion, ambiguous, etc.) with confidence level |
 | Chain objects | RDS | Intermediate chain-analysis objects for the Recombination Events tab |
-| Curve fits | CSV | Fitted Whittaker curves and run parameters per chromosome |
 | Chimeric read IDs | TXT | One read ID per line, for use with `samtools view -N` |
 
 ---
