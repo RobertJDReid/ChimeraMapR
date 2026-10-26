@@ -4,7 +4,7 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
-## [Unreleased]
+## [0.8.37] - 2026-10-26
 
 ### R06 no longer takes the host tract's peak from a fragment inside it
 
