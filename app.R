@@ -1015,10 +1015,15 @@ server <- function(input, output, session) {
 
       incProgress(0.1, detail = "Running analysis")
 
+      # Shiny names uploads "0.gz" etc., but the loaders key on the full
+      # extension (.csv.gz, .vcf.gz). Copy under the original name into a
+      # fresh temp dir, never beside datapath: under testServer() datapath can
+      # be the user's own file.
       restore_ext <- function(datapath, original_name) {
-        suffix <- sub("^[^.]+", "", original_name)
-        if (nchar(suffix) == 0) return(datapath)
-        new_path <- paste0(datapath, suffix)
+        if (!grepl(".", original_name, fixed = TRUE)) return(datapath)
+        dir <- tempfile("upload_")
+        dir.create(dir)
+        new_path <- file.path(dir, basename(original_name))
         file.copy(datapath, new_path, overwrite = TRUE)
         new_path
       }

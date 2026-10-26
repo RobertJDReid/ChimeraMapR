@@ -4,6 +4,17 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.9.2] - 2026-10-26
+
+### Shiny: uploaded inputs are copied into a temp dir
+
+- `restore_ext()` copied each input to `datapath` plus the original name's
+  suffix (taken from the first dot). Shiny's `datapath` is normally a temp
+  upload, but under `testServer()` it can be the user's own file, and the copy
+  then landed beside it (e.g. `x.vcf.vcf`, `S288C_genome_v0.1.0.fasta.fai.1.0.fasta.fai`).
+  The copy now goes into a fresh `tempfile()` directory under the original
+  file name. Analysis output is unchanged.
+
 ## [0.9.1] - 2026-10-26
 
 ### Shiny: Curve Fits tab removed
