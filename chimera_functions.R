@@ -1670,11 +1670,15 @@ add_event_symbols <- function(p, event_tbl, band_ymin, band_ymax,
   }
   # Fused gapped terminal crossovers enumerate their component count in the
   # label (e.g. "2 X TCO*"): the asterisk marks the gap-inferred internal
-  # junction(s); the number counts the fused terminal crossovers. Falls back to
-  # the static "TCO*" when no count is available (older tables lacking n_fused).
-  if ("n_fused" %in% names(ev))
-    ev[event_class == "CO_TERM_GAPPED" & !is.na(n_fused),
-       label := paste0(n_fused, " X TCO*")]
+  # junction(s); the number counts the fused terminal crossovers, read from the
+  # "N fused terminal crossovers" note (or the n_fused column of older tables).
+  # Falls back to the static "TCO*" when no count is available.
+  n_tco <- if ("n_fused" %in% names(ev)) as.integer(ev$n_fused) else
+    suppressWarnings(as.integer(sub("^.*?(\\d+) fused terminal crossovers.*$", "\\1",
+                                    ev$notes, perl = TRUE)))
+  ev[, n_tco := n_tco]
+  ev[event_class == "CO_TERM_GAPPED" & !is.na(n_tco),
+     label := paste0(n_tco, " X TCO*")]
 
   p + geom_text(
     data        = ev,

@@ -20,6 +20,18 @@ read by `app.R` and `chimera_cli.R`.
   3), and the 1-SNP ALT fragment at 499,915 inside it, which had no peak of
   its own, is POSSIBLE_GC rather than an NCO_GC typed from the tract's peak.
 
+### `n_fused` and `phase_switch_frac` folded into the event notes
+
+- The two events-table columns were empty on nearly every row: each serves
+  one narrow case. Both are removed, and the value is written into `notes`
+  instead, where it reads alongside the reason it exists.
+- `n_fused` (CO_TERM_GAPPED only) was already stated as the note's leading
+  "N fused terminal crossovers". The overview map now reads the `N X TCO*`
+  count from that note, or from an `n_fused` column in an older table.
+- `phase_switch_frac` (events whose peak was rescued from `undefined` by read
+  phasing) is appended as `phase_switch_frac=0.xx`. It stays a column in the
+  peak tables.
+
 ## [0.8.36] - 2026-10-21
 
 ### Parallel runs no longer race on the Rcpp cache

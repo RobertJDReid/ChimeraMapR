@@ -1279,6 +1279,15 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   abs(pk_mid - tok_mid) <= center_tol * token$length_bp
 }
 
+# Append a phase-rescued peak's read switch fraction to an event's notes.
+# Only peaks rescued from "undefined" by read phasing carry one, so most
+# events are returned unchanged.
+.append_phase_note <- function(notes, phase_frac) {
+  if (is.null(phase_frac) || is.na(phase_frac)) return(notes)
+  tag <- sprintf("phase_switch_frac=%.2f", phase_frac)
+  if (is.null(notes) || !nzchar(notes)) tag else paste0(notes, "; ", tag)
+}
+
 .make_event <- function(call, chrom, tokens_involved, evidence_peaks = NULL,
                         n_support = NA_integer_, notes = "",
                         support_kind = NA_character_,
@@ -1305,7 +1314,8 @@ classify_two_binary_junction <- function(left_peak, right_peak,
       p$best_edge_type %||% p$edge_type %||% "?")), collapse = ";")
   else NA_character_
 
-  # Read-phasing evidence carried from the associated peak(s): the largest
+  # Read-phasing evidence carried from the associated peak(s), written into the
+  # notes as "phase_switch_frac=": the largest
   # per-read switch fraction across the event's peaks (NA when none was
   # phase-resolved), i.e. the fraction of island-spanning reads that switched
   # haplotype -- direct support for a CO/GC call rescued from "undefined".
@@ -1320,6 +1330,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
       if (is.null(p)) NA_real_ else p$phase_switch_frac %||% NA_real_))))
     if (all(is.na(fr))) NA_real_ else max(fr, na.rm = TRUE)
   } else NA_real_
+  notes <- .append_phase_note(notes, phase_frac)
 
   # ── Re-anchor the footprint of a phase-rescued event to its excised island ─
   # A peak recovered from "undefined" carries the FIX (LOH) island bounds the
@@ -1369,7 +1380,6 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     n_support         = as.integer(n_support),
     peak_edge_types   = pk_edge,
     evidence          = evidence,
-    phase_switch_frac = phase_frac,
     notes             = notes,
     # What n_support counts. "tract_reads" marks a call whose support is reads
     # observed crossing BOTH junctions of the tract (see
@@ -1873,7 +1883,6 @@ rule_terminal_loh_gapped <- list(
                         notes = paste0(n_fused, " fused terminal crossovers; ",
                                        n_internal, " internal gap-switch(es) [", trans,
                                        "] with no junction peak; proximal boundary binary"))
-      ev$n_fused <- n_fused
     }
     list(event = ev, rewrite = NULL,
          claims = list(peak = m$peak, loh = m$f_toks))
@@ -4539,8 +4548,8 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         # Promoted from a self-classifying peak that never attached to a token,
         # so by construction there is no fixed tract behind it (see .make_event).
         evidence = "peak_only",
-        phase_switch_frac = u$phase_switch_frac %||% NA_real_,
-        notes = ev_notes, tokens = list())))
+        notes = .append_phase_note(ev_notes, u$phase_switch_frac %||% NA_real_),
+        tokens = list())))
       if (identical(ev_class, "CROSSOVER_NO_TRACT")) {
         k <- length(uncat_peak_events)
         uncat_peak_events[[k]] <- .crossover_read_check(uncat_peak_events[[k]],
@@ -4610,8 +4619,8 @@ build_event_table <- function(events, params = default_chain_params()) {
     return(data.table(
       event_class = character(), chrom = character(),
       start = integer(), end = integer(), length_kb = numeric(),
-      n_support = integer(), n_fused = integer(), peak_edge_types = character(),
-      phase_switch_frac = numeric(), evidence = character(),
+      n_support = integer(), peak_edge_types = character(),
+      evidence = character(),
       confidence = character(), notes = character()
     ))
 
@@ -4658,11 +4667,7 @@ build_event_table <- function(events, params = default_chain_params()) {
       end             = as.integer(ev$end),
       length_kb       = round((as.integer(ev$end) - as.integer(ev$start)) / 1000, 3),
       n_support       = as.integer(ev$n_support),
-      # Number of terminal crossovers fused across SNP-gap(s) into one call
-      # (CO_TERM_GAPPED, R02g); NA for every other event class.
-      n_fused         = as.integer(ev$n_fused %||% NA_integer_),
       peak_edge_types = ev$peak_edge_types %||% NA_character_,
-      phase_switch_frac = ev$phase_switch_frac %||% NA_real_,
       # Which independent channels back the call -- "peak+loh", "loh_only" or
       # "peak_only". Set by .make_event(); NA only for an event built by some
       # path that predates the field.
