@@ -304,7 +304,7 @@
         <text class="rid" x="66" y="118">R06</text>
         <text class="h" x="66" y="138">A small opposite-state fragment in a run?</text>
         <text class="s" x="66" y="156">len &lt; 0.10 &#215; (left + right flank), and shorter than the right flank</text>
-        <text class="s" x="66" y="172">carries its own peak at its own resolution, or has &lt; 2 SNPs</text>
+        <text class="s" x="66" y="172">own peak at its own resolution, or fewer SNPs than min run</text>
         <line class="edge" x1="468" y1="137" x2="552" y2="137" marker-end="url(#a1)"></line>
         <rect class="callb" x="560" y="96" width="500" height="82"></rect>
         <text class="cc" x="578" y="122">NCO_GC_in_terminal &#183; CO_GC &#183; POSSIBLE_GC</text>
@@ -674,7 +674,7 @@
       </thead>
       <tbody>
         <tr><td class="k">1</td><td class="k">R06</td><td class="m">F [F&#772;] F</td>
-          <td>fragment shorter than 10% of the combined flanks <em>and</em> shorter than the right flank; carries its own peak, or has too few SNPs to raise one. A peak typed only at a coarser Minimum Run Length than the fragment has SNPs is not the fragment's own: it stays with the host tract's edge and the fragment is absorbed</td>
+          <td>fragment shorter than 10% of the combined flanks <em>and</em> shorter than the right flank; carries its own peak, or has fewer SNPs than the Minimum Run Length (too few to raise one). A peak typed only at a coarser Minimum Run Length than the fragment has SNPs is not the fragment's own: it stays with the host tract's edge and the fragment is absorbed</td>
           <td class="c"><span class="rv">NCO_GC_in_terminal</span> · <span class="co">CO_GC</span> · <span class="rv">POSSIBLE_GC</span> (n = reads carrying the fragment's allele; notes name the host tract, which gets <span class="mono">interior_flip=</span>)<br>+ merges the flanks, restarts the scan</td></tr>
 
         <tr><td class="k">2</td><td class="k">R01</td><td class="m">TEL [F]</td>
@@ -823,7 +823,7 @@
         <tr><td class="k">edge_pair_max_island_frac</td><td class="v">0.10</td></tr>
         <tr><td class="k">small_frac</td><td class="v">0.10</td><td>fragment size, relative to its combined flanks, that makes R06 fire</td></tr>
         <tr><td class="k">center_tol</td><td class="v">0.25</td><td>how near a token's midpoint a peak must sit to be "roughly centered"</td></tr>
-        <tr><td class="k">min_snps_for_peak</td><td class="v">2</td><td>below this a tract is too short to raise a peak — POSSIBLE_GC rather than uncategorised</td></tr>
+        <tr><td class="k">min_snps_for_peak</td><td class="v">2</td><td>set to the Minimum Run Length (<code>--min-run</code>); below this a tract is too short to raise a peak — POSSIBLE_GC rather than uncategorised</td></tr>
         <tr><td class="k">fallback_min_run_snps</td><td class="v">2</td><td>R06 fragments below this many SNPs get read counts for the POSSIBLE_GC row, and a block made of them is also counted as one tract</td></tr>
         <tr><td class="k">provisional_tco_min_gap_bp</td><td class="v">10,000</td><td>SNP desert wide enough for R02d to treat a missing junction peak as explained</td></tr>
         <tr><td class="k">subtel_misalign_depth</td><td class="v">1.4</td><td rowspan="2">both must hold for R02c to treat a telomere-adjacent HET as a misalignment pileup rather than a real diploid arm</td></tr>
