@@ -17,7 +17,7 @@ The core input is a CSV of per-read base calls at biallelic SNP positions extrac
 - Detects chimeric reads where allele identity switches and is sustained across consecutive SNPs
 - Creates an **overview per-chromosome plot** (counts + curve fit + peak markers), with aneuploid chromosomes shaded by estimated ploidy
 - Reports a **peak summary table** (positions, boundaries, heights, and haplotype classification)
-- Classifies each peak's underlying read pattern (`binary`, `compound_binary`, `gene_conversion`, `internal_crossover`, `undefined`) from the run of REF/ALT calls spanning it
+- Classifies each peak's underlying read pattern (`binary`, `compound_binary`, `gene_conversion`, `internal_crossover`, `undefined`) from the run of REF/ALT calls spanning it. At Minimum Run Length 1, an `undefined` peak is re-typed at run length 2 and keeps that label only if it resolves as a binary edge with at least Min Peak Height reads, so a single flipped SNP inside a tract does not hide the tract's edge
 - **Peak fusion**: evaluates adjacent peak pairs by shared-read Jaccard similarity and haplotype signature, auto-fusing, flagging for supervised review, or keeping independent as appropriate
 - **LOH region calling**: a beta-binomial EM + Viterbi HMM (compiled C++ via Rcpp) segments each chromosome into REF-fixed / ALT-fixed / heterozygous tracts
 - **Recombination event classification**: a rule-based chain analysis combines LOH tracts and peak calls to label each event (crossover, terminal crossover, gene conversion, one-sided/ambiguous, etc.) with a confidence level, surfaced in the **Recombination Events** tab
@@ -122,7 +122,7 @@ Layer extra outputs on top of the flags above.
 | `--del-block-min-snps INT` | `5` | Consecutive SNPs above `--del-rate-cutoff` needed to treat a run as a hemizygous deletion and exempt it from exclusion |
 | `--del-block-min-bp BP` | `500` | Minimum bp span for such a hemizygous-deletion block |
 | `--del-block-read-coherence FLOAT` | `0.50` | Minimum fraction of a block's deletion calls that must come from reads deleted across the block, rather than scattered single-position misalignments |
-| `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run |
+| `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run. At `1`, peaks left `undefined` are re-tried at `2` (see the peak classification note above) |
 | `--min-peak-height INT` | `5` | Minimum transition count at a SNP to qualify as a peak. Must be at least 1 |
 | `--min-peak-frac FLOAT` | `0.25` | Relative cutoff: a SNP qualifies as a peak when its transition count reaches `max(--min-peak-height, ceiling(FLOAT × spanning depth))`, where spanning depth is the number of reads at that SNP with `--min-run` SNPs on each side (see the note below). Must be between 0 and 1, with a warning above 0.5. `0` disables it |
 | `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
@@ -226,7 +226,7 @@ All parameters are set in the sidebar panel before running the analysis.
 |---|---|---|
 | **Sample Name** | _(blank)_ | REF strain label used in exported file names and LOH band legends |
 | **ALT Strain Name** | _(blank)_ | Optional ALT strain label for LOH band legends; generic REF/ALT labels are used if blank |
-| **Minimum Run Length** | `2` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data |
+| **Minimum Run Length** | `2` | Minimum number of consecutive same-allele calls required to count as a sustained run. Increase for noisier or lower-coverage data. At 1, peaks left undefined are re-tried at 2 and kept only as binary edges |
 | **Minimum Peak Height** | `5` | Minimum chimeric read count for a peak to be reported. Acts as a floor when the fractional cutoff below is set. Must be at least 1 |
 | **Min Peak Height (fraction of spanning depth)** | `0.25` | Relative cutoff: a SNP qualifies as a peak when its count reaches max(Minimum Peak Height, ceiling(fraction × spanning depth)), where spanning depth is the number of reads at that SNP with Minimum Run Length SNPs on each side (see the note under [Analysis parameters](#analysis-parameters)). Must be between 0 and 1, with a warning above 0.5. `0` disables it |
 

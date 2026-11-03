@@ -4131,10 +4131,13 @@ compute_peak_pairs <- function(snp_peaks,
     snp_peaks_out[, haplotype_label := NA_character_]
   if (!"n_read_support" %in% names(snp_peaks_out))
     snp_peaks_out[, n_read_support := NA_integer_]
-  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label, n_read_support)]
+  if (!"label_min_run" %in% names(snp_peaks_out))
+    snp_peaks_out[, label_min_run := NA_integer_]
+  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label, n_read_support, label_min_run)]
   snp_peaks_out[label_map, on = .(snp_pos, chrom),
                 `:=`(haplotype_label = i.haplotype_label,
-                     n_read_support  = i.n_read_support)]
+                     n_read_support  = i.n_read_support,
+                     label_min_run   = i.label_min_run)]
 
   list(
     peak_pairs  = pairs_dt,

@@ -62,6 +62,26 @@ RAD5_05 read sets), against 0.9.2:
 Plus `binary` replacing `undefined` in some events' `peak_edge_types`. Every
 other table is byte-identical; RAD5_05_new_seq at min-run 2 is unchanged.
 
+### App and docs
+
+- **App: `label_min_run` reaches the event caller.** The per-peak plot loop
+  labels `snp_peaks` before `compute_peak_pairs()`, which then skips
+  already-labelled peaks, so `label_min_run` was NA in Shiny and R06 could not
+  tell a coarser-typed peak from the fragment's own. The loop now records it,
+  and `compute_peak_pairs()` writes it back to `snp_peaks` with the label.
+- **App: "(typed at min-run 2)".** Peak plot titles and segment bars, Peak
+  Summary and Post-Fusion Peak Summary append it when a peak's label came from
+  the fallback, since the reads drawn are still the min-run-1 reads. Singleton
+  fused-peak plots apply the same re-typing so their post-fusion label agrees.
+  Help text for Minimum Run Length / Minimum LOH Segment SNPs and the
+  post-fusion legend explain it.
+- **Docs.** `docs/event-call-flow.html`: R06 gate and output, R11
+  `GC_UNRESOLVED` with no read across both peaks, notes on the peak fallback
+  and inside-tract junction peaks, `junction_inner_tol_bp` and
+  `fallback_min_run_snps` in the parameter table, block-as-tract counting
+  under Fig. 2, refreshed source line references. README peak classes and
+  min-run rows, CLI tutorial (`label_min_run` column), Shiny tutorial.
+
 ## [0.9.2] - 2026-10-26
 
 ### Shiny: uploaded inputs are copied into a temp dir

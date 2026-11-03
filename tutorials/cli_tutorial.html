@@ -515,6 +515,7 @@ Done.</pre>
       </table>
     </div>
     <p class="tight">Five of the six peaks are clean <code>binary</code> switches (REF run → ALT run, or vice versa). The peak at 107,978 is labeled <code>internal_crossover</code> — its underlying reads show a switch-back pattern rather than a single sustained transition, which is exactly the kind of case the chain analysis in the next step tries to resolve into an actual event call.</p>
+    <p class="tight">The CSV also has a <code>label_min_run</code> column: the run length the label was typed at. It equals <code>--min-run</code>, except at <code>--min-run 1</code>, where a peak left <code>undefined</code> (typically a tract edge hidden by one flipped SNP) is re-tried at 2 and kept only if it resolves as a <code>binary</code> edge with at least <code>--min-peak-height</code> reads.</p>
   </section>
 
   <section>

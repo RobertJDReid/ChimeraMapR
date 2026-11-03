@@ -109,6 +109,24 @@ peak_plot_meta <- function(peak_points, hap, plot_start, plot_end, plot_title,
 }
 
 # ---------------------------------------------------------------------------
+# hap_label_display()
+#   Classification text for plots and tables. A peak left undefined at
+#   Minimum Run Length 1 can be re-typed at run length 2 (the min-run fallback
+#   in classify_peak_haplotype); label_min_run then exceeds the run's own
+#   min_run and the label says so, because the reads drawn beside it are still
+#   the min-run-1 reads. Vectorised over label / label_min_run.
+# ---------------------------------------------------------------------------
+hap_label_display <- function(label, label_min_run = NA_integer_, min_run = NA_integer_) {
+  n   <- length(label)
+  lmr <- rep_len(suppressWarnings(as.integer(label_min_run)), n)
+  mr  <- suppressWarnings(as.integer(min_run))[1]
+  out <- ifelse(is.na(label), "\u2014", gsub("_", " ", label))
+  fb  <- !is.na(label) & !is.na(lmr) & !is.na(mr) & lmr > mr
+  out[fb] <- paste0(out[fb], " (typed at min-run ", lmr[fb], ")")
+  out
+}
+
+# ---------------------------------------------------------------------------
 # build_fused_peak_plots()
 #   Builds the per-chromosome list of fused peak group plots, mirroring the
 #   structure of peak_plots_by_chr.  Called from run_peak_fusion() (event
@@ -191,6 +209,26 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
         touching_ids  = touching_ids,
         zone_min_snps = zone_min_snps
       )
+      hap$label_min_run <- as.integer(zone_min_snps)
+
+      # A singleton the per-peak classifier typed at a coarser min-run (the
+      # undefined-peak fallback) is re-typed the same way here, so its fused
+      # plot and post-fusion label agree with the label the event caller used.
+      lmr <- if (n_sub == 1L && "label_min_run" %in% names(sub_peak_rows))
+        sub_peak_rows$label_min_run[1] else NA_integer_
+      if (!is.na(lmr) && lmr > zone_min_snps) {
+        rs <- .resmooth_peak_reads(rt_df, chr_name, touching_ids, lmr,
+                                   fused_start, fused_end)
+        if (!is.null(rs)) {
+          hap2 <- classify_fused_peak_haplotype(
+            fg = grp, chr_name = chr_name, rt_df = rs$rt_df,
+            touching_ids = rs$touching_ids, zone_min_snps = lmr)
+          if (hap2$label %in% c("binary", "compound_binary")) {
+            hap <- hap2
+            hap$label_min_run <- as.integer(lmr)
+          }
+        }
+      }
 
       seg_data <- hap$seg_data
 
@@ -216,7 +254,7 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
 
       x_lims <- range(plot_df$pos / 1000)
 
-      hap_label_str <- gsub("_", " ", hap$label)
+      hap_label_str <- hap_label_display(hap$label, hap$label_min_run, zone_min_snps)
       expanded_note <- if (hap$expanded) " [window expanded]" else ""
       sub_note      <- if (n_sub > 1L)
         paste0("  \u2014  ", n_sub, " sub-peaks fused  [", edge_lbl, "]")
@@ -356,6 +394,7 @@ build_fused_peak_plots <- function(fused_peaks, rt_df, transition_pos,
 
       attr(p, "seg_data")        <- seg_data
       attr(p, "haplotype_label") <- hap$label
+      attr(p, "label_min_run")   <- hap$label_min_run %||% NA_integer_
       attr(p, "peak_meta")       <- peak_plot_meta(
         peak_points = peak_point_df, hap = hap,
         plot_start = plot_start, plot_end = plot_end,
@@ -413,6 +452,8 @@ extract_fused_haplotype_labels <- function(fused_peak_plots_by_chr, fused_peaks)
       p   <- plots[[i]]
       lbl <- attr(p, "haplotype_label")
       if (is.null(lbl)) lbl <- NA_character_
+      lmr <- attr(p, "label_min_run")
+      if (is.null(lmr)) lmr <- NA_integer_
 
       # Match back to the fusion_group integer via (chrom, gi)
       match_row <- group_rep[chrom == chr_name & gi == i]
@@ -422,7 +463,8 @@ extract_fused_haplotype_labels <- function(fused_peak_plots_by_chr, fused_peaks)
         chrom                 = chr_name,
         group_index           = i,
         fusion_group          = fg,
-        fused_classification  = lbl
+        fused_classification  = lbl,
+        fused_label_min_run   = as.integer(lmr)
       )
     }
   }
@@ -508,7 +550,9 @@ ui <- fluidPage(
                    value = 2,
                    min = 1,
                    step = 1),
-      helpText("Minimum consecutive same-allele calls to count as a run; increase for noisier data"),
+      helpText(paste("Minimum consecutive same-allele calls to count as a run; increase for noisier data.",
+                     "At 1, a peak left undefined (e.g. an edge hidden by one flipped SNP) is re-tried",
+                     "at 2 and kept only as a binary edge, labelled '(typed at min-run 2)'.")),
 
       numericInput("min_run_snps",
                    "Minimum LOH Segment SNPs:",
@@ -519,7 +563,9 @@ ui <- fluidPage(
                      "fixed segment; shorter runs between identical flanks are absorbed as",
                      "flicker. Independent of Minimum Run Length — set to 1 to let a single",
                      "homozygous SNP form a tract, making single-SNP gene conversions",
-                     "reachable without a chimeric-read peak.")),
+                     "reachable without a chimeric-read peak. A single opposite SNP inside a",
+                     "larger tract is reported as its own POSSIBLE_GC row and noted on the",
+                     "host event (interior_flip=) rather than splitting it.")),
 
       numericInput("min_peak_height",
                    "Minimum Peak Height:",
@@ -895,6 +941,7 @@ server <- function(input, output, session) {
     chromosome_fits       = NULL,
     chr_span              = NULL,
     run_params            = NULL,   # run_chimera_analysis()$params; carries median_depth and median_span_depth
+    run_min_run           = NULL,   # Minimum Run Length the analysis ran at (label suffixes)
     plot                  = NULL,
     chimeric_read_ids     = NULL,
     peak_plots_by_chr     = NULL,
@@ -1060,6 +1107,7 @@ server <- function(input, output, session) {
       results$chromosome_fits   <- res$chromosome_fits
       results$chr_span          <- res$chr_span
       results$run_params        <- res$params
+      results$run_min_run       <- input$min_run   # for "(typed at min-run N)" labels
       results$strain_ref        <- trimws(input$strain_ref)
       results$strain_alt        <- trimws(input$strain_alt)
       results$full_read_loh     <- res$full_read_loh
@@ -1140,6 +1188,7 @@ server <- function(input, output, session) {
           hap_label_rows[[length(hap_label_rows) + 1L]] <<- data.table(
             .row_idx           = pk$.row_idx,
             haplotype_label    = hap$label,
+            label_min_run      = hap$label_min_run %||% NA_integer_,
             hap_win_start      = hap$win_start,
             hap_win_end        = hap$win_end,
             hap_win_expanded   = hap$expanded,
@@ -1183,7 +1232,7 @@ server <- function(input, output, session) {
           x_lims <- range(plot_df$pos / 1000)
 
           # ── Build plot title with haplotype label ─────────────────────────
-          hap_label_str <- gsub("_", " ", hap$label)
+          hap_label_str <- hap_label_display(hap$label, hap$label_min_run, input$min_run)
           expanded_note <- if (hap$expanded) " [window expanded]" else ""
           plot_title <- paste0(
             "Chr ", chr_name, "  \u2014  Peak ", pk_i,
@@ -1617,8 +1666,9 @@ server <- function(input, output, session) {
     )
     if (has_hap) {
       base_cols[["Haplotype Label"]] <-
-        ifelse(is.na(out$haplotype_label), "\u2014",
-               gsub("_", " ", out$haplotype_label))
+        hap_label_display(out$haplotype_label,
+                          if ("label_min_run" %in% names(out)) out$label_min_run else NA_integer_,
+                          results$run_min_run)
     }
     if (has_hap && has_wins) {
       base_cols[["Hap Win Start (Kb)"]] <-
@@ -2783,6 +2833,11 @@ server <- function(input, output, session) {
 
     # Start with the initial (pre-fusion) haplotype label
     has_hap <- "haplotype_label" %in% names(peaks)
+    if (has_hap)
+      peaks[, .hap_disp := hap_label_display(
+        haplotype_label,
+        if ("label_min_run" %in% names(peaks)) label_min_run else NA_integer_,
+        results$run_min_run)]
 
     out <- peaks[, {
       list(
@@ -2795,16 +2850,12 @@ server <- function(input, output, session) {
         `Peak Height`         = round(peak_height, 2),
         `Chimeric Reads`      = ifelse(is.na(chimeric_reads_at_snp), "",
                                        as.character(chimeric_reads_at_snp)),
-        `Initial Classification` = if (has_hap)
-          ifelse(is.na(haplotype_label), "\u2014", gsub("_", " ", haplotype_label))
-        else "\u2014",
+        `Initial Classification` = if (has_hap) .hap_disp else "\u2014",
         # Placeholders filled below
         `Fusion Status`          = "singleton",
         `Fusion Group`           = NA_integer_,
         `Sub-peaks in Group`     = 1L,
-        `Post-Fusion Classification` = if (has_hap)
-          ifelse(is.na(haplotype_label), "\u2014", gsub("_", " ", haplotype_label))
-        else "\u2014",
+        `Post-Fusion Classification` = if (has_hap) .hap_disp else "\u2014",
         `Classification Changed` = "no"
       )
     }]
@@ -2818,7 +2869,8 @@ server <- function(input, output, session) {
 
       # fused_peaks has one row per original peak_id with fusion_group membership
       # Join the fused haplotype label from fhl via fusion_group
-      fhl_keyed <- fhl[, .(fusion_group, fused_classification)]
+      if (!"fused_label_min_run" %in% names(fhl)) fhl[, fused_label_min_run := NA_integer_]
+      fhl_keyed <- fhl[, .(fusion_group, fused_classification, fused_label_min_run)]
 
       # Build a peak_id -> fusion_group + fused_classification lookup
       pk_lookup <- fp[, .(peak_id, chrom, snp_pos, fusion_group, n_sub_peaks,
@@ -2851,6 +2903,7 @@ server <- function(input, output, session) {
         et <- mr$best_edge_type
         fm <- mr$best_fusion_mode
         fc <- mr$fused_classification
+        fl <- mr$fused_label_min_run
 
         status <- if (!is.na(fm) && fm == "automatic") {
           if (ns > 1L) "fused (auto)" else "singleton"
@@ -2861,7 +2914,7 @@ server <- function(input, output, session) {
         }
 
         fused_label <- if (!is.na(fc) && fc != "") {
-          gsub("_", " ", fc)
+          hap_label_display(fc, fl, results$run_min_run)
         } else {
           out$`Initial Classification`[ri]
         }
@@ -2916,7 +2969,9 @@ server <- function(input, output, session) {
       tags$span("fused (auto)", style = "background:#d4edda; padding:2px 7px; border-radius:3px; margin-right:5px;"),
       tags$span("fused (supervised)", style = "background:#fff3cd; padding:2px 7px; border-radius:3px; margin-right:5px;"),
       br(), br(),
-      tags$em("'Classification Changed' = yes indicates the post-fusion re-classification differs from the initial per-peak label.")
+      tags$em("'Classification Changed' = yes indicates the post-fusion re-classification differs from the initial per-peak label."),
+      br(),
+      tags$em("'(typed at min-run 2)' marks a peak that was undefined at Minimum Run Length 1 and resolved as a binary edge once its reads were re-smoothed at run length 2; 'undefined' means it stayed undefined at both.")
     )
   })
 

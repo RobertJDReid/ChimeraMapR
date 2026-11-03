@@ -304,7 +304,7 @@
         <text class="rid" x="66" y="118">R06</text>
         <text class="h" x="66" y="138">A small opposite-state fragment in a run?</text>
         <text class="s" x="66" y="156">len &lt; 0.10 &#215; (left + right flank), and shorter than the right flank</text>
-        <text class="s" x="66" y="172">carries its own peak, or has fewer than 2 SNPs</text>
+        <text class="s" x="66" y="172">carries its own peak at its own resolution, or has &lt; 2 SNPs</text>
         <line class="edge" x1="468" y1="137" x2="552" y2="137" marker-end="url(#a1)"></line>
         <rect class="callb" x="560" y="96" width="500" height="82"></rect>
         <text class="cc" x="578" y="122">NCO_GC_in_terminal &#183; CO_GC &#183; POSSIBLE_GC</text>
@@ -414,7 +414,7 @@
         <line class="edge" x1="468" y1="926" x2="552" y2="926" marker-end="url(#a1)"></line>
         <rect class="callb" x="560" y="896" width="500" height="60"></rect>
         <text class="cc" x="578" y="920">crossover pair &#8594; CO_GC &#183; gene_conversion pair &#8594; NCO_GC</text>
-        <text class="cr" x="578" y="940">no pair record &#8594; GC_UNRESOLVED<tspan class="s">&#160;&#160;tract confirmed, outcome not</tspan></text>
+        <text class="cr" x="578" y="940">no pair, or no read across both &#8594; GC_UNRESOLVED</text>
 
         <rect class="box" x="120" y="964" width="348" height="60"></rect>
         <text class="rid" x="136" y="984">R11b</text>
@@ -486,7 +486,7 @@
       junction peak and only R03 also accounts for the captured tract.
     </figcaption>
   </figure>
-  <p class="src">loh_chain_analysis.R:3294 — MOTIF_RULES</p>
+  <p class="src">loh_chain_analysis.R:4241 — MOTIF_RULES</p>
 </section>
 
 <section>
@@ -584,9 +584,12 @@
       tract, so a return confirms it and a switch overturns it to CO_GC; R12's pair
       claims a crossover, so a switch confirms it and a return overturns it to NCO_GC.
       Either way, nothing informative means GC_UNRESOLVED rather than a discarded event.
+      A block whose minority-state pieces are all under 2 SNPs is also counted as one
+      tract of the majority state, and R06 hands those counts to the merged tract: on an
+      alternating run the unconverted copy would otherwise score as a return.
     </figcaption>
   </figure>
-  <p class="src">loh_chain_analysis.R:2500 — annotate_tract_read_support &nbsp;·&nbsp; :2560 — annotate_block_read_support</p>
+  <p class="src">loh_chain_analysis.R:3055 — annotate_tract_read_support &nbsp;·&nbsp; :3136 — annotate_block_read_support</p>
 </section>
 
 <section>
@@ -648,7 +651,7 @@
       and the peak may legitimately be the boundary shared with the neighbouring event.
     </figcaption>
   </figure>
-  <p class="src">loh_chain_analysis.R:3392 — .generate_candidates &nbsp;·&nbsp; :3418 — .resolve_candidates</p>
+  <p class="src">loh_chain_analysis.R:4340 — .generate_candidates &nbsp;·&nbsp; :4366 — .resolve_candidates</p>
 </section>
 
 <section>
@@ -671,8 +674,8 @@
       </thead>
       <tbody>
         <tr><td class="k">1</td><td class="k">R06</td><td class="m">F [F&#772;] F</td>
-          <td>fragment shorter than 10% of the combined flanks <em>and</em> shorter than the right flank; carries its own peak, or has too few SNPs to raise one</td>
-          <td class="c"><span class="rv">NCO_GC_in_terminal</span> · <span class="co">CO_GC</span> · <span class="rv">POSSIBLE_GC</span><br>+ merges the flanks, restarts the scan</td></tr>
+          <td>fragment shorter than 10% of the combined flanks <em>and</em> shorter than the right flank; carries its own peak, or has too few SNPs to raise one. A peak typed only at a coarser Minimum Run Length than the fragment has SNPs is not the fragment's own: it stays with the host tract's edge and the fragment is absorbed</td>
+          <td class="c"><span class="rv">NCO_GC_in_terminal</span> · <span class="co">CO_GC</span> · <span class="rv">POSSIBLE_GC</span> (n = reads carrying the fragment's allele; notes name the host tract, which gets <span class="mono">interior_flip=</span>)<br>+ merges the flanks, restarts the scan</td></tr>
 
         <tr><td class="k">2</td><td class="k">R01</td><td class="m">TEL [F]</td>
           <td>terminal depth ratio below depth_drop</td>
@@ -720,7 +723,7 @@
 
         <tr><td class="k">13</td><td class="k">R11</td><td class="m">H &#9679;[F]&#9679; H</td>
           <td>both junction peaks are binary; the pair record supplies the complementarity</td>
-          <td class="c"><span class="co">CO_GC</span> · <span class="co">NCO_GC</span> · <span class="rv">GC_UNRESOLVED</span> when no pair record exists</td></tr>
+          <td class="c"><span class="co">CO_GC</span> · <span class="co">NCO_GC</span> · <span class="rv">GC_UNRESOLVED</span> when no pair record exists, or no read crosses both peaks</td></tr>
 
         <tr><td class="k">14</td><td class="k">R11b</td><td class="m">H &#9679;[F] H</td>
           <td>a binary peak on exactly one junction and no peak at all opposite — a weak peak opposite does not qualify</td>
@@ -746,6 +749,23 @@
       so a real crossover pair is never re-read as an unresolved binary pair.</p>
     </div>
     <div>
+      <h3>An edge hidden by one flipped SNP</h3>
+      <p>At Minimum Run Length 1, a single SNP fixed opposite inside a tract makes every read
+      chimeric at it, so the edge peak types as undefined. Such a peak is re-typed with its
+      reads re-smoothed at run length 2 and keeps the new label only if it is binary or
+      compound_binary with at least Min Peak Height switching reads; the peak records
+      <span class="mono">label_min_run</span>. Only binary is accepted because undefined is
+      what keeps noise peaks out at run length 1.</p>
+      <p>R06 then absorbs the flipped SNP into the tract, the tract calls as it would at run
+      length 2, and the SNP is reported as its own POSSIBLE_GC row rather than dropped.</p>
+    </div>
+    <div>
+      <h3>Edges just inside the tract</h3>
+      <p>When no peak sits within peak_pad_bp outside a junction, a binary peak just inside
+      the tract can mark it: within junction_inner_tol_bp of the boundary and no more than a
+      quarter of the tract, with its window reaching back across the boundary.</p>
+    </div>
+    <div>
       <h3>Why R11d comes before the peak rules</h3>
       <p>The peak rules classify a tract from junction peaks whose zones are bounded by
       neighbouring peaks, not by heterozygosity. On a run of tracts with no callable HET
@@ -768,7 +788,7 @@
       remain disabled pending redesign.</p>
     </div>
   </div>
-  <p class="src">loh_chain_analysis.R:1225–3270 — rule builders</p>
+  <p class="src">loh_chain_analysis.R:1529–4240 — rule builders &nbsp;·&nbsp; chimera_functions.R:2386 — classify_peak_haplotype</p>
 </section>
 
 <section>
@@ -786,7 +806,8 @@
         <tr><td class="k">depth_drop</td><td class="v">0.60</td><td>deletion against copy-neutral LOH (R01, Rd, and the depth check in every terminal rule)</td></tr>
         <tr><td class="k">tel_tol_bp</td><td class="v">5,000</td><td>how close to the last SNP a tract must reach to count as terminal</td></tr>
         <tr><td class="k">merge_gap_bp</td><td class="v">5,000</td><td>gap that canonicalise() will merge across; also the tolerance for binding a peak-pair to a tract</td></tr>
-        <tr><td class="k">peak_pad_bp</td><td class="v">200</td><td>how near a boundary a peak's SNP must sit to be that junction's peak</td></tr>
+        <tr><td class="k">peak_pad_bp</td><td class="v">200</td><td>how near outside a boundary a peak's SNP must sit to be that junction's peak</td></tr>
+        <tr><td class="k">junction_inner_tol_bp</td><td class="v">1,000</td><td>how far inside a tract a binary peak may sit and still mark its edge (also capped at a quarter of the tract)</td></tr>
         <tr><td class="k">min_span</td><td class="v">3</td><td>spanning reads below which a peak-based call becomes AMBIGUOUS(low_coverage)</td></tr>
         <tr><td class="k">homog_frac</td><td class="v">0.80</td><td>share of informative reads that must agree before NCO or CO is called (Fig. 2)</td></tr>
         <tr><td class="k">tract_read_min_frac</td><td class="v">0.10</td><td>share of spanning reads that must be informative before R11c will call at all</td></tr>
@@ -803,6 +824,7 @@
         <tr><td class="k">small_frac</td><td class="v">0.10</td><td>fragment size, relative to its combined flanks, that makes R06 fire</td></tr>
         <tr><td class="k">center_tol</td><td class="v">0.25</td><td>how near a token's midpoint a peak must sit to be "roughly centered"</td></tr>
         <tr><td class="k">min_snps_for_peak</td><td class="v">2</td><td>below this a tract is too short to raise a peak — POSSIBLE_GC rather than uncategorised</td></tr>
+        <tr><td class="k">fallback_min_run_snps</td><td class="v">2</td><td>R06 fragments below this many SNPs get read counts for the POSSIBLE_GC row, and a block made of them is also counted as one tract</td></tr>
         <tr><td class="k">provisional_tco_min_gap_bp</td><td class="v">10,000</td><td>SNP desert wide enough for R02d to treat a missing junction peak as explained</td></tr>
         <tr><td class="k">subtel_misalign_depth</td><td class="v">1.4</td><td rowspan="2">both must hold for R02c to treat a telomere-adjacent HET as a misalignment pileup rather than a real diploid arm</td></tr>
         <tr><td class="k">subtel_misalign_max_bp</td><td class="v">25,000</td></tr>
@@ -844,7 +866,7 @@
       unresolved question.</p>
     </div>
   </div>
-  <p class="src">loh_chain_analysis.R:3511 — reconcile &nbsp;·&nbsp; :3729 — build_event_table</p>
+  <p class="src">loh_chain_analysis.R:4493 — reconcile &nbsp;·&nbsp; :4809 — build_event_table</p>
 </section>
 
 </div>
