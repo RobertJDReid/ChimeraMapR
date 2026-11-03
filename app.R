@@ -1131,7 +1131,8 @@ server <- function(input, output, session) {
             rt_df         = res$rt_df,
             touching_ids  = touching_ids,
             zone_min_snps = input$min_run,
-            full_read_loh = res$full_read_loh
+            full_read_loh = res$full_read_loh,
+            fallback_min_support = as.integer(input$min_peak_height)
           )
 
           # Record label for writing back to snp_peaks later (keyed by .row_idx
@@ -1344,7 +1345,8 @@ server <- function(input, output, session) {
       zone_min_snps       = zone_min_snps,
       supervised_override = supervised_approved(),
       homog_frac          = input$homog_frac,
-      full_read_loh       = results$full_read_loh
+      full_read_loh       = results$full_read_loh,
+      fallback_min_support = as.integer(input$min_peak_height)
     )
     results$peak_pairs  <- fusion_res$peak_pairs
     results$fused_peaks <- fusion_res$fused_peaks

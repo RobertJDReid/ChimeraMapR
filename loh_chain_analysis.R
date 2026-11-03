@@ -40,6 +40,15 @@ default_chain_params <- function() {
     # Chimeric-read peaks are sharp; 200 bp is a tight but appropriate default.
     peak_pad_bp     = 200L,
 
+    # How far INSIDE a fixed tract a binary peak may sit and still mark that
+    # tract's own junction (.interior_junction_peak), capped at a quarter of
+    # the tract's length. A single opposite-allele SNP just inside the edge
+    # breaks the first min_run of tract alleles, so the switch peak lands on
+    # the first SNP after it rather than on the boundary: RAD5_05 chrXVI
+    # REF 499,673-509,682 has an ALT at 499,915 and its left binary peak
+    # (25 reads) at 499,988, 315 bp in.
+    junction_inner_tol_bp = 1000L,
+
     # Minimum spanning reads to make a read-based call; below this ->
     # AMBIGUOUS(low_coverage)
     min_span        = 3L,
@@ -564,6 +573,9 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     # the broad peak window or a neighbouring LOH tract the scanner anchored to.
     phase_island_start = if ("phase_island_start" %in% names(chr_fp)) phase_island_start[1] else NA_integer_,
     phase_island_end   = if ("phase_island_end"   %in% names(chr_fp)) phase_island_end[1]   else NA_integer_,
+    # min_run the peak's label was resolved at: the run's own, or the coarser
+    # fallback classify_peak_haplotype() retries an undefined peak at.
+    label_min_run      = if ("label_min_run" %in% names(chr_fp)) label_min_run[1] else NA_integer_,
     n_spanning        = 0L,
     jaccard           = NA_real_,
     pair_edge_type    = NA_character_,
@@ -2444,6 +2456,18 @@ rule_opp_sandwich <- list(
       pk_l <- ftk$peak_left
       pk_r <- ftk$peak_right
       pk   <- .best_peak(ftk)
+      # A peak whose label was only resolved at a coarser min_run than this
+      # fragment has SNPs cannot describe it: at that resolution the fragment
+      # is filtered out of every read. It is the edge of the tract the
+      # fragment sits in (RAD5_05 chrXVI: the 499,915 peak is the left edge of
+      # REF 499,673-509,682, binary only at min_run 2), so the fragment does
+      # not claim it.
+      too_coarse <- function(p) !is.null(p) &&
+        isTRUE(p$label_min_run > (ftk$n_snps %||% Inf))
+      coarse_only <- too_coarse(pk)
+      if (too_coarse(pk_l)) pk_l <- NULL
+      if (too_coarse(pk_r)) pk_r <- NULL
+      if (coarse_only)      pk   <- .best_peak(list(peak_left = pk_l, peak_right = pk_r))
 
       # Fragments with too few SNPs to ever generate a chimeric-read peak
       # (the same floor reconcile() already uses for POSSIBLE_GC) are still
@@ -2451,6 +2475,9 @@ rule_opp_sandwich <- list(
       # and leaving a single-SNP noise blip unmerged would otherwise block
       # the cascade from ever reaching the far telomere.
       too_small_for_peak <- !is.na(ftk$n_snps) && ftk$n_snps < params$min_snps_for_peak
+      # Left with no peak of its own at its resolution, the fragment is
+      # absorbed the same way.
+      if (coarse_only && is.null(pk)) too_small_for_peak <- TRUE
 
       # Structural fallback (see the header): two binary junction peaks whose
       # pair is unphased. Checked ahead of the peak_over handling below, which
@@ -2537,7 +2564,8 @@ rule_opp_sandwich <- list(
       tract <- if (isTRUE(frag$structural))
         list(call = "NCO_GC", reason = "loh_structural", n_support = frag$n_shared)
       else if (frag$too_small_for_peak && is.null(frag$pk))
-        list(call = "POSSIBLE_GC", reason = "too_small_for_peak", n_support = 0L)
+        list(call = "POSSIBLE_GC", reason = "too_small_for_peak",
+             n_support = as.integer(frag$f_tok$n_state_reads %||% 0L))
       else if (!is.null(frag$pk_l) && !is.null(frag$pk_r))
         classify_two_binary_junction(frag$pk_l, frag$pk_r, frag$f_tok$state, params)
       else
@@ -2564,6 +2592,14 @@ rule_opp_sandwich <- list(
                                           list(frag$pk, frag$pk_l, frag$pk_r)),
                   n_support = tract$n_support,
                   notes = paste0("small_opp_fragment; centered=", centered,
+                                 if (identical(tract$call, "POSSIBLE_GC") &&
+                                     !is.null(frag$f_tok$n_cov_reads))
+                                   sprintf("; %d/%d reads %s; within %s %d-%d",
+                                           as.integer(frag$f_tok$n_state_reads),
+                                           as.integer(frag$f_tok$n_cov_reads),
+                                           sub("_fixed$", "", frag$f_tok$state),
+                                           m$l_tok$state, m$l_tok$start, m$r_tok$end)
+                                 else "",
                                  if (isTRUE(frag$structural))
                                    paste0("; loh_structural: no het SNPs flank the",
                                           " junctions, so the ", tract$n_support,
@@ -2622,6 +2658,18 @@ rule_opp_sandwich <- list(
       bridged_gap = FALSE,
       meta        = c(m$l_tok$meta, m$r_tok$meta)
     )
+    # A block that is one tract at the coarser LOH floor was measured as such
+    # (annotate_block_read_support); when this merge rebuilt exactly that
+    # tract, it inherits those read counts, so R10/R11c read the tract's
+    # outcome as they do at that floor.
+    bat <- m$l_tok$block_as_tract
+    if (!is.null(bat) && identical(bat$start, merged_flank$start) &&
+        identical(bat$end, merged_flank$end) &&
+        identical(paste0(bat$state, "_fixed"), merged_flank$state)) {
+      for (f in c("n_tract_spanning", "n_tract_return", "n_tract_switch",
+                  "tract_outcome", "tract_read_ids", "tract_zone_L", "tract_zone_R"))
+        merged_flank[[f]] <- bat[[f]]
+    }
 
     list(events  = events,
          rewrite = list(span = m$span, replacement = list(merged_flank)),
@@ -2885,7 +2933,55 @@ rule_subres_tract <- list(
   if (!is.null(f_tok$peak_left)) return(f_tok$peak_left)
   if (!is.null(left_ctx$peak_right)) return(left_ctx$peak_right)
   .over_junction_peak(left_ctx, f_tok$start, "left", tol) %||%
-    .over_junction_peak(f_tok, f_tok$start, "left", tol)
+    .over_junction_peak(f_tok, f_tok$start, "left", tol) %||%
+    .interior_junction_peak(f_tok, left_ctx, "left", params)
+}
+
+# Last-resort junction lookup: a BINARY peak just inside the tract whose window
+# straddles the boundary. Every lookup above accepts only a peak at or outside
+# the boundary, but an opposite-allele SNP a few hundred bp inside the edge
+# (patchy conversion, or a single flipped SNP) breaks the first min_run of
+# tract alleles, so the switch peak lands on the first SNP after it. Without
+# this, RAD5_05 chrXVI REF 499,673-509,682 lost its 25-read left peak at
+# 499,988 and came out GC_ONE_SIDED with "no peak found on the other side".
+#
+# Kept narrow so it cannot hand a tract an embedded event's peak (the reason
+# the tract interior is otherwise ignored):
+#   - binary only: an embedded island self-labels gene_conversion / crossover;
+#   - within junction_inner_tol_bp of the boundary and a quarter of the tract,
+#     so a short tract's far-junction peak is never taken for its near one;
+#   - the peak window must reach back across the boundary into the flank.
+# Fixed tokens' peaks_over is searched here (unlike .over_junction_peak): only
+# peaks strictly inside this tract qualify, so a neighbouring tract's peak on a
+# shared boundary (R187E_14 chrXII) is out of reach.
+.interior_junction_peak <- function(f_tok, ctx, side, params) {
+  if (is.null(f_tok) || is.na(f_tok$start) || is.na(f_tok$end)) return(NULL)
+  tol <- min(as.numeric(params$junction_inner_tol_bp %||% 1000L),
+             (f_tok$end - f_tok$start) / 4)
+  if (!is.finite(tol) || tol <= 0) return(NULL)
+  boundary <- if (side == "left") f_tok$start else f_tok$end
+  cands <- .union_peaks(f_tok$peaks_over, list(f_tok$peak_over),
+                        ctx$peaks_over, list(ctx$peak_over))
+  best <- NULL
+  best_d <- Inf
+  for (pk in cands) {
+    et <- normalize_edge_type_label(
+      pk$best_edge_type %||% pk$haplotype_label %||% pk$edge_type %||% NA_character_)
+    if (!isTRUE(et == "binary")) next
+    pos <- .peak_junction_pos(pk, boundary)
+    if (is.null(pos) || is.na(pos)) next
+    d <- if (side == "left") pos - boundary else boundary - pos
+    if (d <= 0 || d > tol) next
+    pk_start <- pk$fused_start_bp %||% pk$peak_start
+    pk_end   <- pk$fused_end_bp   %||% pk$peak_end
+    reaches <- if (side == "left") isTRUE(pk_start < boundary) else isTRUE(pk_end > boundary)
+    if (!reaches) next
+    if (d < best_d) {
+      best   <- pk
+      best_d <- d
+    }
+  }
+  best
 }
 
 # The overlapping peak of `tok` nearest `boundary` on `side` of it, within tol.
@@ -2931,7 +3027,8 @@ rule_subres_tract <- list(
   pk <- .over_junction_peak(f_tok, f_tok$end, "right", tol)
   if (!is.null(pk)) return(pk)
   if (!is.null(right_ctx$peak_left)) return(right_ctx$peak_left)
-  .over_junction_peak(right_ctx, f_tok$end, "right", tol)
+  .over_junction_peak(right_ctx, f_tok$end, "right", tol) %||%
+    .interior_junction_peak(f_tok, right_ctx, "right", params)
 }
 
 # =============================================================================
@@ -3044,7 +3141,23 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
   flank_bp <- as.integer(params$tract_flank_bp %||% 10000L)
   min_snps <- as.integer(params$min_snps_for_peak %||% 2L)
 
+  fb_snps <- as.integer(params$fallback_min_run_snps %||% 2L)
+
   for (i in seq_along(toks)) {
+    # Reads carrying a sub-floor fixed tract's allele at its own SNPs. Such a
+    # tract raises no peak of its own, so R06 reports it from these
+    # (n_state_reads of n_cov_reads covering it) rather than with no support.
+    ti <- toks[[i]]
+    if (ti$type == "F" && !is.na(ti$start) && !is.na(ti$end) &&
+        isTRUE(ti$n_snps < fb_snps) && !is.null(ti$state) && !is.na(ti$state)) {
+      want_ref <- identical(sub("_fixed$", "", ti$state), "REF")
+      fr <- full_read_loh[as.character(chrom) == chain$chrom &
+                            pos >= ti$start & pos <= ti$end,
+                          .(agree = mean(IS_REF == want_ref)), by = read_id]
+      toks[[i]]$n_cov_reads   <- nrow(fr)
+      toks[[i]]$n_state_reads <- sum(fr$agree > 0.5)
+    }
+
     blk <- .loh_block(toks, i, params)
     if (is.null(blk) || length(blk$f_idx) < 2L) next
     if (is.null(blk$li) || is.null(blk$ri))     next
@@ -3081,6 +3194,50 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
       cnt, .is_diploid_tract(f_toks, L, R, params),
       interior = .noise_island_flank(toks, blk$f_idx[1], blk$li, -1L, params) &&
                  .noise_island_flank(toks, blk$f_idx[length(blk$f_idx)], blk$ri, 1L, params))
+
+    # ── The block read as ONE tract at the coarser LOH floor ──────────────
+    # When every tract of the minority state is shorter than
+    # fallback_min_run_snps SNPs, the LOH map at that floor absorbs them as
+    # flicker and the block is a single tract of the majority state. R06 folds
+    # it the same way, but its merged token has no read counts, and the block
+    # counts above are the wrong ones for it: on an alternating run every
+    # flanking homolog differs from SOME tract, so the unconverted homolog
+    # scores as a return. RAD5_05_new_seq chrXVI at min_run_snps 1, REF
+    # 499,673 | ALT 499,915 | REF 499,988-509,682: 24/24 block returns, against
+    # 12/24 when the same span is one REF tract at min_run_snps 2. Measured
+    # here as that one tract (same zones as annotate_tract_read_support) and
+    # carried as block_as_tract for R06's merged token to inherit.
+    states  <- vapply(tracts, `[[`, character(1), "state")
+    nsnp    <- vapply(f_toks, function(t) as.integer(t$n_snps %||% NA_integer_), integer(1))
+    by_st   <- tapply(nsnp, states, sum)
+    major   <- names(by_st)[which.max(by_st)]
+    as_tract <- NULL
+    if (i == blk$f_idx[1] && length(by_st) > 1L && !anyNA(nsnp) &&
+        all(nsnp[states != major] < fb_snps)) {
+      zL <- c(as.integer(max(L$start, blk_start - flank_bp)),
+              as.integer(min(L$end,   blk_start - 1L)))
+      zR <- c(as.integer(max(R$start, blk_end + 1L)),
+              as.integer(min(R$end,   blk_end + flank_bp)))
+      tc <- count_tract_junction_reads(
+        full_read_loh, chain$chrom,
+        tract_start = blk_start, tract_end = blk_end,
+        left_start  = zL[1], left_end  = zL[2],
+        right_start = zR[1], right_end = zR[2],
+        tract_state = major, min_snps = min_snps,
+        match_frac  = as.numeric(params$homog_frac %||% 0.80),
+        del_reads   = unique(unlist(lapply(f_toks, function(t)
+                              t$meta$del_read_ids %||% character(0)))))
+      as_tract <- list(
+        start = as.integer(blk_start), end = as.integer(blk_end), state = major,
+        n_tract_spanning = tc$n_spanning, n_tract_return = tc$n_return,
+        n_tract_switch = tc$n_switch,
+        tract_outcome = .outcome_record(tc, .is_diploid_tract(f_toks, L, R, params),
+                                        interior = oc$interior),
+        tract_read_ids = list(switch = tc$switch_reads, return = tc$return_reads,
+                              uninformative = tc$uninformative_reads,
+                              parental = tc$parental_reads),
+        tract_zone_L = zL, tract_zone_R = zR)
+    }
     for (k in seq_along(blk$f_idx)) {
       ti <- blk$f_idx[k]
       toks[[ti]]$block_outcome    <- oc
@@ -3101,6 +3258,7 @@ annotate_block_read_support <- function(chain, full_read_loh, params) {
                                    as.integer(L$end))
       toks[[ti]]$block_zone_R <- c(as.integer(R$start),
                                    as.integer(min(R$end, R$start + flank_bp - 1L)))
+      if (!is.null(as_tract)) toks[[ti]]$block_as_tract <- as_tract
     }
   }
 
@@ -3668,13 +3826,17 @@ rule_two_binary_flanking <- list(
   },
   fire_fn = function(m, chain, params) {
     tract <- classify_two_binary_junction(m$pk_l, m$pk_r, m$f_tok$state, params)
-    call  <- if (identical(tract$call, "AMBIGUOUS") && identical(tract$reason, "binary_no_pair")) {
+    call  <- if (identical(tract$call, "AMBIGUOUS") &&
+                 tract$reason %in% c("binary_no_pair", "pair_edge:unresolvable")) {
       # Both flanking peaks are independently self-classifying ("binary"),
       # confirming a real LOH tract bridges this gap — it's just wider than
       # any read can span, so no read evidence exists to call NCO vs CO.
       # Report the confirmed gene-conversion-type event instead of leaving it
       # fully ambiguous (or letting the peaks fall through separately to
-      # reconcile()'s peak-only "_subres" path).
+      # reconcile()'s peak-only "_subres" path). "pair_edge:unresolvable" is
+      # the same situation reached through compute_peak_pairs(): the two peaks
+      # were paired, but no read crossed both, so the pair has no edge type
+      # (RAD5_05 chrXVI 499,673-509,682: one read spans the 10 kb tract).
       "GC_UNRESOLVED"
     } else {
       switch(tract$call,
@@ -4584,10 +4746,40 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   })
 
   list(
-    events          = c(all_events, uncat_peak_events),
+    events          = .note_interior_flips(c(all_events, uncat_peak_events)),
     unclaimed_loh   = unclaimed_loh,
     unclaimed_peaks = unclaimed_peaks
   )
+}
+
+# An R06 POSSIBLE_GC fragment is a sub-floor opposite-state flip inside a
+# larger tract, reported as its own row. The event called on that tract is
+# told about it too, so the flip is visible from the event that spans it
+# (RAD5_05_new_seq chrXVI at min_run 1: ALT at 499,915 on all 53 reads, inside
+# NCO_GC 499,673-509,682). The smallest event strictly containing the flip is
+# the host; the row itself is kept.
+.note_interior_flips <- function(events) {
+  if (length(events) < 2L) return(events)
+  cls   <- vapply(events, function(e) e$event_class %||% "", character(1))
+  notes <- vapply(events, function(e) e$notes %||% "", character(1))
+  flips <- which(cls == "POSSIBLE_GC" & startsWith(notes, "small_opp_fragment"))
+  for (i in flips) {
+    f <- events[[i]]
+    if (anyNA(c(f$start, f$end))) next
+    host <- NA_integer_; best <- Inf
+    for (h in seq_along(events)) {
+      e <- events[[h]]
+      if (h == i || !identical(e$chrom, f$chrom) || anyNA(c(e$start, e$end))) next
+      w <- e$end - e$start
+      if (e$start < f$start && e$end > f$end && w < best) { host <- h; best <- w }
+    }
+    if (is.na(host)) next
+    span <- if (f$start == f$end) as.character(f$start) else paste0(f$start, "-", f$end)
+    hn <- events[[host]]$notes %||% ""
+    events[[host]]$notes <- paste0(hn, if (nzchar(hn)) "; " else "",
+                                   "interior_flip=", span, " (", f$n_support, " reads)")
+  }
+  events
 }
 
 # =============================================================================

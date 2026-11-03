@@ -438,7 +438,9 @@ results$ploidy_map  <- ploidy_map
 results$snp_peaks <- label_snp_peaks_haplotypes(
   results$snp_peaks, results$rt_df, results$transition_pos,
   zone_min_snps = opts[["min-run"]],
-  full_read_loh = results$full_read_loh
+  full_read_loh = results$full_read_loh,
+  # An undefined peak re-typed at min_run 2 must reach the peak height floor.
+  fallback_min_support = as.integer(opts[["min-peak-height"]])
 )
 
 

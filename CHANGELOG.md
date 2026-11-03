@@ -4,6 +4,64 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.9.3] - 2026-11-02
+
+### min-run 1: tract edges hidden by a single flipped SNP
+
+On RAD5_05_new_seq chrXVI the REF tract 499,673-509,682 carries one SNP
+(499,915) that is ALT on every read, both homologs. At `--min-run 2
+--min-run-snps 2` it is filtered out and the tract is called `NCO_GC` (12/24
+reads returned). At `--min-run 1 --min-run-snps 1` it is kept, and three things
+went wrong: the left-edge peak sits on it and is `undefined` (53 reads, both
+homologs flipping); R06 folds it into the tract but the merged tract loses its
+read counts, so the `NCO_GC` carried peak support 24 instead of 12; and the
+flip itself was reported as `POSSIBLE_GC` with `n_support` 0.
+
+- **Peak fallback.** `classify_peak_haplotype()` retries an `undefined` peak
+  with its reads re-smoothed at min-run 2 (`.resmooth_peak_reads()`), and
+  adopts the result only if it is a binary edge with at least
+  `--min-peak-height` switching reads (`fallback_min_support`, plumbed from the
+  CLI and the app). The 499,915 peak becomes binary, 23 reads. Without both
+  limits, noisy runs (Qi Spo11, SRR_5006 at min-run 1) re-typed hundreds of
+  1-read noise peaks as gene conversions. Peaks carry `label_min_run`.
+- **R06 does not give a fragment a coarser peak.** A peak typed at a min-run
+  above the fragment's SNP count cannot describe it (the fragment is filtered
+  out at that resolution); the fragment is absorbed without it and the peak
+  stays with the host tract's edge.
+- **LOH fallback for read counts.** `annotate_block_read_support()` also
+  measures a block as ONE tract of its majority state when every
+  minority-state tract is below `fallback_min_run_snps` (2) SNPs, i.e. the
+  tract the LOH map would call at min-run-snps 2 (`block_as_tract`). R06's
+  merged token inherits those counts when it rebuilds exactly that span. The
+  plain block counts are wrong here: on an alternating run the unconverted
+  homolog scores as a return (24/24 vs 12/24).
+- **The flip is reported, with support.** R06's `POSSIBLE_GC` fragment row now
+  has `n_support` = reads carrying its allele (`53/53 reads ALT; within
+  REF_fixed 499673-509682`), and the host event's notes gain
+  `interior_flip=499915 (53 reads)`.
+- **Junction peaks just inside a tract** (from branch
+  fix/interior-junction-peak): `.interior_junction_peak()` accepts a binary
+  peak up to `junction_inner_tol_bp` (1000 bp, at most a quarter of the tract)
+  inside the boundary whose window reaches back across it, and R11 maps
+  `pair_edge:unresolvable` to `GC_UNRESOLVED` like `binary_no_pair`. Needed
+  for the original RAD5_05 reads, where the fallback peak lands 242 bp inside.
+
+Effect on test_data (50 runs incl. min-run 1 runs of the real sets and both
+RAD5_05 read sets), against 0.9.2:
+
+| run | 0.9.2 | 0.9.3 |
+|---|---|---|
+| RAD5_05_new_seq mnr1 chrXVI 499,673-509,682 | NCO_GC 24 (peak) + POSSIBLE_GC 499,915 n=0 | NCO_GC 12/24 returned + POSSIBLE_GC n=53, host noted |
+| RAD5_05 mnr2 / mnr1 same tract | GC_ONE_SIDED | GC_UNRESOLVED two_binary_flanking (+ flip row at mnr1) |
+| RAD5_04 mnr1 chrIX 26,863-68,589 | CO_TERM_PROBABLE | CO_TERM, as at mnr2 |
+| Qi Spo11-16 mnr1 chrXI | CO_GC 378,089-379,176 + composite block | GC_UNRESOLVED 368,904-435,067, as at mnr2 |
+| Qi Spo11-30 mnr1 chrXIII 611,899-630,357 | CO_GC 2/3 reads | GC_ONE_SIDED, as at mnr2 |
+| Qi Spo11-88 mnr1 chrX (MA-5) | 6 fragment events | CO_GC 217,367-274,203, as at mnr2 |
+| RAD5_02/04/15 two-binary tracts | AMBIGUOUS(pair_edge:unresolvable) | GC_UNRESOLVED |
+
+Plus `binary` replacing `undefined` in some events' `peak_edge_types`. Every
+other table is byte-identical; RAD5_05_new_seq at min-run 2 is unchanged.
+
 ## [0.9.2] - 2026-10-26
 
 ### Shiny: uploaded inputs are copied into a temp dir

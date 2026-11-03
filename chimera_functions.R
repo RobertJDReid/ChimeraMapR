@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.9.2"
+APP_VERSION <- "0.9.3"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -2388,7 +2388,96 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
                                     full_read_loh   = NULL,
                                     phase_min_span  = 5L,
                                     phase_switch_hi = 0.80,
-                                    phase_switch_lo = 0.20) {
+                                    phase_switch_lo = 0.20,
+                                    fallback_min_run = 2L,
+                                    fallback_min_support = 5L) {
+  res <- .classify_peak_haplotype_once(pk, chr_name, rt_df, touching_ids,
+                                       zone_min_snps, full_read_loh,
+                                       phase_min_span, phase_switch_hi,
+                                       phase_switch_lo)
+  res$label_min_run <- as.integer(zone_min_snps)
+
+  # ── Coarser-resolution fallback for an undefined peak ───────────────────
+  # Below fallback_min_run every single-SNP allele run is kept. A single SNP
+  # whose allele differs on BOTH homologs (fixed opposite inside a tract, a
+  # miscalled site) then makes every read touching it chimeric, the smoothed
+  # transition peak lands on it, and the pooled window reads
+  # HET-REF-ALT-REF: the real edge's switching reads are mixed with the other
+  # homolog's two flips and the peak is "undefined". At fallback_min_run the
+  # flip is filtered out of each read, as it is in the main pipeline at that
+  # setting, and the same peak is a clean binary edge. RAD5_05_new_seq chrXVI:
+  # the left edge of REF 499,673-509,682 is undefined at min_run 1 (53 reads
+  # at the ALT SNP 499,915) and binary at min_run 2 (23 reads).
+  #
+  # The peak's reads are re-smoothed at fallback_min_run and re-classified;
+  # the result is adopted only if it resolves. label_min_run records which
+  # resolution typed the peak. The flip itself is NOT discarded: the LOH map
+  # still reports it, and the chain rules see it as before.
+  if (identical(res$label, "undefined") && !is.null(fallback_min_run) &&
+      !is.na(fallback_min_run) && zone_min_snps < fallback_min_run) {
+    rs <- .resmooth_peak_reads(rt_df, chr_name, touching_ids, fallback_min_run,
+                               pk$peak_start, pk$peak_end)
+    if (!is.null(rs)) {
+      res2 <- .classify_peak_haplotype_once(pk, chr_name, rs$rt_df, rs$touching_ids,
+                                            as.integer(fallback_min_run), full_read_loh,
+                                            phase_min_span, phase_switch_hi,
+                                            phase_switch_lo)
+      # Only a binary edge is taken. That is the case the flip hides; any other
+      # label at the coarser resolution is a different claim, and on noisy
+      # reads (Qi Spo11, SRR_5006 at min_run 1) re-typing undefined peaks as
+      # gene_conversion / internal_crossover turned hundreds of 1-read noise
+      # peaks into NCO_GC_subres / CROSSOVER_NO_TRACT calls. "undefined" is
+      # what keeps them out at min_run 1.
+      #
+      # It must also have the support a peak needs to exist at all
+      # (fallback_min_support, the run's --min-peak-height): a binary edge seen
+      # by one to three reads at the coarser resolution would never have been
+      # a peak there, and adopting it demoted CO_TERM_PROBABLE / tract-read
+      # calls on Qi Spo11 and SRR_5006 to 0-1-read peak calls.
+      if (res2$label %in% c("binary", "compound_binary") &&
+          isTRUE(res2$n_support >= fallback_min_support)) {
+        res2$label_min_run <- as.integer(fallback_min_run)
+        return(res2)
+      }
+    }
+  }
+  res
+}
+
+# Re-apply the chimeric-read run-length filter at min_run to the reads touching
+# a peak (see run_chimera_analysis step 3): drop allele runs shorter than
+# min_run, keep reads that are still chimeric, and keep those with a run
+# boundary inside the peak window. rt_df holds every SNP call of each chimeric
+# read at the pipeline's own min_run, so a coarser min_run can be rebuilt from
+# it. Returns list(rt_df, touching_ids), or NULL when no read qualifies.
+.resmooth_peak_reads <- function(rt_df, chr_name, touching_ids, min_run,
+                                 win_start, win_end) {
+  if (is.null(rt_df) || !"ALLELE" %in% names(rt_df)) return(NULL)
+  rd <- rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name]
+  if (nrow(rd) == 0L) return(NULL)
+  rd <- rd[order(read_id, pos)]
+  rd[, .runs := rle_helper(ALLELE), by = read_id]
+  rd <- rd[.runs >= min_run]
+  if (nrow(rd) == 0L) return(NULL)
+  rd[, .runs := rle_helper(ALLELE), by = read_id]
+  rd <- rd[rd[, .I[.N > min_run & .runs[1] != .N], by = read_id]$V1]
+  if (nrow(rd) == 0L) return(NULL)
+  sw <- rd[, {
+    chg <- which(ALLELE[-1L] != ALLELE[-.N]) + 1L
+    .(hit = any(pos[chg] >= win_start & pos[chg - 1L] <= win_end))
+  }, by = read_id]
+  ids <- sw[hit == TRUE, read_id]
+  if (length(ids) == 0L) return(NULL)
+  rd[, .runs := NULL]
+  list(rt_df = rd, touching_ids = ids)
+}
+
+.classify_peak_haplotype_once <- function(pk, chr_name, rt_df, touching_ids,
+                                          zone_min_snps   = 2L,
+                                          full_read_loh   = NULL,
+                                          phase_min_span  = 5L,
+                                          phase_switch_hi = 0.80,
+                                          phase_switch_lo = 0.20) {
 
   snp_p    <- pk$snp_pos
   pk_start <- pk$peak_start
@@ -3459,7 +3548,8 @@ decide_fusion_mode <- function(edge_type, jaccard, jaccard_threshold,
 # ---------------------------------------------------------------------------
 label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
                                        zone_min_snps = 2L,
-                                       full_read_loh = NULL) {
+                                       full_read_loh = NULL,
+                                       fallback_min_support = 5L) {
   out <- copy(snp_peaks)
   if (!"haplotype_label"    %in% names(out)) out[, haplotype_label    := NA_character_]
   if (!"n_read_support"     %in% names(out)) out[, n_read_support     := NA_integer_]
@@ -3467,6 +3557,7 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
   if (!"phase_switch_frac"  %in% names(out)) out[, phase_switch_frac  := NA_real_]
   if (!"phase_island_start" %in% names(out)) out[, phase_island_start := NA_integer_]
   if (!"phase_island_end"   %in% names(out)) out[, phase_island_end   := NA_integer_]
+  if (!"label_min_run"      %in% names(out)) out[, label_min_run      := NA_integer_]
   if (nrow(out) == 0) return(out)
 
   out[, .row_idx := .I]
@@ -3488,14 +3579,16 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
         next
       }
       .hap <- classify_peak_haplotype(.pk, .chr, rt_df, .touching, zone_min_snps,
-                                      full_read_loh = full_read_loh)
+                                      full_read_loh = full_read_loh,
+                                      fallback_min_support = fallback_min_support)
       out[.row_idx == .pk$.row_idx, `:=`(
         haplotype_label    = .hap$label,
         n_read_support     = .hap$n_support,
         phase_call         = .hap$phase_call   %||% NA_character_,
         phase_switch_frac  = .hap$phase_frac   %||% NA_real_,
         phase_island_start = .hap$island_start %||% NA_integer_,
-        phase_island_end   = .hap$island_end   %||% NA_integer_
+        phase_island_end   = .hap$island_end   %||% NA_integer_,
+        label_min_run      = .hap$label_min_run %||% NA_integer_
       )]
     }
   }
@@ -3518,7 +3611,8 @@ compute_peak_pairs <- function(snp_peaks,
                                zone_min_snps      = 2L,
                                supervised_override = NULL,
                                homog_frac          = FUSION_HEURISTICS$homog_frac,
-                               full_read_loh       = NULL) {
+                               full_read_loh       = NULL,
+                               fallback_min_support = 5L) {
 
   if (is.null(snp_peaks) || nrow(snp_peaks) == 0)
     return(list(peak_pairs = NULL, fused_peaks = NULL, snp_peaks = snp_peaks))
@@ -3535,7 +3629,8 @@ compute_peak_pairs <- function(snp_peaks,
   # haplotype_label (e.g. from the app's plot-building loop or the CLI's
   # prior step), so callers that do their own labeling first don't pay twice.
   peaks_dt <- label_snp_peaks_haplotypes(peaks_dt, rt_df, transition_pos, zone_min_snps,
-                                         full_read_loh = full_read_loh)
+                                         full_read_loh = full_read_loh,
+                                         fallback_min_support = fallback_min_support)
 
   all_pairs <- list()
 
