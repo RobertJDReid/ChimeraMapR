@@ -379,6 +379,13 @@ The same key is also available as [`OVERVIEW_PLOT_KEY.md`](OVERVIEW_PLOT_KEY.md)
 
 ---
 
+## To do
+
+- [ ] **Allele-ratio calibration** — measure genome-wide REF/ALT read balance and use it to correct for allele-specific mapping or sequencing bias, as a cross-check for ploidy, LOH and deletion calls (after COmapper's Col/Ler ratio correction)
+- [ ] **Per-molecule frequency mode** — for pooled meiotic products (spores or gametes) rather than a clonal isolate, report switching molecules per Gb and per parental molecule, without requiring several reads to support each event as peak calling does
+
+---
+
 ## License
 
 MIT License © 2026 Robert J. D. Reid
