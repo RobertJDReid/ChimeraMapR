@@ -3923,6 +3923,34 @@ rule_peak_direct <- list(
   }
 )
 
+# Outcome of a fixed tract from the reads that cross both of its junctions,
+# by the same tests R11c applies: enough of the spanning reads must be
+# informative (tract_read_min_frac) and the informative ones must agree
+# (homog_frac). NULL when the counts are absent or say nothing decisive.
+.tract_read_outcome <- function(tok, params) {
+  n_ret  <- tok$n_tract_return   %||% NA_integer_
+  n_swi  <- tok$n_tract_switch   %||% NA_integer_
+  n_span <- tok$n_tract_spanning %||% NA_integer_
+  if (is.na(n_ret) || is.na(n_swi)) return(NULL)
+  n_inf <- as.integer(n_ret + n_swi)
+  if (n_inf == 0L) return(NULL)
+  min_fr <- as.numeric(params$tract_read_min_frac %||% 0)
+  if (!is.na(n_span) && n_span > 0L && min_fr > 0 && n_inf / n_span < min_fr)
+    return(NULL)
+  homog <- as.numeric(params$homog_frac %||% 0.80)
+  if (n_ret / n_inf >= homog)
+    return(list(call = "NCO_GC", n_support = as.integer(n_ret),
+                support_kind = "tract_return",
+                note = paste0(n_ret, "/", n_span,
+                              " junction-spanning reads returned across tract")))
+  if (n_swi / n_inf >= homog)
+    return(list(call = "CO_GC", n_support = as.integer(n_swi),
+                support_kind = "tract_switch",
+                note = paste0(n_swi, "/", n_span,
+                              " junction-spanning reads switched across tract")))
+  NULL
+}
+
 # ── Rule R11: Two binary flanking peaks (H-[F]-H, G-transparent) ──────────────
 # Fires when an interstitial F is bracketed by a binary peak at each junction.
 # G gaps between H and F are treated as transparent (the rule skips them).
@@ -3980,12 +4008,31 @@ rule_two_binary_flanking <- list(
         paste0("AMBIGUOUS(", tract$reason, ")")
       )
     }
+    n_support    <- tract$n_support
+    support_kind <- tract$support_kind
+    notes        <- paste0("two_binary_flanking; state=", m$f_tok$state)
+
+    # When the pair itself could not settle the outcome, defer to the reads
+    # that cross the whole tract, as R10 and R11c do. Without this an R11
+    # match outranked R11c and turned a tract whose spanning reads plainly
+    # returned into AMBIGUOUS / GC_UNRESOLVED.
+    if (isTRUE(tract$reason %in% c("pair_edge:ambiguous", "pair_edge:unresolvable",
+                                   "binary_no_pair"))) {
+      rd <- .tract_read_outcome(m$f_tok, params)
+      if (!is.null(rd)) {
+        call         <- rd$call
+        n_support    <- rd$n_support
+        support_kind <- rd$support_kind
+        notes        <- paste0(notes, "; ", tract$reason, ", ", rd$note)
+      }
+    }
+
     ev <- .make_event(call, chain$chrom,
                       list(m$f_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),
-                      n_support = tract$n_support,
-                      support_kind = tract$support_kind,
-                      notes = paste0("two_binary_flanking; state=", m$f_tok$state))
+                      n_support = n_support,
+                      support_kind = support_kind,
+                      notes = notes)
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk_l, m$pk_r), loh = list(m$f_tok)))
   }

@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.9.4"
+APP_VERSION <- "0.9.5"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -3814,6 +3814,18 @@ compute_peak_pairs <- function(snp_peaks,
       zone_r_end   <- if (!is.null(next_pk) && !is.na(next_pk$snp_pos))
         next_pk$snp_pos - 1 else Inf
 
+      # A peak typed through the label fallback (classify_peak_haplotype's
+      # fallback_min_run) was only resolvable at the coarser resolution, so
+      # its pair's zones are read at that resolution too. At --min-run 1 a
+      # zone could otherwise be called from one SNP, and at Q8-12 a single
+      # base error turned reads chimeric at both peaks into X-X-X patterns
+      # that pushed a clean gene_conversion pair to "ambiguous" (SYNv1 2 kb
+      # q10 sweep: 154 of 165 pair_edge:ambiguous NCO tracts).
+      pair_zms <- max(c(as.integer(zone_min_snps),
+                        suppressWarnings(as.integer(pk_a$label_min_run %||% NA_integer_)),
+                        suppressWarnings(as.integer(pk_b$label_min_run %||% NA_integer_))),
+                      na.rm = TRUE)
+
       n_spanning <- 0L
       edge_type  <- "unresolvable"
       n_shared   <- length(shared_reads)
@@ -3845,9 +3857,9 @@ compute_peak_pairs <- function(snp_peaks,
         if (nrow(span_df) > 0) {
           state_list <- span_df[, {
             sL <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
-                                      zone_l_start, zone_l_end, zone_min_snps)
+                                      zone_l_start, zone_l_end, pair_zms)
             sR <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
-                                      zone_r_start, zone_r_end, zone_min_snps)
+                                      zone_r_start, zone_r_end, pair_zms)
             .(state_L = sL, state_M = NA_character_, state_R = sR)
           }, by = read_id]
           # Only reads the classifier can actually use. Counting every read
@@ -3872,17 +3884,33 @@ compute_peak_pairs <- function(snp_peaks,
         jaccard  <- pre_jaccard
 
         spanning_ids <- shared_reads
+        span_src     <- chr_rt
+
+        # A fallback-typed peak: re-smooth the shared reads at that resolution
+        # (as .resmooth_peak_reads does for the label) and keep only reads that
+        # still switch inside BOTH peak windows. A one-SNP flip at each peak
+        # made the unconverted homolog look chimeric at both, and its
+        # ALT-ALT-ALT / REF-REF-REF reads then outvoted the returns.
+        if (pair_zms > zone_min_snps && length(spanning_ids) > 0) {
+          rs_a <- .resmooth_peak_reads(chr_rt, chr_name, spanning_ids, pair_zms,
+                                       pk_a$peak_start, pk_a$peak_end)
+          rs_b <- .resmooth_peak_reads(chr_rt, chr_name, spanning_ids, pair_zms,
+                                       pk_b$peak_start, pk_b$peak_end)
+          spanning_ids <- if (is.null(rs_a) || is.null(rs_b)) character(0)
+                          else intersect(rs_a$touching_ids, rs_b$touching_ids)
+          if (length(spanning_ids) > 0) span_src <- rs_a$rt_df
+        }
 
         if (length(spanning_ids) > 0) {
-          span_df <- chr_rt[read_id %in% spanning_ids]
+          span_df <- span_src[read_id %in% spanning_ids]
 
           if (nrow(span_df) > 0) {
             state_list <- span_df[, {
               sL <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
-                                        zone_l_start, zone_l_end, zone_min_snps)
-              sM <- classify_zone_state(pos, IS_REF, zone_m_start, zone_m_end, zone_min_snps)
+                                        zone_l_start, zone_l_end, pair_zms)
+              sM <- classify_zone_state(pos, IS_REF, zone_m_start, zone_m_end, pair_zms)
               sR <- classify_zone_state(pos[HET_OK], IS_REF[HET_OK],
-                                        zone_r_start, zone_r_end, zone_min_snps)
+                                        zone_r_start, zone_r_end, pair_zms)
               .(state_L = sL, state_M = sM, state_R = sR)
             }, by = read_id]
 

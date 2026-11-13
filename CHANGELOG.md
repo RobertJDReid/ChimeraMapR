@@ -4,6 +4,36 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.9.5] - 2026-11-13
+
+### Fallback-typed junction peaks: pair edges read at the same resolution
+
+At `--min-run 1`, correct NCO calls for 0.7–5 kb tracts at Q8–12 fell by 5–12
+points in the simulated sweep (0.9.1 → 0.9.4), almost all to
+`AMBIGUOUS(pair_edge:ambiguous)` and `GC_UNRESOLVED`. The cause was the 0.9.3
+min-run-2 label fallback (73e6c28): it typed a junction peak "binary" from
+reads re-smoothed at min-run 2, so R11 now matched ahead of R11c, but
+`compute_peak_pairs()` still classified the pair's zones from the unsmoothed
+min-run-1 reads. A one-SNP base error at each peak made the unconverted
+homolog look chimeric at both, and its ALT-ALT-ALT / REF-REF-REF reads
+(3 of 11 on SYNv1 2 kb Q10 seed 1, pair 118,359–120,386) pushed a clean
+gene-conversion pair to "ambiguous". 154 of the 165 such calls in the sweep
+had a fallback-typed flanking peak.
+
+- **`compute_peak_pairs()`**: when either peak carries `label_min_run` above
+  `zone_min_snps`, the pair's shared reads are re-smoothed at that min-run
+  (`.resmooth_peak_reads()`), only reads that still switch inside both peak
+  windows are kept, and zones need that many SNPs.
+- **R11 `two_binary_flanking`**: when the pair resolves to
+  `pair_edge:ambiguous`, `pair_edge:unresolvable` or `binary_no_pair`, the
+  call defers to the tract's own both-junction read counts by R11c's tests
+  (`tract_read_min_frac`, `homog_frac`) via `.tract_read_outcome()`: returns
+  → NCO_GC, switches → CO_GC. Otherwise the previous call stands.
+
+SYNv1 2 kb Q10 seed 1 (min-run 1): 2 `AMBIGUOUS(pair_edge:ambiguous)` and
+1 `GC_UNRESOLVED` → NCO_GC. The q8 SYNv1 control and 20-swap 100 bp sets
+and SPO11-28 sac_bq7 (min-run 2) are unchanged.
+
 ## [0.9.4] - 2026-11-13
 
 ### Event table: what n_support counts, and the separate lines of evidence
