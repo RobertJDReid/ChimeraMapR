@@ -655,6 +655,12 @@ if (run_chain) {
           end             = as.integer(ev$end),
           length_bp       = as.integer(ev$length_bp),
           n_support       = as.integer(ev$n_support),
+          support_kind    = ev$support_kind     %||% NA_character_,
+          n_junction_L    = as.integer(ev$n_junction_L     %||% NA_integer_),
+          n_junction_R    = as.integer(ev$n_junction_R     %||% NA_integer_),
+          n_tract_switch  = as.integer(ev$n_tract_switch   %||% NA_integer_),
+          n_tract_return  = as.integer(ev$n_tract_return   %||% NA_integer_),
+          n_tract_parental = as.integer(ev$n_tract_parental %||% NA_integer_),
           peak_edge_types = ev$peak_edge_types %||% NA_character_,
           evidence        = ev$evidence %||% NA_character_,
           notes           = ev$notes %||% ""
@@ -665,7 +671,10 @@ if (run_chain) {
       return(data.table::data.table(
         event_class=character(), chrom=character(),
         start=integer(), end=integer(), length_bp=integer(),
-        n_support=integer(), peak_edge_types=character(),
+        n_support=integer(), support_kind=character(),
+        n_junction_L=integer(), n_junction_R=integer(),
+        n_tract_switch=integer(), n_tract_return=integer(),
+        n_tract_parental=integer(), peak_edge_types=character(),
         evidence=character(), notes=character()
       ))
     data.table::rbindlist(rows, fill = TRUE)

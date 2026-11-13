@@ -471,7 +471,7 @@
         <text class="s" x="66" y="1394">CO_TERM_GAPPED, TCO_CAPTURED_TCO</text>
         <text class="cc" x="400" y="1362">high, but only above a floor</text>
         <text class="s" x="400" y="1380">tract-read support needs n &#8805; 4;</text>
-        <text class="s" x="400" y="1394">a _subres peak needs n &#8805; 3</text>
+        <text class="s" x="400" y="1394">a _subres peak needs n &#8805; 3 and its spanning-read share</text>
         <text class="cr" x="760" y="1362">review</text>
         <text class="s" x="760" y="1380">every probable, one-sided, unresolved,</text>
         <text class="s" x="760" y="1394">ambiguous or deletion call</text>
@@ -818,6 +818,8 @@
         <tr><td class="k">diploid_depth_range</td><td class="v">0.75–1.25</td></tr>
         <tr><td class="k">diploid_balance_tol</td><td class="v">0.12</td></tr>
         <tr><td class="k">tract_flank_bp</td><td class="v">10,000</td><td>how far either side of a tract the flanking haplotype state is read</td></tr>
+        <tr><td class="k">peak_min_share</td><td class="v">0.30</td><td>share of the spanning reads a peak-only NCO_GC_subres must show, or it is capped at review</td></tr>
+        <tr><td class="k">peak_flank_snps</td><td class="v">5</td><td>a peak-only event's flank zones widen past tract_flank_bp (within the HET token) until each holds this many SNPs</td></tr>
         <tr><td class="k">edge_pair_max_island_snps</td><td class="v">10</td><td rowspan="3">which HET islands R11e may bridge: at most this many SNPs, REF fraction leaning toward the tract by at least the margin from 0.5, and together no more than this share of the run's SNPs</td></tr>
         <tr><td class="k">edge_pair_island_margin</td><td class="v">0.05</td></tr>
         <tr><td class="k">edge_pair_max_island_frac</td><td class="v">0.10</td></tr>
@@ -849,9 +851,13 @@
     <div>
       <h3>Unclaimed peaks</h3>
       <p>A peak that never attached to a token is run through the same classifier the rules
-      use. If it resolves it becomes a <span class="mono">_subres</span> event, scored high at
-      or above min_span reads. If it does not — binary singleton, independent reads, no edge
-      type — it stays in Other events with the reason attached.</p>
+      use. A gene_conversion or internal_crossover peak needs min_span reads of its own,
+      or it stays unclaimed (<span class="mono">low_peak_support</span>). If it resolves it becomes a
+      <span class="mono">_subres</span> event (or <span class="mono">CROSSOVER_NO_TRACT</span>), weighed
+      against the reads spanning the site: a conversion below peak_min_share (0.30) of them,
+      or a crossover below co_min_recomb_frac (0.5), is capped at review. If it does not
+      resolve — binary singleton, independent reads, no edge type — it stays in Other events
+      with the reason attached.</p>
     </div>
     <div>
       <h3>Nothing is reported twice</h3>

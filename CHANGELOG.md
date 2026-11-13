@@ -4,6 +4,118 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.9.4] - 2026-11-13
+
+### Event table: what n_support counts, and the separate lines of evidence
+
+`n_support` came from about ten different counts depending on the rule: reads
+switching at one junction peak, classifiable reads across a peak pair, reads
+crossing both junctions of the tract, all spanning reads, parental reads,
+deleted reads, and sums or minimums of these. Six columns now say which, and
+give the read evidence separately:
+
+- **`support_kind`**: what `n_support` counts for that row (README, "Read-support
+  columns in the event table").
+- **`n_junction_L` / `n_junction_R`**: each junction peak's own read count
+  (`.junction_support()`, from the per-constituent counts now kept on fused
+  peak groups as `sub_peak_n_read`).
+- **`n_tract_switch` / `n_tract_return` / `n_tract_parental`**: the
+  both-junction outcome counts from `count_tract_junction_reads()`, until now
+  only in the chain-token CSV.
+
+Peaks carry `n_read_support_kind` from `classify_peak_haplotype()`, and chain
+peaks `n_spanning_kind` (`pair_spanning`, or the peak's own kind when it never
+paired). The internal `tract_reads` / `parental_reads` labels are replaced by
+the finer kinds; `build_event_table()` gates on `TRACT_SUPPORT_KINDS`.
+
+Labelling alone changes no call, `n_support` value or confidence: across 50
+test_data runs (min-run 1 and 2) every pre-existing column matched 0.9.3
+before the phase-rescue change below.
+
+### Phase-rescue NCO needs returning reads
+
+`resolve_undefined_by_phase()` called an undefined peak's fixed island NCO
+whenever its spanning reads did not switch homolog (switch fraction <= 0.2),
+and reported every spanning read as support (`phase_spanning`). A low switch
+fraction only rules out a crossover. At min-run 1, single SNPs fixed in the
+consensus raise peaks of their own, and the rescue turned them into
+`NCO_GC_subres` calls by the hundred on SRR_5006 and Qi Spo11, nearly all
+rated high.
+
+- **Returning reads required.** Non-switching reads are now split into
+  returning (the other allele on both flanks, the island allele across it) and
+  parental (the island allele throughout), with the same in-island test as
+  `count_tract_junction_reads()`. NCO needs `min_return` (2) returning reads
+  making up `min_return_frac` (0.2) of the non-switching ones. Support is the
+  returning reads (`phase_return`). Of the 328 rescued islands in the noisy
+  runs, 156 had no returning read and 15 had under 10%; the rest sat at
+  20-60%, as do the SYNv3 ground-truth tracts. Peaks carry `phase_n_return`
+  and `phase_n_parental`.
+- **reconcile() keeps the island.** Peak-only events now get the rescued
+  island span and the `phase_switch_frac=` note. The peak table `reconcile()`
+  built had neither field, so every rescued event was a point with no note.
+
+The returning-read test does not separate a one-SNP conversion from a SNP that
+is not heterozygous in the cross: both read as half returning, half parental.
+
+Across the 50 runs, `NCO_GC_subres` drops from 484 to 387 (high 463 -> 365),
+all in SRR_5006 and Qi Spo11. Chain calls change only around formerly rescued
+peaks in those runs, mostly `GC_UNRESOLVED` review rows. RAD5 calls at min-run
+2 and the SYNv3 calls are unchanged; elsewhere only `n_junction_*` values and
+rescued-event spans or notes move.
+
+### Peak-only events weighed against their spanning reads
+
+The events `reconcile()` promotes from unclaimed peaks are `NCO_GC_subres`,
+`CO_GC_subres` and `CROSSOVER_NO_TRACT`. Apart from a note on
+`CROSSOVER_NO_TRACT`, these carried no count of the reads that span the site
+without supporting the call. They were rated high on `n_support >= min_span`
+alone.
+
+- **No event without supporting reads.** A window that is HET throughout pools
+  to a single HET run, which `classify_run_pattern()` labels
+  `internal_crossover`. `classify_tract()` reads a 0 count as "no pair count"
+  and trusts that label, so peaks with no switching read became
+  `CROSSOVER_NO_TRACT`. A gene_conversion or internal_crossover peak now needs
+  `min_span` of its own reads, or it stays unclaimed (`low_peak_support`).
+- **Spanning reads fill the tract columns.** `.peak_only_read_check()`
+  (replacing `.crossover_read_check()`, and now applied to every peak-only
+  event) counts reads with 2 or more SNPs on each side of the site.
+  - Conversions: `n_tract_return` is the peak's supporting reads and
+    `n_tract_parental` the remaining spanning reads.
+  - Crossovers: `n_tract_switch` and `n_tract_parental` are the switched and
+    same-homolog reads.
+  - Each side reaches `tract_flank_bp`, or further to take in the nearest
+    `peak_flank_snps` (new parameter, 5) SNPs. A fixed window found no read
+    beside a SNP gap. For SPO11-28 (SRR37680460, sac_bq7), chrXV 544,353
+    follows an 11.4 kb gap: a 10 kb window counted 0 spanning reads, while
+    the widened one counts 15 switched and 1 same-homolog.
+  - The zones stop at the ends of the HET token holding the event, as before.
+  - With fewer than `outcome_min_reads` spanning reads, the columns stay NA
+    and the notes give the count.
+- **Share gate.** An `NCO_GC_subres` whose supporting reads are under
+  `peak_min_share` (new parameter, 0.30) of the spanning reads is capped at
+  review. The crossover cap at `co_min_recomb_frac` (0.5) now also covers
+  `CO_GC_subres`.
+- **`n_junction_L` / `n_junction_R`** are left empty for a single-peak event,
+  where they only repeated `n_support`.
+
+On the q8 SYNv1 simulations (min-run 1, min-run-snps 1):
+
+- **Control (0 swaps):** 6 events -> 4. Both `CROSSOVER_NO_TRACT` calls are
+  gone (0 switching reads). The three `NCO_GC_subres` drop to review at
+  shares 0.10-0.26.
+- **20 swaps of 100 bp:** 17 events -> 9 (high 9 -> 8). All 8
+  `CROSSOVER_NO_TRACT` calls were false positives with 0-1 supporting reads,
+  and all are gone. The false
+  `NCO_GC_subres` at 509,107 (0.14) drops to review. The four true peak-only
+  conversions stay high at 0.35-0.50. Calls with tract evidence are unchanged.
+
+SPO11-28 (SRR37680460, sac_bq7) with the paper settings (min-run 2, min-run-snps
+2, baseq 7, peak height 3, peak frac 0.25) keeps 20 of its 22 calls unchanged
+from main. The two peak-only `gc_pattern` conversions, chrII 485,396 (9 of 37,
+share 0.24) and chrX 322,729 (12 of 42, share 0.29), drop from high to review.
+
 ## [0.9.3] - 2026-11-02
 
 ### min-run 1: tract edges hidden by a single flipped SNP

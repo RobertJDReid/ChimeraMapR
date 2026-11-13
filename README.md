@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.9.3_
+_version 0.9.4_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -330,6 +330,38 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 | Recombination event table | CSV | Called events (crossover, terminal crossover, gene conversion, ambiguous, etc.) with confidence level |
 | Chain objects | RDS | Intermediate chain-analysis objects for the Recombination Events tab |
 | Chimeric read IDs | TXT | One read ID per line, for use with `samtools view -N` |
+
+#### Read-support columns in the event table
+
+`n_support` is the headline read count for a call, but different rules count different things. `support_kind` says which, and five more columns give the separate lines of read evidence:
+
+| Column | Meaning |
+|---|---|
+| `support_kind` | What `n_support` counts (see below). `none` when `n_support` is NA |
+| `n_junction_L`, `n_junction_R` | Reads at the event's left / right junction: the junction peak's own count (switching reads for a binary peak, conversion-pattern reads for a gene_conversion peak). NA where there is no peak, e.g. the telomeric side of a terminal event |
+| `n_tract_switch` | Reads crossing both junctions of the tract on different homologs either side (crossover outcome) |
+| `n_tract_return` | Reads crossing both junctions on the same homolog either side, carrying the tract allele across it (NCO outcome) |
+| `n_tract_parental` | Reads carrying the tract allele on both flanks and across it, with no switch. Counts against a crossover |
+
+The three `n_tract_*` columns are NA when the call has no single tract (or run / block) or no full-read LOH table was available.
+
+**Peak-only events** (`evidence = peak_only`: `NCO_GC_subres`, `CO_GC_subres`, `CROSSOVER_NO_TRACT`) have no tract, so the columns are filled from the reads spanning the site instead: those with at least 2 SNPs on each side. Each side reaches `tract_flank_bp`, or further to take in the nearest `peak_flank_snps` (5) SNPs, and stops at the ends of the HET token holding the event. With fewer than `outcome_min_reads` (4) spanning reads, the columns stay empty.
+
+- Conversions: `n_tract_return` is the peak's own supporting reads (= `n_support`) and `n_tract_parental` is the remaining spanning reads. A conversion on one homolog shows in about half of them. A share below `peak_min_share` (0.30) caps the call at review.
+- Crossovers: `n_tract_switch` and `n_tract_parental` are the spanning reads that switch homolog or keep it. A switched share below `co_min_recomb_frac` (0.5) caps the call at review.
+- The notes give the count and share.
+- `n_junction_L` / `n_junction_R` are left empty for a single peak, whose count is already `n_support`.
+
+A gene_conversion or internal_crossover peak with fewer than `min_span` supporting reads makes no event and stays in the unclaimed peaks (`low_peak_support`).
+
+`support_kind` values:
+
+- **Peak window**: `junction_switch` (reads switching across one junction peak), `gc_pattern` (reads showing flank–tract–flank), `snp_boundary` (chimeric reads with a run boundary at an untyped peak's SNP), `phase_switch` / `phase_return` (an undefined peak rescued by read phasing: switching reads for a crossover, returning reads for an NCO), `pair_spanning` (classifiable reads across a peak pair, whichever way they voted)
+- **Combined peaks**: `sum:<kinds>` (two junction counts added) or `min:<kinds>` (the smaller of them)
+- **Tract**: `tract_switch`, `tract_return`, `tract_mixed` (switch + return), `tract_spanning` (every read crossing both junctions, informative or not), `parental`
+- **Other**: `deletion` (reads deleted across the tract), `unphased_shared` (reads crossing both junctions of a fragment with no phase information), `state_reads` (reads carrying a sub-floor fragment's allele)
+
+Calls whose kind is `tract_switch`, `tract_return`, `tract_mixed` or `parental` are rated on `tract_read_high_min` rather than the per-class rule.
 
 ---
 
