@@ -591,13 +591,26 @@ build_raw_chains <- function(loh_segments, chr_span, params,
     # peak_pairs row (e.g. a terminal binary peak with no eligible partner
     # within range, or an internal_crossover peak excluded from pairing
     # entirely). Used below as a fallback for n_spanning.
-    n_read_support  = if ("n_read_support" %in% names(chr_fp)) n_read_support[1] else NA_integer_
+    n_read_support  = if ("n_read_support" %in% names(chr_fp)) n_read_support[1] else NA_integer_,
+    n_read_support_kind = if ("n_read_support_kind" %in% names(chr_fp)) n_read_support_kind[1]
+                          else NA_character_,
+    # Each constituent's own read count, in sub_peak_pos order, so an event
+    # can report the reads at EACH of its junctions (.junction_support) rather
+    # than the group's first row.
+    sub_peak_n_read = list({
+      o <- order(snp_pos)
+      if ("n_read_support" %in% names(chr_fp)) as.integer(n_read_support[o])
+      else rep(NA_integer_, .N)
+    })
   ), by = fusion_group]
 
   # Overlay spanning reads, jaccard, and pair_edge_type from peak_pairs.
   # A pair is "associated" with a peak if the peak's position falls anywhere
   # within the pair's span (snp_pos_a .. snp_pos_b), i.e. it is one of the
   # two endpoints or sits between them.
+  # What n_spanning counts: "pair_spanning" when a peak_pairs row supplied it,
+  # otherwise the peak's own n_read_support_kind (the fallback below).
+  grp_rep[, n_spanning_kind := NA_character_]
   if (!is.null(peak_pairs) && nrow(peak_pairs) > 0) {
     pp <- copy(peak_pairs)
     pp[, chrom := as.character(chrom)]
@@ -610,6 +623,7 @@ build_raw_chains <- function(loh_segments, chr_span, params,
         if (nrow(matching) > 0) {
           best_pair <- matching[which.max(n_spanning)]
           grp_rep$n_spanning[ri]       <- best_pair$n_spanning
+          grp_rep$n_spanning_kind[ri]  <- "pair_spanning"
           grp_rep$jaccard[ri]          <- best_pair$jaccard
           grp_rep$pair_edge_type[ri]   <- best_pair$edge_type
           grp_rep$pair_fusion_mode[ri] <- if ("fusion_mode" %in% names(best_pair))
@@ -672,6 +686,9 @@ build_raw_chains <- function(loh_segments, chr_span, params,
   # just because it never formed a pair.
   no_pair_evidence <- grp_rep$n_spanning == 0L & !is.na(grp_rep$n_read_support)
   grp_rep$n_spanning[no_pair_evidence] <- grp_rep$n_read_support[no_pair_evidence]
+  grp_rep$n_spanning_kind[no_pair_evidence] <- grp_rep$n_read_support_kind[no_pair_evidence]
+  grp_rep$n_spanning_kind[grp_rep$n_spanning_kind %in% "pair_spanning" &
+                            grp_rep$n_spanning %in% 0L] <- NA_character_
 
   lapply(seq_len(nrow(grp_rep)), function(i) as.list(grp_rep[i]))
 }
@@ -937,11 +954,18 @@ canonicalise <- function(chain, params) {
 classify_tract <- function(peak, params) {
 
   if (is.null(peak))
-    return(list(call = "AMBIGUOUS", reason = "no_peak", n_support = 0L))
+    return(list(call = "AMBIGUOUS", reason = "no_peak", n_support = 0L,
+                support_kind = "none"))
 
   edge_type  <- peak$best_edge_type %||% peak$edge_type
   n_raw      <- peak$n_spanning %||% NA_integer_
   n_spanning <- if (is.null(n_raw) || is.na(n_raw)) NA_integer_ else as.integer(n_raw)
+  res <- .classify_tract_call(peak, edge_type, n_spanning, params)
+  res$support_kind <- if (is.na(res$n_support %||% NA_integer_)) "none" else .peak_kind(peak)
+  res
+}
+
+.classify_tract_call <- function(peak, edge_type, n_spanning, params) {
 
   if (is.na(edge_type) || is.null(edge_type))
     return(list(call = "AMBIGUOUS", reason = "no_edge_type",
@@ -994,6 +1018,20 @@ classify_tract <- function(peak, params) {
 # fixed tract — the two-binary-peak case described in our discussion.
 # Returns NCO_GC_LARGE | CO_GC | AMBIGUOUS(reason)
 classify_two_binary_junction <- function(left_peak, right_peak,
+                                          interstitial_state, params) {
+  res <- .classify_two_binary_junction(left_peak, right_peak, interstitial_state, params)
+  # A fallback to classify_tract() already carries its own kind; otherwise the
+  # count is the two junction peaks' n_spanning added together.
+  if (is.null(res$support_kind))
+    res$support_kind <- if (is.na(res$n_support %||% NA_integer_)) "none"
+                        else .combine_kinds(c(
+                          if (!is.na(left_peak$n_spanning  %||% NA)) .peak_kind(left_peak),
+                          if (!is.na(right_peak$n_spanning %||% NA)) .peak_kind(right_peak)),
+                          "sum") %|NA|% "none"
+  res
+}
+
+.classify_two_binary_junction <- function(left_peak, right_peak,
                                           interstitial_state, params) {
   if (is.null(left_peak) || is.null(right_peak))
     return(list(call = "AMBIGUOUS", reason = "missing_flanking_peak", n_support = 0L))
@@ -1300,6 +1338,60 @@ classify_two_binary_junction <- function(left_peak, right_peak,
   if (is.null(notes) || !nzchar(notes)) tag else paste0(notes, "; ", tag)
 }
 
+# What a peak's n_spanning counts (see .get_chr_peaks): "pair_spanning", or
+# the peak's own kind from classify_peak_haplotype() when it never paired.
+.peak_kind <- function(peak) {
+  if (is.null(peak)) return(NA_character_)
+  k <- peak$n_spanning_kind %||% NA_character_
+  if (length(k) == 0L) NA_character_ else as.character(k)
+}
+
+# Kind for a count combined from several peaks: "sum:" or "min:" ahead of the
+# component kinds joined by "+". A single contributing peak keeps its own kind.
+.combine_kinds <- function(kinds, how) {
+  kinds <- kinds[!is.na(kinds)]
+  if (length(kinds) == 0L) return(NA_character_)
+  if (length(kinds) == 1L) return(kinds)
+  paste0(how, ":", paste(unique(kinds), collapse = "+"))
+}
+
+`%|NA|%` <- function(a, b) if (is.null(a) || length(a) == 0L || is.na(a)) b else a
+
+# Support kinds that count reads crossing BOTH junctions of the tract (or the
+# parental reads weighed against them). build_event_table() gates calls with
+# these kinds on tract_read_high_min rather than on the per-class rule.
+TRACT_SUPPORT_KINDS <- c("tract_switch", "tract_return", "tract_mixed", "parental")
+
+# Reads at each junction of an event, from its evidence peaks' own counts
+# (n_read_support: switching reads for a binary / internal_crossover peak,
+# conversion-pattern reads for a gene_conversion peak, see
+# classify_peak_haplotype). Each constituent peak position is assigned to the
+# event boundary it is nearer (ties go left), and the nearest one on each side
+# is reported. A terminal event's telomeric side has no peak and stays NA.
+.junction_support <- function(evidence_peaks, ev_start, ev_end) {
+  out <- c(L = NA_integer_, R = NA_integer_)
+  if (length(evidence_peaks) == 0L || is.na(ev_start) || is.na(ev_end)) return(out)
+  pos <- numeric(0); n <- integer(0)
+  for (pk in evidence_peaks) {
+    if (is.null(pk)) next
+    sp <- unlist(pk$sub_peak_pos %||% list())
+    sn <- unlist(pk$sub_peak_n_read %||% list())
+    if (length(sp) == 0L || length(sn) != length(sp)) {
+      sp <- pk$fused_pos_bp %||% pk$snp_pos %||% NA_real_
+      sn <- pk$n_read_support %||% NA_integer_
+    }
+    pos <- c(pos, as.numeric(sp)); n <- c(n, as.integer(sn))
+  }
+  keep <- !is.na(pos) & !duplicated(pos)
+  pos <- pos[keep]; n <- n[keep]
+  if (length(pos) == 0L) return(out)
+  dL <- abs(pos - ev_start); dR <- abs(pos - ev_end)
+  is_l <- dL <= dR
+  if (any(is_l))  out["L"] <- n[is_l][which.min(dL[is_l])]
+  if (any(!is_l)) out["R"] <- n[!is_l][which.min(dR[!is_l])]
+  out
+}
+
 .make_event <- function(call, chrom, tokens_involved, evidence_peaks = NULL,
                         n_support = NA_integer_, notes = "",
                         support_kind = NA_character_,
@@ -1383,6 +1475,16 @@ classify_two_binary_junction <- function(left_peak, right_peak,
               else if (has_peak)       "peak_only"
               else                     NA_character_
 
+  # What n_support counts, exported as its own column. A rule that reports a
+  # count without naming its kind shows up as "unspecified" rather than
+  # silently borrowing one; a missing count is "none".
+  if (length(n_support) == 0L || is.na(n_support)) {
+    support_kind <- "none"
+  } else if (is.na(support_kind %||% NA_character_)) {
+    support_kind <- "unspecified"
+  }
+  jxn <- .junction_support(evidence_peaks, ev_start, ev_end)
+
   list(
     event_class       = call,
     chrom             = chrom,
@@ -1390,13 +1492,23 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     end               = as.integer(ev_end),
     length_bp         = as.integer(ev_end - ev_start),
     n_support         = as.integer(n_support),
+    n_junction_L      = as.integer(jxn[["L"]]),
+    n_junction_R      = as.integer(jxn[["R"]]),
+    # Reads crossing BOTH junctions of the tract (or run / block) and what
+    # they did across it: count_tract_junction_reads(). NA when the call has
+    # no single tract or no full_read_loh was supplied.
+    n_tract_switch    = as.integer(outcome$n_switch   %||% NA_integer_),
+    n_tract_return    = as.integer(outcome$n_return   %||% NA_integer_),
+    n_tract_parental  = as.integer(outcome$n_parental %||% NA_integer_),
     peak_edge_types   = pk_edge,
     evidence          = evidence,
     notes             = notes,
-    # What n_support counts. "tract_reads" marks a call whose support is reads
-    # observed crossing BOTH junctions of the tract (see
-    # annotate_tract_read_support) rather than traversals of a peak window;
-    # build_event_table() gates those on their own threshold.
+    # What n_support counts: a peak kind (junction_switch, gc_pattern,
+    # snp_boundary, phase_switch, phase_spanning, pair_spanning, optionally
+    # combined as "sum:" / "min:"), a tract kind (tract_switch, tract_return,
+    # tract_mixed, tract_spanning, parental), deletion, unphased_shared,
+    # state_reads or none. Kinds in TRACT_SUPPORT_KINDS are gated by
+    # build_event_table() on their own threshold.
     support_kind      = support_kind,
     # Switched reads behind a CO_GC whose spanning reads were weighed against
     # parental ones (.outcome_gate); NA when they were too few to weigh.
@@ -1447,7 +1559,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
 #     switched share below co_min_recomb_frac makes the call GC_UNRESOLVED.
 #   GC_UNRESOLVED: in a diploid region, parental reads with no switched,
 #     returning or opposite read make it NCO_GC (support_kind
-#     "parental_reads").
+#     "parental").
 # Thresholds come from default_chain_params(): .make_event has no params.
 .outcome_gate <- function(call, n_support, notes, support_kind, oc, params = NULL) {
   out <- list(call = call, n_support = n_support, notes = notes,
@@ -1469,7 +1581,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     if (isTRUE(oc$interior)) {
       out$call         <- "GC_UNRESOLVED"
       out$n_support    <- n_swi
-      out$support_kind <- NA_character_
+      out$support_kind <- "tract_switch"
       out$notes <- paste0(notes, sep, "reclassified from CO_GC: interior piece of ",
                           "a same-state fixed run (noise islands on both flanks)")
       return(out)
@@ -1479,7 +1591,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
     if (rf < as.numeric(params$co_min_recomb_frac %||% 0.5)) {
       out$call         <- "GC_UNRESOLVED"
       out$n_support    <- n_swi
-      out$support_kind <- NA_character_
+      out$support_kind <- "tract_switch"
       out$notes <- paste0(notes, sep, "reclassified from CO_GC: ", n_swi,
                           " switched vs ", n_par, " parental of ", oc$n_spanning,
                           " spanning (switched share ", sprintf("%.2f", rf), ")")
@@ -1493,7 +1605,7 @@ classify_two_binary_junction <- function(left_peak, right_peak,
         n_par >= as.integer(params$parental_min_reads %||% 2L)) {
       out$call         <- "NCO_GC"
       out$n_support    <- n_par
-      out$support_kind <- "parental_reads"
+      out$support_kind <- "parental"
       out$notes <- paste0(notes, sep, "parental_span: ", n_par, "/", oc$n_spanning,
                           " spanning reads carry the tract allele on both flanks",
                           " and none switched (diploid); NCO")
@@ -1583,7 +1695,7 @@ rule_terminal_deletion <- list(
       as.integer(m$n_del_reads) else NA_integer_
 
     ev <- .make_event("TERMINAL_DELETION", chain$chrom,
-                      list(m$f_tok), n_support = ns,
+                      list(m$f_tok), n_support = ns, support_kind = "deletion",
                       notes = paste(parts, collapse = "; "))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
   }
@@ -1681,7 +1793,7 @@ rule_interstitial_deletion <- list(
       as.integer(m$n_del_reads) else NA_integer_
 
     ev <- .make_event("DELETION", chain$chrom, list(m$f_tok),
-                      n_support = ns,
+                      n_support = ns, support_kind = "deletion",
                       notes = paste0("interstitial hemizygous deletion; ",
                                      paste(parts, collapse = "; ")))
     list(event = ev, rewrite = NULL, claims = list(peak = NULL, loh = m$f_tok))
@@ -1789,7 +1901,7 @@ rule_terminal_loh <- list(
 
     ev <- .make_event(call, chain$chrom, list(m$f_tok),
                       evidence_peaks = list(m$peak),
-                      n_support = n_spanning,
+                      n_support = n_spanning, support_kind = .peak_kind(m$peak),
                       notes = paste0("terminal; edge=", edge_type %||% "NA"))
     list(event = ev, rewrite = NULL,
          claims = list(peak = m$peak, loh = m$f_tok))
@@ -1881,7 +1993,7 @@ rule_terminal_loh_gapped <- list(
     if (n_internal == 0L) {
       ev <- .make_event("CO_TERM", chain$chrom, m$f_toks,
                         evidence_peaks = list(m$peak),
-                        n_support = n_spanning,
+                        n_support = n_spanning, support_kind = .peak_kind(m$peak),
                         notes = paste0("terminal LOH split by a SNP-gap (no internal ",
                                        "allele switch); proximal boundary binary"))
     } else {
@@ -1891,7 +2003,7 @@ rule_terminal_loh_gapped <- list(
         paste0(states[k], "->", states[k + 1L]), character(1)), collapse = ", ")
       ev <- .make_event("CO_TERM_GAPPED", chain$chrom, m$f_toks,
                         evidence_peaks = list(m$peak),
-                        n_support = n_spanning,
+                        n_support = n_spanning, support_kind = .peak_kind(m$peak),
                         notes = paste0(n_fused, " fused terminal crossovers; ",
                                        n_internal, " internal gap-switch(es) [", trans,
                                        "] with no junction peak; proximal boundary binary"))
@@ -2073,7 +2185,7 @@ rule_tel_adjacent_het_loh <- list(
 
     ev <- .make_event(call, chain$chrom, list(m$f_tok),
                       evidence_peaks = list(m$peak),
-                      n_support = n_spanning,
+                      n_support = n_spanning, support_kind = .peak_kind(m$peak),
                       notes = paste0("tel_adjacent_het; edge=", edge_type %||% "NA",
                                      "; LOH->HET->TEL without junction peak; ",
                                      "probable subtelomeric misalignment"))
@@ -2257,6 +2369,8 @@ rule_tco_captured_tco <- list(
                       all_loh,
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = as.integer(.ns(m$pk_l) + .ns(m$pk_r)),
+                      support_kind = .combine_kinds(c(.peak_kind(m$pk_l),
+                                                      .peak_kind(m$pk_r)), "sum"),
                       notes = "terminal CO over earlier terminal CO")
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk_l, m$pk_r),
@@ -2295,7 +2409,8 @@ rule_het_bounded <- list(
       ev <- .make_event(call, chain$chrom,
                         list(m$l_tok, m$f_tok, m$r_tok),
                         evidence_peaks = list(m$pk),
-                        n_support = tract$n_support)
+                        n_support = tract$n_support,
+                        support_kind = tract$support_kind)
     } else {
       # Two-peak (binary) case: junction-level complementarity check
       tract <- classify_two_binary_junction(m$pk_l, m$pk_r,
@@ -2310,7 +2425,8 @@ rule_het_bounded <- list(
                         list(m$l_tok, m$f_tok, m$r_tok),
                         evidence_peaks = Filter(Negate(is.null),
                                                 list(m$pk_l, m$pk_r)),
-                        n_support = tract$n_support)
+                        n_support = tract$n_support,
+                        support_kind = tract$support_kind)
     }
     list(event = ev, rewrite = NULL,
          claims = list(peak = Filter(Negate(is.null),
@@ -2562,10 +2678,12 @@ rule_opp_sandwich <- list(
                                peak_over = frag$pk_l), params$center_tol)
 
       tract <- if (isTRUE(frag$structural))
-        list(call = "NCO_GC", reason = "loh_structural", n_support = frag$n_shared)
+        list(call = "NCO_GC", reason = "loh_structural", n_support = frag$n_shared,
+             support_kind = "unphased_shared")
       else if (frag$too_small_for_peak && is.null(frag$pk))
         list(call = "POSSIBLE_GC", reason = "too_small_for_peak",
-             n_support = as.integer(frag$f_tok$n_state_reads %||% 0L))
+             n_support = as.integer(frag$f_tok$n_state_reads %||% 0L),
+             support_kind = "state_reads")
       else if (!is.null(frag$pk_l) && !is.null(frag$pk_r))
         classify_two_binary_junction(frag$pk_l, frag$pk_r, frag$f_tok$state, params)
       else
@@ -2591,6 +2709,7 @@ rule_opp_sandwich <- list(
                   evidence_peaks = Filter(Negate(is.null),
                                           list(frag$pk, frag$pk_l, frag$pk_r)),
                   n_support = tract$n_support,
+                  support_kind = tract$support_kind,
                   notes = paste0("small_opp_fragment; centered=", centered,
                                  if (identical(tract$call, "POSSIBLE_GC") &&
                                      !is.null(frag$f_tok$n_cov_reads))
@@ -2708,6 +2827,8 @@ rule_double_gc <- list(
                       c(m$h_toks, list(m$f1_tok, m$f2_tok)),
                       evidence_peaks = list(m$pk1, m$pk2),
                       n_support = as.integer(.ns(m$pk1) + .ns(m$pk2)),
+                      support_kind = .combine_kinds(c(.peak_kind(m$pk1),
+                                                      .peak_kind(m$pk2)), "sum"),
                       notes = paste("f1:", t1$reason, "f2:", t2$reason))
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk1, m$pk2),
@@ -2739,7 +2860,7 @@ rule_crossover_no_tract <- list(
     ev <- .make_event("CROSSOVER_NO_TRACT", chain$chrom,
                       list(m$l_tok, m$r_tok),
                       evidence_peaks = list(m$pk),
-                      n_support = .ns(m$pk),
+                      n_support = .ns(m$pk), support_kind = .peak_kind(m$pk),
                       notes = "adjacent_opposite_fixed; no_tract")
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk), loh = list()))
@@ -2768,6 +2889,7 @@ rule_subres_tract <- list(
     ev <- .make_event(call, chain$chrom, list(m$l_tok, m$r_tok),
                       evidence_peaks = list(m$pk),
                       n_support = tract$n_support,
+                      support_kind = tract$support_kind,
                       notes = "no_fixed_tract; peak_only")
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk), loh = list()))
@@ -3407,19 +3529,19 @@ annotate_edge_pair_runs <- function(chain, full_read_loh, params) {
   n_inf <- n_ret + n_swi
   homog <- as.numeric(params$homog_frac %||% 0.80)
   if (n_inf == 0L) {
-    list(call = "GC_UNRESOLVED", ns = n_span, support_kind = NA_character_,
+    list(call = "GC_UNRESOLVED", ns = n_span, support_kind = "tract_spanning",
          note = paste0(base_note, "; no read reaches both flanking HET zones (",
                        n_span, " spanning, 0 informative); NCO/CO undetermined"))
   } else if (n_ret / n_inf >= homog) {
-    list(call = "NCO_GC", ns = n_ret, support_kind = "tract_reads",
+    list(call = "NCO_GC", ns = n_ret, support_kind = "tract_return",
          note = paste0(base_note, "; ", n_ret, "/", n_span,
                        " flank-to-flank reads returned across the ", what))
   } else if (n_swi / n_inf >= homog) {
-    list(call = "CO_GC", ns = n_swi, support_kind = "tract_reads",
+    list(call = "CO_GC", ns = n_swi, support_kind = "tract_switch",
          note = paste0(base_note, "; ", n_swi, "/", n_span,
                        " flank-to-flank reads switched across the ", what))
   } else {
-    list(call = "AMBIGUOUS(mixed_block_reads)", ns = n_inf, support_kind = "tract_reads",
+    list(call = "AMBIGUOUS(mixed_block_reads)", ns = n_inf, support_kind = "tract_mixed",
          note = paste0(base_note, "; mixed outcome (", n_ret, " returned, ",
                        n_swi, " switched of ", n_span, " spanning)"))
   }
@@ -3749,7 +3871,7 @@ rule_peak_direct <- list(
     )
     n_support    <- tract$n_support
     notes        <- paste0("peak_type=", et)
-    support_kind <- NA_character_
+    support_kind <- tract$support_kind
 
     # Corroborate a gene_conversion peak's NCO claim at the tract itself.
     # Absent counts (no full_read_loh supplied) leave the peak-based call
@@ -3762,13 +3884,13 @@ rule_peak_direct <- list(
       if (n_ret > 0L) {
         call         <- "NCO_GC"
         n_support    <- n_ret
-        support_kind <- "tract_reads"
+        support_kind <- "tract_return"
         notes        <- paste0(notes, "; ", n_ret, "/", n_span,
                                " junction-spanning reads returned across tract")
       } else if (n_swi > 0L) {
         call         <- "CO_GC"
         n_support    <- n_swi
-        support_kind <- "tract_reads"
+        support_kind <- "tract_switch"
         notes        <- paste0(notes, "; no read returned across tract, ", n_swi,
                                "/", n_span, " switched — outcome is CO, not NCO")
       } else {
@@ -3850,6 +3972,7 @@ rule_two_binary_flanking <- list(
                       list(m$f_tok),
                       evidence_peaks = list(m$pk_l, m$pk_r),
                       n_support = tract$n_support,
+                      support_kind = tract$support_kind,
                       notes = paste0("two_binary_flanking; state=", m$f_tok$state))
     list(event = ev, rewrite = NULL,
          claims = list(peak = list(m$pk_l, m$pk_r), loh = list(m$f_tok)))
@@ -3910,7 +4033,7 @@ rule_one_sided_binary <- list(
   fire_fn = function(m, chain, params) {
     ev <- .make_event("GC_ONE_SIDED", chain$chrom, list(m$f_tok),
                       evidence_peaks = list(m$pk),
-                      n_support = .ns(m$pk),
+                      n_support = .ns(m$pk), support_kind = .peak_kind(m$pk),
                       notes = paste0("one_sided_binary; confirmed_side=", m$side,
                                      "; no peak found on the other side"))
     list(event = ev, rewrite = NULL,
@@ -3978,15 +4101,15 @@ rule_tract_read_evidence <- list(
     # Informative reads should agree on the outcome. A tract carrying both
     # returning and switching reads is a mixed population, not a single event.
     if (n_ret / n_inf >= homog) {
-      call <- "NCO_GC"; ns <- n_ret
+      call <- "NCO_GC"; ns <- n_ret; kind <- "tract_return"
       note <- paste0("tract_read_evidence; ", n_ret, "/", n_span,
                      " junction-spanning reads returned across tract")
     } else if (n_swi / n_inf >= homog) {
-      call <- "CO_GC";  ns <- n_swi
+      call <- "CO_GC";  ns <- n_swi; kind <- "tract_switch"
       note <- paste0("tract_read_evidence; ", n_swi, "/", n_span,
                      " junction-spanning reads switched across tract")
     } else {
-      call <- "AMBIGUOUS(mixed_tract_reads)"; ns <- n_inf
+      call <- "AMBIGUOUS(mixed_tract_reads)"; ns <- n_inf; kind <- "tract_mixed"
       note <- paste0("tract_read_evidence; mixed outcome across tract (",
                      n_ret, " returned, ", n_swi, " switched of ", n_span,
                      " spanning)")
@@ -3994,7 +4117,7 @@ rule_tract_read_evidence <- list(
 
     ev <- .make_event(call, chain$chrom, list(tok),
                       n_support = ns, notes = note,
-                      support_kind = "tract_reads")
+                      support_kind = kind)
     list(event = ev, rewrite = NULL,
          claims = list(loh = tok))
   }
@@ -4041,6 +4164,7 @@ rule_unresolved_het_bounded_tract <- list(
     ev <- .make_event("GC_UNRESOLVED", chain$chrom, list(tok),
                       evidence_peaks = m$peaks,
                       n_support = as.integer(tok$n_tract_spanning %||% 0L),
+                      support_kind = "tract_spanning",
                       notes = note)
     list(event = ev, rewrite = NULL,
          claims = list(loh = tok, peak = m$peaks))
@@ -4160,7 +4284,8 @@ rule_loh_crossover <- list(
     ns <- if (length(ns_cands)) as.integer(min(ns_cands)) else NA_integer_
 
     notes        <- paste0("loh_crossover; state=", m$f_tok$state)
-    support_kind <- NA_character_
+    support_kind <- .combine_kinds(unlist(lapply(m$xo, function(pk)
+      if (is.na(pk$n_spanning %||% NA)) NULL else .peak_kind(pk))), "min")
 
     n_ret  <- m$f_tok$n_tract_return   %||% NA_integer_
     n_swi  <- m$f_tok$n_tract_switch   %||% NA_integer_
@@ -4175,13 +4300,13 @@ rule_loh_crossover <- list(
       if (n_swi > 0L) {
         call         <- "CO_GC"
         ns           <- n_swi
-        support_kind <- "tract_reads"
+        support_kind <- "tract_switch"
         notes        <- paste0(notes, "; ", n_swi, "/", n_span,
                                " junction-spanning reads switched across tract")
       } else if (n_ret > 0L) {
         call         <- "NCO_GC"
         ns           <- n_ret
-        support_kind <- "tract_reads"
+        support_kind <- "tract_return"
         notes        <- paste0(notes, "; no read switched across tract, ", n_ret,
                                "/", n_span, " returned — outcome is NCO, not CO")
       } else {
@@ -4583,7 +4708,9 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
       ifelse(is.na(bet) | bet == "singleton", hal, bet)
     }]
     fp[, ns_col := if ("n_read_support" %in% names(fp)) n_read_support else NA_integer_]
-    fp[, .(chrom, pos_col, et_col, ns_col)]
+    fp[, nk_col := if ("n_read_support_kind" %in% names(fp)) n_read_support_kind else NA_character_]
+    fp[, sp_col := if ("snp_pos" %in% names(fp)) as.numeric(snp_pos) else as.numeric(pos_col)]
+    fp[, .(chrom, pos_col, et_col, ns_col, nk_col, sp_col)]
   } else if (!is.null(snp_peaks) && nrow(snp_peaks) > 0) {
     sp <- copy(snp_peaks)
     sp[, chrom := as.character(chrom)]
@@ -4592,7 +4719,9 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
       if ("haplotype_label" %in% names(sp)) haplotype_label else NA_character_
     )]
     sp[, ns_col  := if ("n_read_support" %in% names(sp)) n_read_support else NA_integer_]
-    sp[, .(chrom, pos_col, et_col, ns_col)]
+    sp[, nk_col  := if ("n_read_support_kind" %in% names(sp)) n_read_support_kind else NA_character_]
+    sp[, sp_col  := as.numeric(pos_col)]
+    sp[, .(chrom, pos_col, et_col, ns_col, nk_col, sp_col)]
   } else {
     NULL
   }
@@ -4619,7 +4748,15 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   if (!is.null(peak_source_for_reconcile) && nrow(peak_source_for_reconcile) > 0) {
     peak_source_for_reconcile <- peak_source_for_reconcile[
       , .(et_col = et_col[which(!is.na(et_col))[1]],
-          ns_col = if (all(is.na(ns_col))) NA_integer_ else min(ns_col, na.rm = TRUE)),
+          ns_col = if (all(is.na(ns_col))) NA_integer_ else min(ns_col, na.rm = TRUE),
+          # The kind of that minimum: "min:<kind>" when it is taken over a group.
+          nk_col = {
+            k <- nk_col[!is.na(ns_col)]
+            if (.N > 1L) .combine_kinds(c(k, k), "min") else k[1]
+          },
+          # Each constituent's position and own count, for the junction columns.
+          sub_pos = list(sp_col[order(sp_col)]),
+          sub_ns  = list(as.integer(ns_col[order(sp_col)]))),
       by = .(chrom, pos_col)]
   }
 
@@ -4635,7 +4772,13 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
           chrom          = peak_source_for_reconcile$chrom[ri],
           snp_pos        = pos,
           edge_type      = peak_source_for_reconcile$et_col[ri],
-          n_read_support = peak_source_for_reconcile$ns_col[ri]
+          n_read_support = peak_source_for_reconcile$ns_col[ri],
+          n_read_support_kind = peak_source_for_reconcile$nk_col[ri] %||% NA_character_,
+          sub_pos        = if ("sub_pos" %in% names(peak_source_for_reconcile))
+                             peak_source_for_reconcile$sub_pos[[ri]] else pos,
+          sub_ns         = if ("sub_ns" %in% names(peak_source_for_reconcile))
+                             peak_source_for_reconcile$sub_ns[[ri]]
+                           else peak_source_for_reconcile$ns_col[ri]
         )))
       }
     }
@@ -4688,7 +4831,8 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
   still_unclaimed_pks <- list()
   for (u in unclaimed_peaks) {
     tract <- classify_tract(list(best_edge_type = u$edge_type,
-                                 n_spanning = u$n_read_support), params)
+                                 n_spanning = u$n_read_support,
+                                 n_spanning_kind = u$n_read_support_kind), params)
     if (tract$call %in% c("NCO_GC", "CO_GC")) {
       has_fixed <- if (tract$call == "CO_GC")
         .junction_has_fixed_snp(u$chrom, u$snp_pos) else NA
@@ -4706,6 +4850,15 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         event_class = ev_class, chrom = u$chrom,
         start = ev_st, end = ev_en,
         length_bp = as.integer(ev_en - ev_st), n_support = tract$n_support,
+        support_kind = if (is.na(tract$n_support %||% NA_integer_)) "none"
+                       else tract$support_kind %|NA|% "unspecified",
+        # A fused group's constituents are its junctions, lowest first; a
+        # single peak is one junction, reported on the left.
+        n_junction_L = as.integer(u$sub_ns[1]),
+        n_junction_R = if (length(u$sub_ns) > 1L) as.integer(u$sub_ns[length(u$sub_ns)])
+                       else NA_integer_,
+        n_tract_switch = NA_integer_, n_tract_return = NA_integer_,
+        n_tract_parental = NA_integer_,
         peak_edge_types = u$edge_type %||% NA_character_,
         # Promoted from a self-classifying peak that never attached to a token,
         # so by construction there is no fixed tract behind it (see .make_event).
@@ -4811,7 +4964,10 @@ build_event_table <- function(events, params = default_chain_params()) {
     return(data.table(
       event_class = character(), chrom = character(),
       start = integer(), end = integer(), length_kb = numeric(),
-      n_support = integer(), peak_edge_types = character(),
+      n_support = integer(), support_kind = character(),
+      n_junction_L = integer(), n_junction_R = integer(),
+      n_tract_switch = integer(), n_tract_return = integer(),
+      n_tract_parental = integer(), peak_edge_types = character(),
       evidence = character(),
       confidence = character(), notes = character()
     ))
@@ -4837,7 +4993,7 @@ build_event_table <- function(events, params = default_chain_params()) {
       "review"
     } else if (identical(ev$event_class, "CO_GC") && !is.na(co_swi)) {
       if (co_swi >= tract_read_high_min) "high" else "review"
-    } else if ((ev$support_kind %||% NA_character_) %in% c("tract_reads", "parental_reads") &&
+    } else if ((ev$support_kind %||% NA_character_) %in% TRACT_SUPPORT_KINDS &&
                ev$event_class %in% HIGH_CONF_CLASSES) {
       if (!is.na(ns) && ns >= tract_read_high_min) "high" else "review"
     } else if (ev$event_class %in% SUBRES_CLASSES ||
@@ -4859,6 +5015,15 @@ build_event_table <- function(events, params = default_chain_params()) {
       end             = as.integer(ev$end),
       length_kb       = round((as.integer(ev$end) - as.integer(ev$start)) / 1000, 3),
       n_support       = as.integer(ev$n_support),
+      # What n_support counts (see .make_event), then the separate lines of
+      # read evidence: reads at each junction (the edge peaks' own counts) and
+      # reads crossing both junctions of the tract, split by outcome.
+      support_kind    = ev$support_kind     %||% NA_character_,
+      n_junction_L    = as.integer(ev$n_junction_L     %||% NA_integer_),
+      n_junction_R    = as.integer(ev$n_junction_R     %||% NA_integer_),
+      n_tract_switch  = as.integer(ev$n_tract_switch   %||% NA_integer_),
+      n_tract_return  = as.integer(ev$n_tract_return   %||% NA_integer_),
+      n_tract_parental = as.integer(ev$n_tract_parental %||% NA_integer_),
       peak_edge_types = ev$peak_edge_types %||% NA_character_,
       # Which independent channels back the call -- "peak+loh", "loh_only" or
       # "peak_only". Set by .make_event(); NA only for an event built by some

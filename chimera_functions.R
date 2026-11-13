@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
   if (requireNamespace("igraph", quietly = TRUE)) library(igraph)
 })
 
-APP_VERSION <- "0.9.3"
+APP_VERSION <- "0.9.4"
 
 # -----------------------------------------------------------------------------
 #  Compile the beta-binomial EM + Viterbi HMM (src/loh_hmm.cpp), used by
@@ -2328,17 +2328,17 @@ resolve_undefined_by_phase <- function(chr_name, full_read_loh, win_start, win_e
   n_RtoA   <- sum(ph$L == "REF" & ph$R == "ALT")
   n_AtoR   <- sum(ph$L == "ALT" & ph$R == "REF")
 
-  mk <- function(label, support, call)
-    list(label = label, n_support = support, phase_call = call,
+  mk <- function(label, support, kind, call)
+    list(label = label, n_support = support, support_kind = kind, phase_call = call,
          phase_frac = frac, phase_n = n_span, island_state = isl_state,
          island_start = as.integer(isl_start), island_end = as.integer(isl_end))
 
   if (frac >= switch_hi) {
-    mk("internal_crossover", n_switch,
+    mk("internal_crossover", n_switch, "phase_switch",
        if (n_RtoA > 0L && n_AtoR > 0L) "crossover (reciprocal)"
        else                            "crossover (one-sided)")
   } else if (frac <= switch_lo) {
-    mk("gene_conversion", n_span, "gene_conversion (NCO)")
+    mk("gene_conversion", n_span, "phase_spanning", "gene_conversion (NCO)")
   } else {
     NULL   # ambiguous switch fraction -- leave undefined
   }
@@ -2502,7 +2502,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   if (length(avail_pos) == 0)
     return(list(label = "undefined", seg_data = NULL,
                 win_start = pk_start, win_end = pk_end, expanded = FALSE,
-                n_support = snp_n_fallback))
+                n_support = snp_n_fallback, support_kind = "snp_boundary"))
 
   # Median read length for the expansion upper limit
   read_lengths <- rt_df[read_id %in% touching_ids & as.character(chrom) == chr_name,
@@ -2556,7 +2556,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   if (n_left < min_each || n_right < min_each) {
     return(list(label = "undefined", seg_data = NULL,
                 win_start = win_start, win_end = win_end, expanded = expanded,
-                n_support = snp_n_fallback))
+                n_support = snp_n_fallback, support_kind = "snp_boundary"))
   }
 
   # Aggregate IS_REF by position within the window to get SNP_call
@@ -2568,7 +2568,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   if (nrow(read_win_df) == 0)
     return(list(label = "undefined", seg_data = NULL,
                 win_start = win_start, win_end = win_end, expanded = expanded,
-                n_support = snp_n_fallback))
+                n_support = snp_n_fallback, support_kind = "snp_boundary"))
 
   peak_summary <- read_win_df[, .(
     REF = sum(IS_REF),
@@ -2634,8 +2634,10 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   # recognised switch type -- e.g. a second nearby island widening the window
   # into a compound multi-run signal) keeps the snp_n fallback set above; it's
   # real per-position read evidence even when the switch type can't be typed.
-  n_support <- snp_n_fallback
+  n_support    <- snp_n_fallback
+  support_kind <- "snp_boundary"
   if (label %in% c("binary", "compound_binary", "internal_crossover", "gene_conversion")) {
+    support_kind <- if (label == "gene_conversion") "gc_pattern" else "junction_switch"
     read_states <- read_win_df[, {
       sL <- classify_zone_state(pos, IS_REF, win_start, snp_p, zone_min_snps)
       sR <- classify_zone_state(pos, IS_REF, snp_p, win_end, zone_min_snps)
@@ -2668,6 +2670,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     if (!is.null(rescue)) {
       label        <- rescue$label
       n_support    <- rescue$n_support
+      support_kind <- rescue$support_kind
       phase_call   <- rescue$phase_call
       phase_frac   <- rescue$phase_frac
       phase_n      <- rescue$phase_n
@@ -2684,6 +2687,7 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     win_end      = win_end,
     expanded     = expanded,
     n_support    = n_support,
+    support_kind = support_kind,
     phase_call   = phase_call,
     phase_frac   = phase_frac,
     phase_n      = phase_n,
@@ -3553,6 +3557,7 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
   out <- copy(snp_peaks)
   if (!"haplotype_label"    %in% names(out)) out[, haplotype_label    := NA_character_]
   if (!"n_read_support"     %in% names(out)) out[, n_read_support     := NA_integer_]
+  if (!"n_read_support_kind" %in% names(out)) out[, n_read_support_kind := NA_character_]
   if (!"phase_call"         %in% names(out)) out[, phase_call         := NA_character_]
   if (!"phase_switch_frac"  %in% names(out)) out[, phase_switch_frac  := NA_real_]
   if (!"phase_island_start" %in% names(out)) out[, phase_island_start := NA_integer_]
@@ -3584,6 +3589,7 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
       out[.row_idx == .pk$.row_idx, `:=`(
         haplotype_label    = .hap$label,
         n_read_support     = .hap$n_support,
+        n_read_support_kind = .hap$support_kind %||% NA_character_,
         phase_call         = .hap$phase_call   %||% NA_character_,
         phase_switch_frac  = .hap$phase_frac   %||% NA_real_,
         phase_island_start = .hap$island_start %||% NA_integer_,
@@ -4133,10 +4139,14 @@ compute_peak_pairs <- function(snp_peaks,
     snp_peaks_out[, n_read_support := NA_integer_]
   if (!"label_min_run" %in% names(snp_peaks_out))
     snp_peaks_out[, label_min_run := NA_integer_]
-  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label, n_read_support, label_min_run)]
+  if (!"n_read_support_kind" %in% names(snp_peaks_out))
+    snp_peaks_out[, n_read_support_kind := NA_character_]
+  label_map <- peaks_dt[, .(snp_pos, chrom, haplotype_label, n_read_support,
+                            n_read_support_kind, label_min_run)]
   snp_peaks_out[label_map, on = .(snp_pos, chrom),
                 `:=`(haplotype_label = i.haplotype_label,
                      n_read_support  = i.n_read_support,
+                     n_read_support_kind = i.n_read_support_kind,
                      label_min_run   = i.label_min_run)]
 
   list(

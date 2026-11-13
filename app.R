@@ -1193,6 +1193,7 @@ server <- function(input, output, session) {
             hap_win_end        = hap$win_end,
             hap_win_expanded   = hap$expanded,
             n_read_support     = hap$n_support,
+            n_read_support_kind = hap$support_kind %||% NA_character_,
             phase_call         = hap$phase_call   %||% NA_character_,
             phase_switch_frac  = hap$phase_frac   %||% NA_real_,
             phase_island_start = hap$island_start %||% NA_integer_,
@@ -3077,9 +3078,11 @@ server <- function(input, output, session) {
     et[, `Length (kb)` := round(length_kb, 2)]
     et[, start := NULL][, end := NULL][, length_kb := NULL]
     
-    setcolorder(et, c("event_class", "chrom", "Start (bp)", "End (bp)",
-                      "Length (kb)", "n_support", "peak_edge_types",
-                      "evidence", "confidence", "notes"))
+    setcolorder(et, intersect(c("event_class", "chrom", "Start (bp)", "End (bp)",
+                      "Length (kb)", "n_support", "support_kind",
+                      "n_junction_L", "n_junction_R", "n_tract_switch",
+                      "n_tract_return", "n_tract_parental", "peak_edge_types",
+                      "evidence", "confidence", "notes"), names(et)))
     # "Peak Evidence" -> "Peak Type": with an Evidence column beside it the old
     # label read as though it were the channel indicator, which it is not --
     # peak_edge_types is the peak's edge classification (gene_conversion /
@@ -3088,6 +3091,12 @@ server <- function(input, output, session) {
              c("event_class", "chrom", "n_support", "peak_edge_types", "evidence", "confidence"),
              c("Event",       "Chr",   "N Support", "Peak Type",       "Evidence", "Confidence")
     )
+    old_sup <- intersect(c("support_kind", "n_junction_L", "n_junction_R",
+                           "n_tract_switch", "n_tract_return", "n_tract_parental"), names(et))
+    new_sup <- c(support_kind = "Support Kind", n_junction_L = "Jxn L Reads",
+                 n_junction_R = "Jxn R Reads", n_tract_switch = "Tract Switch",
+                 n_tract_return = "Tract Return", n_tract_parental = "Tract Parental")
+    if (length(old_sup)) setnames(et, old_sup, unname(new_sup[old_sup]))
     et
   }, striped = TRUE, hover = TRUE, bordered = TRUE, spacing = "s", na = "\u2014")
   

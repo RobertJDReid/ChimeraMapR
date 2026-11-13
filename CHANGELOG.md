@@ -4,6 +4,33 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.9.4] - 2026-11-13
+
+### Event table: what n_support counts, and the separate lines of evidence
+
+`n_support` came from about ten different counts depending on the rule: reads
+switching at one junction peak, classifiable reads across a peak pair, reads
+crossing both junctions of the tract, all spanning reads, parental reads,
+deleted reads, and sums or minimums of these. Six columns now say which, and
+give the read evidence separately:
+
+- **`support_kind`**: what `n_support` counts for that row (README, "Read-support
+  columns in the event table").
+- **`n_junction_L` / `n_junction_R`**: each junction peak's own read count
+  (`.junction_support()`, from the per-constituent counts now kept on fused
+  peak groups as `sub_peak_n_read`).
+- **`n_tract_switch` / `n_tract_return` / `n_tract_parental`**: the
+  both-junction outcome counts from `count_tract_junction_reads()`, until now
+  only in the chain-token CSV.
+
+Peaks carry `n_read_support_kind` from `classify_peak_haplotype()`, and chain
+peaks `n_spanning_kind` (`pair_spanning`, or the peak's own kind when it never
+paired). The internal `tract_reads` / `parental_reads` labels are replaced by
+the finer kinds; `build_event_table()` gates on `TRACT_SUPPORT_KINDS`.
+
+No call, `n_support` value or confidence changes: across 50 test_data runs
+(min-run 1 and 2) every pre-existing column matches 0.9.3.
+
 ## [0.9.3] - 2026-11-02
 
 ### min-run 1: tract edges hidden by a single flipped SNP

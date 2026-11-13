@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.9.3_
+_version 0.9.4_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -330,6 +330,29 @@ Only the first two columns are used; additional `.fai` columns are ignored.
 | Recombination event table | CSV | Called events (crossover, terminal crossover, gene conversion, ambiguous, etc.) with confidence level |
 | Chain objects | RDS | Intermediate chain-analysis objects for the Recombination Events tab |
 | Chimeric read IDs | TXT | One read ID per line, for use with `samtools view -N` |
+
+#### Read-support columns in the event table
+
+`n_support` is the headline read count for a call, but different rules count different things. `support_kind` says which, and five more columns give the separate lines of read evidence:
+
+| Column | Meaning |
+|---|---|
+| `support_kind` | What `n_support` counts (see below). `none` when `n_support` is NA |
+| `n_junction_L`, `n_junction_R` | Reads at the event's left / right junction: the junction peak's own count (switching reads for a binary peak, conversion-pattern reads for a gene_conversion peak). NA where there is no peak, e.g. the telomeric side of a terminal event |
+| `n_tract_switch` | Reads crossing both junctions of the tract on different homologs either side (crossover outcome) |
+| `n_tract_return` | Reads crossing both junctions on the same homolog either side, carrying the tract allele across it (NCO outcome) |
+| `n_tract_parental` | Reads carrying the tract allele on both flanks and across it, with no switch. Counts against a crossover |
+
+The three `n_tract_*` columns are NA when the call has no single tract (or run / block) or no full-read LOH table was available.
+
+`support_kind` values:
+
+- **Peak window**: `junction_switch` (reads switching across one junction peak), `gc_pattern` (reads showing flank–tract–flank), `snp_boundary` (chimeric reads with a run boundary at an untyped peak's SNP), `phase_switch` / `phase_spanning` (an undefined peak rescued by read phasing: switching reads for a crossover, all spanning reads for an NCO), `pair_spanning` (classifiable reads across a peak pair, whichever way they voted)
+- **Combined peaks**: `sum:<kinds>` (two junction counts added) or `min:<kinds>` (the smaller of them)
+- **Tract**: `tract_switch`, `tract_return`, `tract_mixed` (switch + return), `tract_spanning` (every read crossing both junctions, informative or not), `parental`
+- **Other**: `deletion` (reads deleted across the tract), `unphased_shared` (reads crossing both junctions of a fragment with no phase information), `state_reads` (reads carrying a sub-floor fragment's allele)
+
+Calls whose kind is `tract_switch`, `tract_return`, `tract_mixed` or `parental` are rated on `tract_read_high_min` rather than the per-class rule.
 
 ---
 
