@@ -173,7 +173,19 @@ default_chain_params <- function() {
     outcome_min_reads   = 4L,
     parental_min_reads  = 2L,
     diploid_depth_range = c(0.75, 1.25),
-    diploid_balance_tol = 0.12
+    diploid_balance_tol = 0.12,
+
+    # Peak-only conversions (reconcile(): NCO_GC_subres with no fixed tract).
+    # A conversion on one of the two homologs shows in about half the reads
+    # that span it, so the peak's own supporting reads are weighed against the
+    # reads spanning the site (>= 2 SNPs each side, inside tract_flank_bp).
+    # Below peak_min_share of them the call is capped at "review". q8 SYNv1
+    # simulations (min-run 1): the four real 100 bp swaps called peak-only sat
+    # at 0.35-0.50; the four false calls (0- and 20-swap sets) at 0.10-0.26.
+    peak_min_share      = 0.30,
+    # Each side of a peak-only event is widened past tract_flank_bp, within
+    # its HET token, until it holds this many SNPs (see .peak_only_read_check).
+    peak_flank_snps     = 5L
   )
 }
 
@@ -4582,35 +4594,93 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
 #  After scanning all chains, collect unclaimed LOH tokens and peaks.
 # =============================================================================
 
-# A crossover with no tract switches every molecule that spans it, both
-# homologs alike, so in a diploid HET region reads that keep one homolog
-# across the peak count against it (cf. .outcome_gate for CO_GC). Both zones
-# lie inside the HET token holding the peak, which keeps neighbouring events
-# out of them. With outcome_min_reads switched + same-homolog reads and a
-# switched share below co_min_recomb_frac, the call is capped at "review".
-# Spo11-88 chrII 128,479: 25 of 25 reads spanning +/-15 kb kept their homolog.
-.crossover_read_check <- function(ev, chain, full_read_loh, params) {
-  if (is.null(full_read_loh) || is.null(chain)) return(ev)
-  pos <- ev$start
-  hit <- Filter(function(t) identical(t$type, "H") && !is.na(t$start) &&
-                  t$start < pos && pos < t$end, chain$tokens)
-  if (!length(hit)) return(ev)
-  h  <- hit[[1]]
+# Reads spanning a peak-only event (reconcile()), weighed against the call.
+#
+# The spanning reads are those with >= min_snps_for_peak SNPs on each side of
+# the event. Each side's zone reaches tract_flank_bp, or further when needed to
+# take in the nearest peak_flank_snps SNPs: a fixed bp window finds nothing
+# beside a SNP gap. SPO11-28 (SRR37680460, sac_bq7) chrXV 544,353 is the first
+# SNP after an 11.4 kb gap; +/-10 kb held no SNP on the left and counted 0
+# spanning reads, while 17 span it with the gap crossed (16 switched). When the
+# event sits inside a HET token the zones stop at the token's ends, which
+# keeps neighbouring events out of them; otherwise (e.g. a phase-rescued
+# island, which is itself a fixed token) only the SNP count extends them.
+#
+# With fewer than outcome_min_reads spanning reads the read columns stay NA
+# and no cap applies: too few reads to weigh the call either way.
+#
+# Crossovers (CROSSOVER_NO_TRACT, CO_GC_subres): a crossover switches every
+# molecule that spans it, both homologs alike, so in a diploid HET region
+# reads that keep one homolog count against it (cf. .outcome_gate for CO_GC).
+# n_tract_switch / n_tract_parental are the switched / same-homolog spanning
+# reads; with outcome_min_reads of them and a switched share below
+# co_min_recomb_frac the call is capped at "review". Spo11-88 chrII 128,479:
+# 25 of 25 reads spanning +/-15 kb kept their homolog.
+#
+# Conversions (NCO_GC_subres): no tract allele is fixed at the site, so the
+# spanning reads cannot be sorted into returns by count_tract_junction_reads.
+# n_tract_return is the peak's own supporting reads (n_support) and
+# n_tract_parental the spanning reads left over. A conversion on one homolog
+# shows in about half the spanning reads; with outcome_min_reads spanning
+# reads and a share below peak_min_share the call is capped at "review".
+.peak_only_read_check <- function(ev, chain, full_read_loh, params) {
+  if (is.null(full_read_loh)) return(ev)
+  is_co <- ev$event_class %in% c("CROSSOVER_NO_TRACT", "CO_GC_subres")
+  s  <- as.integer(ev$start)
+  e  <- as.integer(ev$end)
   fb <- as.integer(params$tract_flank_bp %||% 10000L)
+  lo <- s - fb
+  hi <- e + fb
+  k  <- as.integer(params$peak_flank_snps %||% 5L)
+  snp <- sort(unique(full_read_loh[as.character(chrom) == ev$chrom, pos]))
+  sl <- snp[snp < s]
+  sr <- snp[snp > e]
+  if (length(sl)) lo <- min(lo, sl[max(1L, length(sl) - k + 1L)])
+  if (length(sr)) hi <- max(hi, sr[min(length(sr), k)])
+  hit <- if (is.null(chain)) list() else
+    Filter(function(t) identical(t$type, "H") && !is.na(t$start) &&
+             t$start < s && e < t$end, chain$tokens)
+  if (length(hit)) {
+    lo <- max(hit[[1]]$start, lo)
+    hi <- min(hit[[1]]$end, hi)
+  }
   cnt <- count_tract_junction_reads(
-    full_read_loh, chain$chrom, tract_start = pos, tract_end = pos,
-    left_start  = max(h$start, pos - fb), left_end  = pos - 1L,
-    right_start = pos + 1L,               right_end = min(h$end, pos + fb),
+    full_read_loh, ev$chrom, tract_start = s, tract_end = e,
+    left_start  = lo,     left_end  = s - 1L,
+    right_start = e + 1L, right_end = hi,
     min_snps = as.integer(params$min_snps_for_peak %||% 2L))
-  n_swi <- cnt$n_switch
-  n_par <- cnt$n_spanning - cnt$n_switch
-  if (n_swi + n_par < as.integer(params$outcome_min_reads %||% 4L)) return(ev)
-  rf <- n_swi / (n_swi + n_par)
-  ev$notes <- paste0(ev$notes, "; ", n_swi, " switched vs ", n_par,
-                     " same-homolog spanning reads")
-  if (rf < as.numeric(params$co_min_recomb_frac %||% 0.5)) {
-    ev$confidence_cap <- "review"
-    ev$notes <- paste0(ev$notes, " (switched share ", sprintf("%.2f", rf), ")")
+  n_span   <- as.integer(cnt$n_spanning)
+  min_rd   <- as.integer(params$outcome_min_reads %||% 4L)
+  if (n_span < min_rd) {
+    ev$notes <- paste0(ev$notes, "; ", n_span, " spanning reads (too few to weigh)")
+    return(ev)
+  }
+
+  if (is_co) {
+    n_swi <- as.integer(cnt$n_switch)
+    n_par <- n_span - n_swi
+    ev$n_tract_switch   <- n_swi
+    ev$n_tract_parental <- n_par
+    rf <- n_swi / n_span
+    ev$notes <- paste0(ev$notes, "; ", n_swi, " switched vs ", n_par,
+                       " same-homolog spanning reads")
+    if (rf < as.numeric(params$co_min_recomb_frac %||% 0.5)) {
+      ev$confidence_cap <- "review"
+      ev$notes <- paste0(ev$notes, " (switched share ", sprintf("%.2f", rf), ")")
+    }
+  } else {
+    n_sup <- as.integer(ev$n_support %||% NA_integer_)
+    if (is.na(n_sup)) return(ev)
+    ev$n_tract_return   <- n_sup
+    ev$n_tract_parental <- max(n_span - n_sup, 0L)
+    sh <- n_sup / n_span
+    ev$notes <- paste0(ev$notes, "; ", n_sup, " of ", n_span,
+                       " spanning reads show the conversion (share ",
+                       sprintf("%.2f", sh), ")")
+    if (sh < as.numeric(params$peak_min_share %||% 0.30)) {
+      ev$confidence_cap <- "review"
+      ev$notes <- paste0(ev$notes, " < peak_min_share")
+    }
   }
   ev
 }
@@ -4849,7 +4919,21 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
 
   uncat_peak_events   <- list()
   still_unclaimed_pks <- list()
+  min_span_rc <- as.integer(params$min_span %||% 3L)
   for (u in unclaimed_peaks) {
+    # A self-classifying peak's count is its own reads showing the pattern.
+    # classify_tract() reads a 0 or NA count as "no pair count available" and
+    # trusts the label, so a peak whose pooled consensus was typed
+    # internal_crossover (a window that is HET throughout) with no read
+    # switching across it became a CROSSOVER_NO_TRACT. Without min_span such
+    # reads there is no event here.
+    if (isTRUE(u$edge_type %in% c("gene_conversion", "internal_crossover")) &&
+        (is.null(u$n_read_support) || is.na(u$n_read_support) ||
+         u$n_read_support < min_span_rc)) {
+      u$reason <- "low_peak_support"
+      still_unclaimed_pks <- c(still_unclaimed_pks, list(u))
+      next
+    }
     tract <- classify_tract(list(best_edge_type = u$edge_type,
                                  n_spanning = u$n_read_support,
                                  n_spanning_kind = u$n_read_support_kind), params)
@@ -4872,9 +4956,11 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         length_bp = as.integer(ev_en - ev_st), n_support = tract$n_support,
         support_kind = if (is.na(tract$n_support %||% NA_integer_)) "none"
                        else tract$support_kind %|NA|% "unspecified",
-        # A fused group's constituents are its junctions, lowest first; a
-        # single peak is one junction, reported on the left.
-        n_junction_L = as.integer(u$sub_ns[1]),
+        # A fused group's constituents are its junctions, lowest first. A
+        # single peak is the event itself, so its count is n_support and the
+        # junction columns stay empty rather than repeat it.
+        n_junction_L = if (length(u$sub_ns) > 1L) as.integer(u$sub_ns[1])
+                       else NA_integer_,
         n_junction_R = if (length(u$sub_ns) > 1L) as.integer(u$sub_ns[length(u$sub_ns)])
                        else NA_integer_,
         n_tract_switch = NA_integer_, n_tract_return = NA_integer_,
@@ -4885,11 +4971,9 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
         evidence = "peak_only",
         notes = .append_phase_note(ev_notes, u$phase_switch_frac %||% NA_real_),
         tokens = list())))
-      if (identical(ev_class, "CROSSOVER_NO_TRACT")) {
-        k <- length(uncat_peak_events)
-        uncat_peak_events[[k]] <- .crossover_read_check(uncat_peak_events[[k]],
-                                    chains[[u$chrom]], full_read_loh, params)
-      }
+      k <- length(uncat_peak_events)
+      uncat_peak_events[[k]] <- .peak_only_read_check(uncat_peak_events[[k]],
+                                  chains[[u$chrom]], full_read_loh, params)
     } else {
       u$reason <- tract$reason
       still_unclaimed_pks <- c(still_unclaimed_pks, list(u))
