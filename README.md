@@ -347,7 +347,7 @@ The three `n_tract_*` columns are NA when the call has no single tract (or run /
 
 `support_kind` values:
 
-- **Peak window**: `junction_switch` (reads switching across one junction peak), `gc_pattern` (reads showing flank–tract–flank), `snp_boundary` (chimeric reads with a run boundary at an untyped peak's SNP), `phase_switch` / `phase_spanning` (an undefined peak rescued by read phasing: switching reads for a crossover, all spanning reads for an NCO), `pair_spanning` (classifiable reads across a peak pair, whichever way they voted)
+- **Peak window**: `junction_switch` (reads switching across one junction peak), `gc_pattern` (reads showing flank–tract–flank), `snp_boundary` (chimeric reads with a run boundary at an untyped peak's SNP), `phase_switch` / `phase_return` (an undefined peak rescued by read phasing: switching reads for a crossover, returning reads for an NCO), `pair_spanning` (classifiable reads across a peak pair, whichever way they voted)
 - **Combined peaks**: `sum:<kinds>` (two junction counts added) or `min:<kinds>` (the smaller of them)
 - **Tract**: `tract_switch`, `tract_return`, `tract_mixed` (switch + return), `tract_spanning` (every read crossing both junctions, informative or not), `parental`
 - **Other**: `deletion` (reads deleted across the tract), `unphased_shared` (reads crossing both junctions of a fragment with no phase information), `state_reads` (reads carrying a sub-floor fragment's allele)

@@ -1504,7 +1504,7 @@ TRACT_SUPPORT_KINDS <- c("tract_switch", "tract_return", "tract_mixed", "parenta
     evidence          = evidence,
     notes             = notes,
     # What n_support counts: a peak kind (junction_switch, gc_pattern,
-    # snp_boundary, phase_switch, phase_spanning, pair_spanning, optionally
+    # snp_boundary, phase_switch, phase_return, pair_spanning, optionally
     # combined as "sum:" / "min:"), a tract kind (tract_switch, tract_return,
     # tract_mixed, tract_spanning, parental), deletion, unphased_shared,
     # state_reads or none. Kinds in TRACT_SUPPORT_KINDS are gated by
@@ -4615,6 +4615,15 @@ scan_chain <- function(chain, params, rules = MOTIF_RULES) {
   ev
 }
 
+# Phase-rescue columns of a peak table under reconcile()'s short names, NA
+# when the table predates them.
+.add_phase_cols <- function(dt) {
+  dt[, isl_s := if ("phase_island_start" %in% names(dt)) as.integer(phase_island_start) else NA_integer_]
+  dt[, isl_e := if ("phase_island_end"   %in% names(dt)) as.integer(phase_island_end)   else NA_integer_]
+  dt[, ph_frac := if ("phase_switch_frac" %in% names(dt)) as.numeric(phase_switch_frac) else NA_real_]
+  invisible(dt)
+}
+
 reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
                       snp_peaks = NULL, params = default_chain_params(),
                       loh_snps = NULL, full_read_loh = NULL) {
@@ -4710,7 +4719,8 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     fp[, ns_col := if ("n_read_support" %in% names(fp)) n_read_support else NA_integer_]
     fp[, nk_col := if ("n_read_support_kind" %in% names(fp)) n_read_support_kind else NA_character_]
     fp[, sp_col := if ("snp_pos" %in% names(fp)) as.numeric(snp_pos) else as.numeric(pos_col)]
-    fp[, .(chrom, pos_col, et_col, ns_col, nk_col, sp_col)]
+    .add_phase_cols(fp)
+    fp[, .(chrom, pos_col, et_col, ns_col, nk_col, sp_col, isl_s, isl_e, ph_frac)]
   } else if (!is.null(snp_peaks) && nrow(snp_peaks) > 0) {
     sp <- copy(snp_peaks)
     sp[, chrom := as.character(chrom)]
@@ -4721,7 +4731,8 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
     sp[, ns_col  := if ("n_read_support" %in% names(sp)) n_read_support else NA_integer_]
     sp[, nk_col  := if ("n_read_support_kind" %in% names(sp)) n_read_support_kind else NA_character_]
     sp[, sp_col  := as.numeric(pos_col)]
-    sp[, .(chrom, pos_col, et_col, ns_col, nk_col, sp_col)]
+    .add_phase_cols(sp)
+    sp[, .(chrom, pos_col, et_col, ns_col, nk_col, sp_col, isl_s, isl_e, ph_frac)]
   } else {
     NULL
   }
@@ -4756,7 +4767,10 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
           },
           # Each constituent's position and own count, for the junction columns.
           sub_pos = list(sp_col[order(sp_col)]),
-          sub_ns  = list(as.integer(ns_col[order(sp_col)]))),
+          sub_ns  = list(as.integer(ns_col[order(sp_col)])),
+          isl_s   = if (all(is.na(isl_s))) NA_integer_ else min(isl_s, na.rm = TRUE),
+          isl_e   = if (all(is.na(isl_e))) NA_integer_ else max(isl_e, na.rm = TRUE),
+          ph_frac = if (all(is.na(ph_frac))) NA_real_ else max(ph_frac, na.rm = TRUE)),
       by = .(chrom, pos_col)]
   }
 
@@ -4774,6 +4788,12 @@ reconcile <- function(scan_results, chains, fused_peaks, peak_pairs,
           edge_type      = peak_source_for_reconcile$et_col[ri],
           n_read_support = peak_source_for_reconcile$ns_col[ri],
           n_read_support_kind = peak_source_for_reconcile$nk_col[ri] %||% NA_character_,
+          # Read-phasing rescue evidence (classify_peak_haplotype): the excised
+          # island the event is reported over, and the switch fraction for the
+          # notes. Without these a rescued peak became a point event.
+          phase_island_start = peak_source_for_reconcile$isl_s[ri],
+          phase_island_end   = peak_source_for_reconcile$isl_e[ri],
+          phase_switch_frac  = peak_source_for_reconcile$ph_frac[ri],
           sub_pos        = if ("sub_pos" %in% names(peak_source_for_reconcile))
                              peak_source_for_reconcile$sub_pos[[ri]] else pos,
           sub_ns         = if ("sub_ns" %in% names(peak_source_for_reconcile))

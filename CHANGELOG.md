@@ -28,8 +28,41 @@ peaks `n_spanning_kind` (`pair_spanning`, or the peak's own kind when it never
 paired). The internal `tract_reads` / `parental_reads` labels are replaced by
 the finer kinds; `build_event_table()` gates on `TRACT_SUPPORT_KINDS`.
 
-No call, `n_support` value or confidence changes: across 50 test_data runs
-(min-run 1 and 2) every pre-existing column matches 0.9.3.
+Labelling alone changes no call, `n_support` value or confidence: across 50
+test_data runs (min-run 1 and 2) every pre-existing column matched 0.9.3
+before the phase-rescue change below.
+
+### Phase-rescue NCO needs returning reads
+
+`resolve_undefined_by_phase()` called an undefined peak's fixed island NCO
+whenever its spanning reads did not switch homolog (switch fraction <= 0.2),
+and reported every spanning read as support (`phase_spanning`). A low switch
+fraction only rules out a crossover. At min-run 1, single SNPs fixed in the
+consensus raise peaks of their own, and the rescue turned them into
+`NCO_GC_subres` calls by the hundred on SRR_5006 and Qi Spo11, nearly all
+rated high.
+
+- **Returning reads required.** Non-switching reads are now split into
+  returning (the other allele on both flanks, the island allele across it) and
+  parental (the island allele throughout), with the same in-island test as
+  `count_tract_junction_reads()`. NCO needs `min_return` (2) returning reads
+  making up `min_return_frac` (0.2) of the non-switching ones. Support is the
+  returning reads (`phase_return`). Of the 328 rescued islands in the noisy
+  runs, 156 had no returning read and 15 had under 10%; the rest sat at
+  20-60%, as do the SYNv3 ground-truth tracts. Peaks carry `phase_n_return`
+  and `phase_n_parental`.
+- **reconcile() keeps the island.** Peak-only events now get the rescued
+  island span and the `phase_switch_frac=` note. The peak table `reconcile()`
+  built had neither field, so every rescued event was a point with no note.
+
+The returning-read test does not separate a one-SNP conversion from a SNP that
+is not heterozygous in the cross: both read as half returning, half parental.
+
+Across the 50 runs, `NCO_GC_subres` drops from 484 to 387 (high 463 -> 365),
+all in SRR_5006 and Qi Spo11. Chain calls change only around formerly rescued
+peaks in those runs, mostly `GC_UNRESOLVED` review rows. RAD5 calls at min-run
+2 and the SYNv3 calls are unchanged; elsewhere only `n_junction_*` values and
+rescued-event spans or notes move.
 
 ## [0.9.3] - 2026-11-02
 

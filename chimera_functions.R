@@ -2261,7 +2261,9 @@ classify_run_pattern <- function(runs) {
 #
 #     switch fraction >= switch_hi, both directions -> reciprocal crossover
 #     switch fraction >= switch_hi, one direction   -> one-sided crossover
-#     switch fraction <= switch_lo (flanks agree)   -> gene conversion (NCO)
+#     switch fraction <= switch_lo (flanks agree) and
+#       >= min_return reads returning across it,
+#       >= min_return_frac of the non-switching    -> gene conversion (NCO)
 #     otherwise                                     -> stays undefined
 #
 #   Requires full_read_loh (ALL reads, not just the already-chimeric rt_df) so
@@ -2282,11 +2284,14 @@ classify_run_pattern <- function(runs) {
 #   (e.g. a fixed tract merely abutting a HET region) is NOT rescued.
 #
 #   Returns NULL when no rescue applies (caller keeps the undefined label),
-#   otherwise list(label, n_support, phase_call, phase_frac, phase_n,
+#   otherwise list(label, n_support, support_kind, phase_call, phase_frac,
+#   phase_n, phase_n_return, phase_n_parental,
 #   island_state, island_start, island_end).
 # ---------------------------------------------------------------------------
 resolve_undefined_by_phase <- function(chr_name, full_read_loh, win_start, win_end,
-                                       zone_min_snps, min_span, switch_hi, switch_lo) {
+                                       zone_min_snps, min_span, switch_hi, switch_lo,
+                                       min_return = 2L, min_return_frac = 0.20,
+                                       match_frac = 0.80) {
   if (is.null(full_read_loh)) return(NULL)
 
   fr <- full_read_loh[as.character(chrom) == chr_name &
@@ -2315,9 +2320,15 @@ resolve_undefined_by_phase <- function(chr_name, full_read_loh, win_start, win_e
   isl_state <- sv[k]
 
   # ── Phase every spanning read: left-flank vs right-flank majority allele ──
+  # n_in / n_isl: the read's SNPs inside the island, and how many of them carry
+  # the island's allele -- the positive in-tract test count_tract_junction_reads()
+  # applies to a return.
+  isl_is_ref <- identical(isl_state, "REF")
   ph <- fr[, .(
     L = classify_zone_state(pos, IS_REF, win_start,    isl_start - 1L, zone_min_snps),
-    R = classify_zone_state(pos, IS_REF, isl_end + 1L, win_end,        zone_min_snps)
+    R = classify_zone_state(pos, IS_REF, isl_end + 1L, win_end,        zone_min_snps),
+    n_in  = sum(pos >= isl_start & pos <= isl_end),
+    n_isl = sum(pos >= isl_start & pos <= isl_end & as.logical(IS_REF) == isl_is_ref)
   ), by = read_id][!is.na(L) & !is.na(R)]
 
   n_span <- nrow(ph)
@@ -2328,17 +2339,43 @@ resolve_undefined_by_phase <- function(chr_name, full_read_loh, win_start, win_e
   n_RtoA   <- sum(ph$L == "REF" & ph$R == "ALT")
   n_AtoR   <- sum(ph$L == "ALT" & ph$R == "REF")
 
+  # Non-switching reads split by which homolog they are. A conversion leaves
+  # the converted homolog's reads RETURNING: the other allele on both flanks,
+  # the island's allele across it. The donor homolog's reads are PARENTAL: the
+  # island's allele throughout. In a diploid the two should be roughly equal.
+  #
+  # A low switch fraction alone only rules out a crossover. At min-run 1 a
+  # single SNP fixed in the consensus raises a peak of its own (every read
+  # covering it flips), and the rescue called these NCO by the hundred on
+  # SRR_5006 and Qi Spo11, each with every spanning read as its support. Of
+  # the 328 such islands across those runs, 156 had no returning read at all
+  # and 15 had under 10% returning; the
+  # rest sat at 20-60%, as do the SYNv3 ground-truth tracts (0.45, 0.46). So
+  # an NCO needs min_return returning reads making up min_return_frac of the
+  # non-switching ones.
+  #
+  # This does NOT separate a one-SNP conversion from a SNP that is not
+  # actually heterozygous in the cross: both put the island allele on both
+  # homologs, and both read as half returning, half parental.
+  in_ok      <- ph$n_in > 0L & ph$n_isl >= match_frac * ph$n_in
+  same       <- ph$L == ph$R
+  n_return   <- sum(same & ph$L != isl_state & in_ok)
+  n_parental <- sum(same & ph$L == isl_state & in_ok)
+
   mk <- function(label, support, kind, call)
     list(label = label, n_support = support, support_kind = kind, phase_call = call,
-         phase_frac = frac, phase_n = n_span, island_state = isl_state,
+         phase_frac = frac, phase_n = n_span, phase_n_return = as.integer(n_return),
+         phase_n_parental = as.integer(n_parental), island_state = isl_state,
          island_start = as.integer(isl_start), island_end = as.integer(isl_end))
 
   if (frac >= switch_hi) {
     mk("internal_crossover", n_switch, "phase_switch",
        if (n_RtoA > 0L && n_AtoR > 0L) "crossover (reciprocal)"
        else                            "crossover (one-sided)")
-  } else if (frac <= switch_lo) {
-    mk("gene_conversion", n_span, "phase_spanning", "gene_conversion (NCO)")
+  } else if (frac <= switch_lo && n_return >= min_return &&
+             n_return >= min_return_frac * (n_return + n_parental)) {
+    # Support is the reads that show the conversion, not every spanning read.
+    mk("gene_conversion", n_return, "phase_return", "gene_conversion (NCO)")
   } else {
     NULL   # ambiguous switch fraction -- leave undefined
   }
@@ -2660,6 +2697,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
   phase_call   <- NA_character_
   phase_frac   <- NA_real_
   phase_n      <- NA_integer_
+  phase_n_return   <- NA_integer_
+  phase_n_parental <- NA_integer_
   island_state <- NA_character_
   island_start <- NA_integer_
   island_end   <- NA_integer_
@@ -2674,6 +2713,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
       phase_call   <- rescue$phase_call
       phase_frac   <- rescue$phase_frac
       phase_n      <- rescue$phase_n
+      phase_n_return   <- rescue$phase_n_return
+      phase_n_parental <- rescue$phase_n_parental
       island_state <- rescue$island_state
       island_start <- rescue$island_start
       island_end   <- rescue$island_end
@@ -2691,6 +2732,8 @@ classify_peak_haplotype <- function(pk, chr_name, rt_df, touching_ids,
     phase_call   = phase_call,
     phase_frac   = phase_frac,
     phase_n      = phase_n,
+    phase_n_return   = phase_n_return,
+    phase_n_parental = phase_n_parental,
     island_state = island_state,
     island_start = island_start,
     island_end   = island_end
@@ -3560,6 +3603,8 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
   if (!"n_read_support_kind" %in% names(out)) out[, n_read_support_kind := NA_character_]
   if (!"phase_call"         %in% names(out)) out[, phase_call         := NA_character_]
   if (!"phase_switch_frac"  %in% names(out)) out[, phase_switch_frac  := NA_real_]
+  if (!"phase_n_return"     %in% names(out)) out[, phase_n_return     := NA_integer_]
+  if (!"phase_n_parental"   %in% names(out)) out[, phase_n_parental   := NA_integer_]
   if (!"phase_island_start" %in% names(out)) out[, phase_island_start := NA_integer_]
   if (!"phase_island_end"   %in% names(out)) out[, phase_island_end   := NA_integer_]
   if (!"label_min_run"      %in% names(out)) out[, label_min_run      := NA_integer_]
@@ -3592,6 +3637,8 @@ label_snp_peaks_haplotypes <- function(snp_peaks, rt_df, transition_pos,
         n_read_support_kind = .hap$support_kind %||% NA_character_,
         phase_call         = .hap$phase_call   %||% NA_character_,
         phase_switch_frac  = .hap$phase_frac   %||% NA_real_,
+        phase_n_return     = .hap$phase_n_return   %||% NA_integer_,
+        phase_n_parental   = .hap$phase_n_parental %||% NA_integer_,
         phase_island_start = .hap$island_start %||% NA_integer_,
         phase_island_end   = .hap$island_end   %||% NA_integer_,
         label_min_run      = .hap$label_min_run %||% NA_integer_

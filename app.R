@@ -1196,6 +1196,8 @@ server <- function(input, output, session) {
             n_read_support_kind = hap$support_kind %||% NA_character_,
             phase_call         = hap$phase_call   %||% NA_character_,
             phase_switch_frac  = hap$phase_frac   %||% NA_real_,
+            phase_n_return     = hap$phase_n_return   %||% NA_integer_,
+            phase_n_parental   = hap$phase_n_parental %||% NA_integer_,
             phase_island_start = hap$island_start %||% NA_integer_,
             phase_island_end   = hap$island_end   %||% NA_integer_
           )
