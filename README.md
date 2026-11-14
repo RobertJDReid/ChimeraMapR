@@ -17,7 +17,7 @@ The core input is a CSV of per-read base calls at biallelic SNP positions extrac
 - Detects chimeric reads where allele identity switches and is sustained across consecutive SNPs
 - Creates an **overview per-chromosome plot** (counts + curve fit + peak markers), with aneuploid chromosomes shaded by estimated ploidy
 - Reports a **peak summary table** (positions, boundaries, heights, and haplotype classification)
-- Classifies each peak's underlying read pattern (`binary`, `compound_binary`, `gene_conversion`, `internal_crossover`, `undefined`) from the run of REF/ALT calls spanning it. At Minimum Run Length 1, an `undefined` peak is re-typed at run length 2 and keeps that label only if it resolves as a binary edge with at least Min Peak Height reads, so a single flipped SNP inside a tract does not hide the tract's edge
+- Classifies each peak's underlying read pattern (`binary`, `compound_binary`, `gene_conversion`, `internal_crossover`, `undefined`) from the run of REF/ALT calls spanning it. At Minimum Run Length 1, an `undefined` peak is re-typed at run length 2 and keeps that label only if it resolves as a binary edge with at least Min Peak Height reads, so a single flipped SNP inside a tract does not hide the tract's edge. When such a peak is paired with its neighbour, the pair's reads are also re-smoothed at run length 2 before the pair is typed, so one-SNP base errors at both peaks do not make the unconverted homolog look like it switched
 - **Peak fusion**: evaluates adjacent peak pairs by shared-read Jaccard similarity and haplotype signature, auto-fusing, flagging for supervised review, or keeping independent as appropriate
 - **LOH region calling**: a beta-binomial EM + Viterbi HMM (compiled C++ via Rcpp) segments each chromosome into REF-fixed / ALT-fixed / heterozygous tracts
 - **Recombination event classification**: a rule-based chain analysis combines LOH tracts and peak calls to label each event (crossover, terminal crossover, gene conversion, one-sided/ambiguous, etc.) with a confidence level, surfaced in the **Recombination Events** tab
@@ -351,6 +351,8 @@ The three `n_tract_*` columns are NA when the call has no single tract (or run /
 - Crossovers: `n_tract_switch` and `n_tract_parental` are the spanning reads that switch homolog or keep it. A switched share below `co_min_recomb_frac` (0.5) caps the call at review.
 - The notes give the count and share.
 - `n_junction_L` / `n_junction_R` are left empty for a single peak, whose count is already `n_support`.
+
+**Two binary junction peaks whose pair cannot be typed** (`pair_edge:ambiguous`, `pair_edge:unresolvable`, or the peaks never paired) take their call from the reads crossing the whole tract, by the same tests as the tract-read rule: enough spanning reads must be informative (`tract_read_min_frac`) and the informative ones must agree (`homog_frac`). Returns give NCO_GC and switches CO_GC (`support_kind` `tract_return` / `tract_switch`, and the notes name the pair outcome). Otherwise the call stays AMBIGUOUS or GC_UNRESOLVED.
 
 A gene_conversion or internal_crossover peak with fewer than `min_span` supporting reads makes no event and stays in the unclaimed peaks (`low_peak_support`).
 
