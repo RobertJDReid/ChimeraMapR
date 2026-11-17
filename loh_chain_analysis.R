@@ -4016,8 +4016,19 @@ rule_two_binary_flanking <- list(
     # that cross the whole tract, as R10 and R11c do. Without this an R11
     # match outranked R11c and turned a tract whose spanning reads plainly
     # returned into AMBIGUOUS / GC_UNRESOLVED.
+    #
+    # low_coverage and pair_edge:independent_events are the same situation on
+    # a crossover tract at --min-run 1. A real crossover read switches at one
+    # junction only, so the reads chimeric at BOTH peaks are mostly one-SNP
+    # base errors: unsmoothed they read as no-return patterns
+    # (independent_events), and once compute_peak_pairs() re-smooths a
+    # fallback-typed pair at min-run 2 almost none survive (low_coverage).
+    # Neither says anything about the tract; its both-junction reads do
+    # (SYNv10 co20 2 kb Q10 seed 10, chrXI 571,474-573,172: 32 switched,
+    # 0 parental, was AMBIGUOUS).
     if (isTRUE(tract$reason %in% c("pair_edge:ambiguous", "pair_edge:unresolvable",
-                                   "binary_no_pair"))) {
+                                   "binary_no_pair", "low_coverage",
+                                   "pair_edge:independent_events"))) {
       rd <- .tract_read_outcome(m$f_tok, params)
       if (!is.null(rd)) {
         call         <- rd$call
