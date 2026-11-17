@@ -1,6 +1,6 @@
 ![ChimeraMapR](images/logo.png)
 
-_version 0.9.5_
+_version 0.9.6_
 
 An interactive **R Shiny app** for identifying **haplotype switches** in long-read DNA sequencing data, by tracking allele changes across known SNP positions, summarizing where chimeric reads cluster along each chromosome using Whittaker smoothing and peak detection, and classifying the underlying recombination events (crossovers, terminal crossovers, gene conversions) from the resulting LOH structure.
 
@@ -352,7 +352,7 @@ The three `n_tract_*` columns are NA when the call has no single tract (or run /
 - The notes give the count and share.
 - `n_junction_L` / `n_junction_R` are left empty for a single peak, whose count is already `n_support`.
 
-**Two binary junction peaks whose pair cannot be typed** (`pair_edge:ambiguous`, `pair_edge:unresolvable`, or the peaks never paired) take their call from the reads crossing the whole tract, by the same tests as the tract-read rule: enough spanning reads must be informative (`tract_read_min_frac`) and the informative ones must agree (`homog_frac`). Returns give NCO_GC and switches CO_GC (`support_kind` `tract_return` / `tract_switch`, and the notes name the pair outcome). Otherwise the call stays AMBIGUOUS or GC_UNRESOLVED.
+**Two binary junction peaks whose pair cannot be typed** (`pair_edge:ambiguous`, `pair_edge:unresolvable`, `pair_edge:independent_events`, fewer than `min_span` pair reads (`low_coverage`), or the peaks never paired) take their call from the reads crossing the whole tract, by the same tests as the tract-read rule: enough spanning reads must be informative (`tract_read_min_frac`) and the informative ones must agree (`homog_frac`). Returns give NCO_GC and switches CO_GC (`support_kind` `tract_return` / `tract_switch`, and the notes name the pair outcome). Otherwise the call stays AMBIGUOUS or GC_UNRESOLVED.
 
 A gene_conversion or internal_crossover peak with fewer than `min_span` supporting reads makes no event and stays in the unclaimed peaks (`low_peak_support`).
 

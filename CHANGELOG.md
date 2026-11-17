@@ -4,6 +4,52 @@ All notable changes to ChimeraMapR are recorded here. Version numbers follow
 `APP_VERSION` in `chimera_functions.R`, which is the single source of truth
 read by `app.R` and `chimera_cli.R`.
 
+## [0.9.6] - 2026-11-17
+
+### R11: crossover tracts at min-run 1 take their call from the tract reads
+
+At `--min-run 1`, interstitial crossover tracts of 0.5-2 kb in the simulated CO
+ladder (20 per genome) went AMBIGUOUS at 2-10% (Q8-12), against 0.1-0.4% in
+0.9.1. In 0.9.1 these tracts were called CO_GC by R11c. Since the 0.9.3 label
+fallback, both junction peaks are typed "binary", so R11 claims the tract
+first. The pair could not settle it:
+
+- A crossover read switches at one junction only. The reads chimeric at both
+  peaks are mostly one-SNP base errors, which read as no-return patterns
+  (`pair_edge:independent_events`, 0.9.3-0.9.4).
+- Once 0.9.5 re-smooths a fallback-typed pair at min-run 2, almost none of
+  those reads survive. The pair then falls below `min_span` (`low_coverage`).
+
+**R11 `two_binary_flanking`** now also defers to the tract's both-junction
+reads (`.tract_read_outcome()`, R11c's tests) for these two reasons. The
+pair-typing code (`compute_peak_pairs()`, `is_loh_crossover_mode`, the
+re-smooth) is unchanged.
+
+SYNv10 co20 2 kb Q10 seed 10, chrXI:
+
+| tract | 0.9.5 | 0.9.6 |
+|---|---|---|
+| 269,930-271,624 | AMBIGUOUS(pair_edge:independent_events) | CO_GC, 37 switched / 0 parental |
+| 571,474-573,172 | AMBIGUOUS(low_coverage) | CO_GC, 32 / 0 |
+| 586,620-586,937 | AMBIGUOUS(pair_edge:independent_events) | CO_GC, 16 / 9 |
+| 602,774-604,582 | AMBIGUOUS(low_coverage) | CO_GC, 33 / 0 |
+
+These values were derived from the 0.9.5 event tables, not from a rerun (see
+the commit message).
+
+Across the 0.9.5 simulation store (6,280 event tables), 202 R11 rows carry one
+of the two reasons. All of them are in CO-truth sets, and none is in an
+NCO-truth set:
+
+- 201 become CO_GC (191 at min-run 1, 10 at min-run 2-4), with 8-56
+  switched reads. Every one overlaps a true crossover tract.
+- 1 has no tract reads and stays AMBIGUOUS.
+
+`.tract_read_outcome()` has no read-count floor of its own. A tract with
+1 switched, 0 returning and fewer than `outcome_min_reads` switched + parental
+reads becomes CO_GC on that one read. It is rated `review`
+(`tract_read_high_min`), as R11c already does for the same counts.
+
 ## [0.9.5] - 2026-11-13
 
 ### Fallback-typed junction peaks: pair edges read at the same resolution
