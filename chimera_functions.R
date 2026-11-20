@@ -4125,8 +4125,12 @@ compute_peak_pairs <- function(snp_peaks,
   peaks_dt[, fusion_group := peak_id]
 
   if (nrow(auto_edges) > 0) {
-    if (!requireNamespace("igraph", quietly = TRUE))
+    if (!requireNamespace("igraph", quietly = TRUE)) {
+      if (nzchar(system.file(package = "igraph")))
+        stop("Package 'igraph' is installed but could not be loaded (a system library is probably ",
+             "missing; on Debian/Ubuntu: apt-get install libglpk40 libxml2). It is required for peak fusion.")
       stop("Package 'igraph' is required for peak fusion. Install with: install.packages('igraph')")
+    }
     g <- igraph::graph_from_data_frame(
       d        = auto_edges[, .(from = peak_id_a, to = peak_id_b)],
       directed = FALSE,
