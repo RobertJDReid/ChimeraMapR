@@ -326,6 +326,18 @@ run_chain <- opts[["chain-all"]] || "events" %in% wanted
 if (run_chain && is.null(chain_found))
   stop("--events-table / --chain-all requires loh_chain_analysis.R but it was not found next to chimera_functions.R")
 
+# The chain step needs igraph for peak fusion. Check it loads now rather than
+# failing partway through a run (after the peak list has already been written).
+if (run_chain) {
+  ig_err <- tryCatch({ loadNamespace("igraph"); NULL },
+                     error = function(e) conditionMessage(e))
+  if (!is.null(ig_err))
+    stop("--events-table / --chain-all requires the R package 'igraph', which could not be loaded:\n  ",
+         ig_err,
+         "\nIf igraph is installed, a system library is probably missing ",
+         "(on Debian/Ubuntu: apt-get install libglpk40 libxml2).", call. = FALSE)
+}
+
 
 # ── Resolve output paths ──────────────────────────────────────────────────────
 OUTPUT_SUFFIX <- c(plot   = ".png",

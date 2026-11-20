@@ -56,8 +56,28 @@ _note: shiny must be ≥ 1.12.0 to avoid a region selection bug for individual c
 Install packages in R:
 
 ```r
-install.packages(c("shiny", "data.table", "ggplot2", "pracma", "Matrix", "Rcpp", "igraph", "optparse"))
+install.packages(c("shiny", "data.table", "ggplot2", "pracma", "Matrix", "Rcpp", "igraph", "optparse", "patchwork", "R.utils"))
 ```
+
+**Linux:** the igraph binary needs the GLPK and libxml2 system libraries. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install libglpk40 libxml2
+```
+
+Without them igraph installs but fails to load, and the events table / chain analysis cannot run.
+
+### Docker (command-line interface)
+
+A `Dockerfile` is included for running the CLI in a Linux container (R 4.5.1, all packages and system libraries preinstalled):
+
+```bash
+docker build -t chimeramapr .
+docker run --rm -v "$(pwd):/data" chimeramapr \
+  -o /data/results/ /data/reads.csv.gz /data/snps.vcf.gz /data/genome.fasta.fai
+```
+
+In Windows PowerShell, use `-v "${PWD}:/data"` instead of `$(pwd)`. All paths given to the CLI must be inside the mounted `/data` folder.
 
 ---
 
@@ -123,6 +143,7 @@ Layer extra outputs on top of the flags above.
 | `--del-block-min-bp BP` | `500` | Minimum bp span for such a hemizygous-deletion block |
 | `--del-block-read-coherence FLOAT` | `0.50` | Minimum fraction of a block's deletion calls that must come from reads deleted across the block, rather than scattered single-position misalignments |
 | `--min-run INT` | `2` | Minimum consecutive same-allele calls to count as a run. At `1`, peaks left `undefined` are re-tried at `2` (see the peak classification note above) |
+| `--min-run-snps INT` | `2` | Minimum consecutive same-state SNPs for an LOH run to survive as its own segment; shorter runs between identical flanks are absorbed as flicker. Independent of `--min-run`: `1` lets a single HOM SNP stand as a fixed tract, `2` requires a 2-SNP tract |
 | `--min-peak-height INT` | `5` | Minimum transition count at a SNP to qualify as a peak. Must be at least 1 |
 | `--min-peak-frac FLOAT` | `0.25` | Relative cutoff: a SNP qualifies as a peak when its transition count reaches `max(--min-peak-height, ceiling(FLOAT × spanning depth))`, where spanning depth is the number of reads at that SNP with `--min-run` SNPs on each side (see the note below). Must be between 0 and 1, with a warning above 0.5. `0` disables it |
 | `-l, --lambda FLOAT` | `1` | Whittaker smoothing penalty λ (lower = tighter fit) |
